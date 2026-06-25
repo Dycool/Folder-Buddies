@@ -99,9 +99,8 @@ struct WireStatvfs {
 struct Writer {
     std::vector<uint8_t> b;
     void raw(const void* p, size_t n) {
-        size_t s = b.size();
-        b.resize(s + n);
-        std::memcpy(b.data() + s, p, n);
+        auto* d = static_cast<const uint8_t*>(p);
+        b.insert(b.end(), d, d + n);
     }
     template <class T>
     void pod(const T& v) { raw(&v, sizeof(T)); }
