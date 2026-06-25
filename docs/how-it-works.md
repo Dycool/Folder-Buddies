@@ -44,9 +44,9 @@ handshake → HMAC-SHA256 → master secret
 
 The host never types a password. The connection metadata (IP, port, folder name, 256-bit data-path secret) is sealed into a share code in one of two forms:
 
-**6-character room code (Cloudflare)** — The code is split at character 2:
+**10-character room code (Cloudflare)** — The code is split at character 2:
 - **Lookup half** (chars 0-1, public) — the Cloudflare KV key.
-- **Secret half** (chars 2-5, never leaves the client).
+- **Secret half** (chars 2-9, never leaves the client).
 The KV value holds the metadata encrypted under `Argon2id(secret half)`. Cloudflare only stores the lookup key and an opaque blob — it never receives the IP, port, folder name, or secret half.
 
 If Cloudflare is unreachable or rate-limited, the client transparently falls back to **Firebase Realtime Database** using the same record format, then to the self-contained offline blob.
@@ -55,8 +55,8 @@ If Cloudflare is unreachable or rate-limited, the client transparently falls bac
 
 ```
                         ┌── lookup 2 chars → KV key
-6-char code ───────────┤
-                        └── secret 4 chars → Argon2id → wrap key
+10-char code ──────────┤
+                        └── secret 8 chars → Argon2id → wrap key
                                                   │
                                     decrypts blob key → decrypts token
 
@@ -65,7 +65,7 @@ Offline blob ─── Base91 decode ─── extract blob key ─── decryp
 
 ### libsodium / Argon2id
 
-The secret half of the 6-character code protects the wrapped blob key with **Argon2id** (3 iterations, 64 MiB memory, 16-byte salt). This makes brute-forcing the 26-bit secret half expensive while keeping the online path fast for legitimate clients. The webapp uses the same parameters via `@noble/hashes` so both sides derive identical wrap keys.
+The secret half of the 10-character code protects the wrapped blob key with **Argon2id** (3 iterations, 64 MiB memory, 16-byte salt). This makes brute-forcing the ~52-bit secret half expensive while keeping the online path fast for legitimate clients. The webapp uses the same parameters via `@noble/hashes` so both sides derive identical wrap keys.
 
 ---
 

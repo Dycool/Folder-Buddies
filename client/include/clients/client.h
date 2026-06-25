@@ -43,7 +43,9 @@ private:
         std::thread reader;
         std::mutex wmtx;
         std::mutex pmtx;
-        std::unordered_map<uint64_t, Pending*> pend;
+        // Owned via shared_ptr so a reply (or a timed-out request) can never free
+        // a Pending out from under the other thread mid-write/notify.
+        std::unordered_map<uint64_t, std::shared_ptr<Pending>> pend;
         std::atomic<uint64_t> nextId{1};
         std::atomic<bool> alive{false};
         SecureChannel chan; // sealed after the handshake; tx under wmtx, rx in readerLoop

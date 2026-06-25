@@ -4,14 +4,14 @@ Static browser client for GitHub Pages. The UI has two tabs, **Host** and
 **Connect**, plus a status bar showing live transfer rates.
 
 - **Host** — pick a folder, optionally allow writes, optionally cap the number
-  of clients, then press *Host*. The app claims a free 6-character room on the
+  of clients, then press *Host*. The app claims a free 10-character room on the
   primary Cloudflare relay and shows the **connect code**.
 - **Connect** — paste the connect code or share link, press *Connect & browse*,
   and the remote file explorer opens inline. Selected files stream over a WebRTC
   DataChannel.
 
-The 6-character code is split into a public 2-char relay-room half and a secret
-4-char half. The browser derives the WebRTC signaling-encryption key from the
+The 10-character code is split into a public 2-char relay-room half and a secret
+8-char half. The browser derives the WebRTC signaling-encryption key from the
 secret half with Argon2id (vendored, audited `@noble/hashes` in `webapp/vendor/`),
 so relays see only opaque encrypted offers/answers and never learn the addresses
 exchanged. Note that the WebRTC DataChannel's own DTLS uses the browser's
@@ -21,7 +21,7 @@ classical key exchange, which is not post-quantum.
 
 The browser tries signaling in this order:
 
-1. **Cloudflare Worker WebSocket** — the normal 6-character room flow.
+1. **Cloudflare Worker WebSocket** — the normal 10-character room flow.
 2. **Firebase Realtime Database** — optional automatic fallback if the public
    Firebase web config is present in `webapp/config.js` / GitHub Pages variables.
 3. **Manual offline WebRTC offer/answer** — giant copy/paste codes, used only if

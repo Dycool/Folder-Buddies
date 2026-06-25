@@ -3,8 +3,8 @@
 The Worker exposes only:
 
 - `POST /create`
-- `GET /room?code=<6-char Base91>`
-- `DELETE /room?code=<6-char Base91>`
+- `GET /room?code=<2-char lookup>`
+- `DELETE /room?code=<2-char lookup>`
 
 Native app mode uses KV: the **public 2-char lookup half** of the code is the key, and the value is an opaque sealed record (the connection metadata plus a key wrapped under `Argon2id` of the *secret* half of the code, which never reaches Cloudflare). It never stores plaintext IP, port, folder name, filesystem secret, or the secret half of the code. Deletes are gated by a random owner token (`X-FB-Owner`).
 
@@ -101,8 +101,8 @@ Two recommendations are zone settings that must be toggled in the Cloudflare das
 The static webapp connects to:
 
 ```text
-wss://<worker-host>/room?code=<6-char-room>&role=host&web=1
-wss://<worker-host>/room?code=<6-char-room>&role=client&web=1
+wss://<worker-host>/room?code=<2-char lookup>&role=host&web=1
+wss://<worker-host>/room?code=<2-char lookup>&role=client&web=1
 ```
 
 The Durable Object sees only the public lookup half, peer IDs, and opaque encrypted signaling blobs. SDP offers/answers are encrypted in the browser with a key derived (via Argon2id) from the secret half of the code before being sent to Cloudflare. Actual folder data moves over WebRTC DataChannel directly between browsers.

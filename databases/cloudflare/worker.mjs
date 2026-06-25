@@ -23,7 +23,7 @@ const MAX_CLIENTS_PER_ROOM = 8;
 const MAX_WS_MESSAGES_PER_SOCKET = 250;
 
 const SECURITY_CONTACT = "https://github.com/Dycool/Folder-Buddies/security/advisories/new";
-const SECURITY_POLICY = "https://github.com/Dycool/Folder-Buddies/blob/main/SECURITY.md";
+const SECURITY_POLICY = "https://github.com/Dycool/Folder-Buddies/blob/main/docs/SECURITY.md";
 
 const AI_BOT_RE = /(GPTBot|ChatGPT-User|OAI-SearchBot|CCBot|ClaudeBot|Claude-Web|anthropic-ai|Google-Extended|Applebot-Extended|PerplexityBot|Perplexity-User|Amazonbot|Bytespider|Bytedance|Diffbot|FacebookBot|Meta-ExternalAgent|ImagesiftBot|Omgili|YouBot|cohere-ai|Timpibot|PetalBot|DataForSeoBot|magpie-crawler|Scrapy|AI2Bot|Webzio)/i;
 

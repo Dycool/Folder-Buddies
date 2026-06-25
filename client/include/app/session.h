@@ -13,7 +13,7 @@
 
 namespace fb {
 
-// Start sharing `folder`. The returned ticket contains either a 6-character
+// Start sharing `folder`. The returned ticket contains either a 10-character
 // Cloudflare room code or, if the Worker is unavailable/quota-exhausted, a long
 // self-contained offline Base91 blob. Neither requires a separate password.
 bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int port,

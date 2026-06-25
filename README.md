@@ -8,7 +8,7 @@
 
 🔒 **End-to-end encrypted** — Every filesystem byte after the handshake is sealed with ChaCha20-Poly1305.
 
-👥 **No password to type** — Share a 6-character code or a self-contained offline blob. The client splits, fetches, and unwraps everything locally.
+👥 **No password to type** — Share a 10-character code or a self-contained offline blob. The client splits, fetches, and unwraps everything locally.
 
 🌐 **Works everywhere** — Native Linux FUSE, Windows ProjFS, macOS FUSE-T, and a browser-based webapp for quick access.
 
@@ -19,7 +19,7 @@
 🖥️ **CLI + GUI** — Both interfaces expose the same host/connect flow.
 
 > **Pre-compiled Binaries Available!**
-> You can download the desktop client for Windows, macOS, and Linux directly from the **[Releases](https://github.com/anomalyco/Folder-Buddies/releases)** page.
+> You can download the desktop client for Windows, macOS, and Linux directly from the **[Releases](https://github.com/Dycool/Folder-Buddies/releases)** page.
 >
 > The webapp is published via GitHub Pages — no client install needed for browser-to-browser access.
 
@@ -31,7 +31,7 @@
 ```
 folderbuddies host /path/to/folder [--lan] [--port N] [--max-clients N]
 ```
-This prints either a **6-character room code** (Cloudflare) or a **long offline blob**. Share one with the client.
+This prints either a **10-character room code** (Cloudflare) or a **long offline blob**. Share one with the client.
 
 **2. 🔗 Connect using just that code**
 ```
@@ -50,7 +50,7 @@ The host seals connection metadata (IP, port, folder name, 256-bit session secre
 
 | Method | How it works |
 |---|---|
-| **6-char code** | Public 2-char lookup half → Cloudflare KV. Secret 4-char half never leaves the client. The KV value stores metadata wrapped under `Argon2id(secret half)`. |
+| **10-char code** | Public 2-char lookup half → Cloudflare KV. Secret 8-char half never leaves the client. The KV value stores metadata wrapped under `Argon2id(secret half)`. |
 | **Offline blob** | Self-contained Base91 string with its own 256-bit key. No server needed. |
 
 Cloudflare stores only the lookup half and an opaque encrypted record — never the IP, port, folder name, data-path secret, or secret half of the code.
@@ -133,7 +133,7 @@ Detailed guides are in the `docs/` folder:
 
 ## 🐛 Reporting Issues
 
-Found a bug or have a feature request? Open an issue **[here](https://github.com/dycool/Folder-Buddies/issues)** with as much detail as possible (OS, reproduction steps, relevant logs).
+Found a bug or have a feature request? Open an issue **[here](https://github.com/Dycool/Folder-Buddies/issues)** with as much detail as possible (OS, reproduction steps, relevant logs).
 
 ---
 

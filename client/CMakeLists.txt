@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(FolderBuddies LANGUAGES CXX)
+project(FolderBuddies VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -235,7 +235,7 @@ target_link_libraries(folderbuddies PRIVATE ${FB_SODIUM_TARGET})
 install(TARGETS folderbuddies RUNTIME DESTINATION bin BUNDLE DESTINATION .)
 install(FILES src/icons/icon.png DESTINATION share/icons/hicolor/1024x1024/apps RENAME folderbuddies.png)
 install(FILES src/folderbuddies.desktop DESTINATION share/applications)
-install(FILES src/folderbuddies.appdata.xml DESTINATION share/metainfo)
+install(FILES src/dev.folderbuddies.app.metainfo.xml DESTINATION share/metainfo)
 
 # ---- Crypto/Base91 self-test (no external deps; runs in CI) ---------------
 option(FB_BUILD_TESTS "Build the crypto self-test" ON)

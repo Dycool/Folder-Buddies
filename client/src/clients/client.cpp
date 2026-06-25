@@ -3,6 +3,7 @@
 #include "auth.h"
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 
 namespace fb {
@@ -37,11 +38,16 @@ static socket_t connect_socket(const std::string& ip, uint16_t port, std::string
 
 bool Client::handshake(Conn& c, const Token& tok, std::string& err) {
     std::vector<uint8_t> nonceC = random_bytes(16);
+    // Send only a hash of the folder name, never the literal: the HELLO is the
+    // one pre-encryption frame, so a passive observer must not learn the share's
+    // display name from it. The server checks the same SHA-256 over its own name.
+    QByteArray folderHash =
+        QCryptographicHash::hash(QByteArray::fromStdString(tok.folder), QCryptographicHash::Sha256);
     Writer w;
     uint32_t version = kProtocolVersion;
     w.pod(version);
     w.raw(clientId_, 16);
-    w.str(tok.folder);
+    w.raw(folderHash.constData(), 32);
     w.raw(nonceC.data(), 16);
     if (!send_message(c.sock, OP_HELLO, 0, 1, w.b.data(), static_cast<uint32_t>(w.b.size()))) {
         err = "handshake send failed";
@@ -118,13 +124,13 @@ void Client::readerLoop(Conn* c) {
     MsgHeader h;
     std::vector<uint8_t> payload;
     while (c->alive.load() && c->chan.recv(c->sock, h, payload)) {
-        Pending* p = nullptr;
+        std::shared_ptr<Pending> p;
         {
             std::lock_guard<std::mutex> lk(c->pmtx);
             auto it = c->pend.find(h.req_id);
-            if (it != c->pend.end()) p = it->second;
+            if (it != c->pend.end()) p = it->second; // shared_ptr copy keeps it alive
         }
-        if (!p) continue;
+        if (!p) continue; // unknown or already-timed-out request id
         {
             std::lock_guard<std::mutex> lk(p->m);
             p->status = h.status;
@@ -137,7 +143,7 @@ void Client::readerLoop(Conn* c) {
     c->alive = false;
     std::lock_guard<std::mutex> lk(c->pmtx);
     for (auto& kv : c->pend) {
-        Pending* p = kv.second;
+        auto& p = kv.second;
         std::lock_guard<std::mutex> pl(p->m);
         p->status = EIO;
         p->done = true;
@@ -151,10 +157,15 @@ int Client::request(uint16_t op, const std::vector<uint8_t>& payload, std::vecto
     if (!c->alive.load()) return EIO;
 
     uint64_t id = c->nextId.fetch_add(1);
-    Pending p;
+    auto p = std::make_shared<Pending>();
     {
         std::lock_guard<std::mutex> lk(c->pmtx);
-        c->pend[id] = &p;
+        // readerLoop sets alive=false before failing every pending request under
+        // pmtx. Re-checking alive inside this same lock closes the race where the
+        // reader already drained pending: a registration arriving afterwards would
+        // otherwise never be woken and wait() would block forever.
+        if (!c->alive.load()) return EIO;
+        c->pend[id] = p;
     }
 
     bool sent;
@@ -169,16 +180,20 @@ int Client::request(uint16_t op, const std::vector<uint8_t>& payload, std::vecto
         return EIO;
     }
 
+    // Bounded wait: a peer that accepts the request but never answers must not
+    // wedge the caller (and, through it, the FUSE/ProjFS thread) forever.
+    bool done;
     {
-        std::unique_lock<std::mutex> lk(p.m);
-        p.cv.wait(lk, [&] { return p.done; });
+        std::unique_lock<std::mutex> lk(p->m);
+        done = p->cv.wait_for(lk, std::chrono::seconds(10), [&] { return p->done; });
     }
-    int status = p.status;
-    resp = std::move(p.data);
     {
         std::lock_guard<std::mutex> lk(c->pmtx);
         c->pend.erase(id);
     }
+    if (!done) return EIO; // timed out; reader keeps its own shared_ptr ref if mid-flight
+    int status = p->status;
+    resp = std::move(p->data);
     return status;
 }
 

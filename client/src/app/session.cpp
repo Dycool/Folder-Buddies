@@ -120,7 +120,7 @@ bool remove_published_room(const HostedShareTicket& ticket, std::string& err) {
 
 bool resolve_share_code(const std::string& codeOrBlob, Token& tok, std::string& err) {
     if (codeOrBlob.rfind("FBS2:", 0) == 0 || codeOrBlob.rfind("FBW2O:", 0) == 0 || codeOrBlob.rfind("FBW2A:", 0) == 0) {
-        err = "that is a web-browser WebRTC code. Native clients need a 6-character native room code or native offline Base91 blob.";
+        err = "that is a web-browser WebRTC code. Native clients need a 10-character native room code or native offline Base91 blob.";
         return false;
     }
     if (looks_like_room_code(codeOrBlob)) {

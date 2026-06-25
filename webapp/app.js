@@ -4,7 +4,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   "use strict";
 
   const BASE91 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+,-./:;<=>?@[]^_`{|}~";
-  const ROOM_LEN = 6;
+  const ROOM_LEN = 10;
   const LOOKUP_LEN = 2;          // public half: the Durable Object room name
   const ARGON = { t: 3, m: 65536, p: 1, dkLen: 32 }; // matches libsodium in the native app
   const BIN_MAGIC = 0x4642494e; // FBIN
@@ -15,7 +15,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
   const TEXT_PREVIEW_MAX = 4 * 1024 * 1024;
   const WEB_OFFLINE_OFFER_PREFIX = "FBW2O:";
   const WEB_OFFLINE_ANSWER_PREFIX = "FBW2A:";
-  const WEB_SECURE_CODE_PREFIX = "FBS2:";
   const FIREBASE_SDK_VERSION = "10.12.5";
 
   const $ = (id) => document.getElementById(id);
@@ -26,7 +25,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     browseFolder: $("browseFolder"),
     maxClients: $("maxClients"),
     allowWrites: $("allowWrites"),
-    secureHash: $("secureHash"),
     shareToggle: $("shareToggle"),
     connectCode: $("connectCode"),
     copyAll: $("copyAll"),
@@ -64,12 +62,12 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   const state = {
     rootHandle: null,
-    code: "",          // full 6-char code
+    code: "",          // full 10-char code
     lookup: "",        // public half (relay room)
-    secureSecret: "",  // optional high-entropy web secret for secure-hash mode
+    secureSecret: "",  // always "" (reserved; the secure-hash long-code option was removed)
     connectToken: "",  // what the host shows/copies to clients
     pendingConnectToken: "", // hidden token loaded from URL hashes/direct links
-    rootBase: null,    // HKDF base key derived from the secret half or secureSecret
+    rootBase: null,    // HKDF base key derived from the secret half of the code
     maxClients: 0,
     allowWrites: false,
     clientCanWrite: false,
@@ -366,10 +364,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return text.length === ROOM_LEN && [...text].every((c) => BASE91.includes(c));
   }
 
-  function isSecureWebCode(text) {
-    return clean(text).startsWith(WEB_SECURE_CODE_PREFIX);
-  }
-
   function lookupOf(code) { return code.slice(0, LOOKUP_LEN); }
   function keyPartOf(code) { return code.slice(LOOKUP_LEN); }
 
@@ -381,10 +375,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function randomRoom() {
     return [...randomBytes(ROOM_LEN)].map((b) => BASE91[b % BASE91.length]).join("");
-  }
-
-  function randomSecureSecret() {
-    return base91Encode(randomBytes(32));
   }
 
   function concatBytes(...parts) {
@@ -474,35 +464,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
   }
 
-  function encodeSecureWebCode(code, secret) {
-    return WEB_SECURE_CODE_PREFIX + base91Encode(te.encode(JSON.stringify({
-      v: 1,
-      type: "web-secure-code",
-      code,
-      secret,
-    })));
-  }
-
-  function decodeSecureWebCode(text) {
-    const cleaned = clean(text);
-    if (!cleaned.startsWith(WEB_SECURE_CODE_PREFIX)) throw new Error("Invalid secure web code");
-    try {
-      const obj = JSON.parse(td.decode(base91Decode(cleaned.slice(WEB_SECURE_CODE_PREFIX.length))));
-      if (obj?.v !== 1 || obj?.type !== "web-secure-code" || !looksLikeRoom(obj.code) || typeof obj.secret !== "string" || obj.secret.length < 20) {
-        throw new Error("malformed secure web code");
-      }
-      return obj;
-    } catch (e) {
-      throw new Error(`Invalid secure web code: ${e.message}`);
-    }
-  }
-
   function resolveConnectToken(raw, options = {}) {
     const codeOrToken = parseJoinInput(raw, options);
-    if (isSecureWebCode(codeOrToken)) {
-      const s = decodeSecureWebCode(codeOrToken);
-      return { code: s.code, lookup: lookupOf(s.code), secureSecret: s.secret, token: codeOrToken };
-    }
     if (looksLikeRoom(codeOrToken)) return { code: codeOrToken, lookup: lookupOf(codeOrToken), secureSecret: "", token: codeOrToken };
     return { code: codeOrToken, lookup: "", secureSecret: "", token: codeOrToken };
   }
@@ -588,7 +551,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const room = params.get("r") || "";
     const file = params.get("f") || "";
     const folder = params.get("p") || params.get("d") || "";
-    if (looksLikeRoom(room) || isSecureWebCode(room)) {
+    if (looksLikeRoom(room)) {
       state.pendingConnectToken = room;
       const directFile = file ? normalizePath(file) : "";
       const directFolder = folder ? normalizePath(folder) : "";
@@ -1543,7 +1506,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     els.browseFolder.disabled = running;
     els.maxClients.disabled = running;
     if (els.allowWrites) els.allowWrites.disabled = running;
-    if (els.secureHash) els.secureHash.disabled = running;
     els.copyAll.disabled = !running;
     if (els.offlineAnswerRow) els.offlineAnswerRow.hidden = !(running && state.manualHost);
     if (!running) {
@@ -1555,10 +1517,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function wantsWriteAccess() {
     return !!els.allowWrites?.checked;
-  }
-
-  function wantsSecureHash() {
-    return !!els.secureHash?.checked;
   }
 
   async function pickFolder() {
@@ -1583,15 +1541,12 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (state.allowWrites) await assertHostWritable();
 
     try {
-      const secure = wantsSecureHash();
-      const preferredCode = secure ? randomRoom() : "";
-      const secureSecret = secure ? randomSecureSecret() : "";
-      const { code, lookup, ws } = await openHostSignal(preferredCode);
+      const { code, lookup, ws } = await openHostSignal("");
       state.code = code;
       state.lookup = lookup;
-      state.secureSecret = secureSecret;
-      state.connectToken = secure ? encodeSecureWebCode(code, secureSecret) : code;
-      state.rootBase = await deriveRootBase(code, secureSecret);
+      state.secureSecret = "";
+      state.connectToken = code;
+      state.rootBase = await deriveRootBase(code);
       state.hostWs = ws;
       ws.onmessage = (event) => {
         try { handleHostSignal(JSON.parse(event.data)).catch((e) => toast(e.message)); }
@@ -1603,9 +1558,9 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const cloudError = e.message;
       state.code = randomRoom();
       state.lookup = lookupOf(state.code);
-      state.secureSecret = wantsSecureHash() ? randomSecureSecret() : "";
-      state.connectToken = state.secureSecret ? encodeSecureWebCode(state.code, state.secureSecret) : state.code;
-      state.rootBase = await deriveRootBase(state.code, state.secureSecret);
+      state.secureSecret = "";
+      state.connectToken = state.code;
+      state.rootBase = await deriveRootBase(state.code);
       state.hostWs = null;
       const offerCode = await createManualHostOffer();
       els.connectCode.value = offerCode;
@@ -1657,7 +1612,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
     const resolved = resolveConnectToken(raw, { preserveDirect: !rawInput && !!state.pendingConnectToken });
     if (isWebOfflineOffer(resolved.token)) return connectManualOffer(resolved.token);
-    if (!looksLikeRoom(resolved.code)) throw new Error("The browser client accepts 6-character web room codes/share links, secure web codes, or FBW2O offline web offer codes. Native IP/port blobs are for the native app.");
+    if (!looksLikeRoom(resolved.code)) throw new Error("The browser client accepts 10-character web room codes/share links or FBW2O offline web offer codes. Native IP/port blobs are for the native app.");
 
     setConnectStatus("Connecting…");
     state.code = resolved.code;

@@ -217,10 +217,15 @@ bool Server::handshake(socket_t s, std::string& clientId, SecureChannel& chan) {
     Reader r(payload.data(), payload.size());
     uint32_t version;
     uint8_t cid[16];
-    std::string folder;
+    uint8_t folderHash[32];
     uint8_t nonceC[16];
-    if (!r.pod(version) || !r.raw(cid, 16) || !r.str(folder) || !r.raw(nonceC, 16)) return false;
-    if (version != kProtocolVersion || folder != shareName) {
+    if (!r.pod(version) || !r.raw(cid, 16) || !r.raw(folderHash, 32) || !r.raw(nonceC, 16)) return false;
+    // The client sends SHA-256 of the folder name rather than the name itself, so
+    // the cleartext HELLO never carries the share's display name. Compare hashes.
+    QByteArray expectFolder =
+        QCryptographicHash::hash(QByteArray::fromStdString(shareName), QCryptographicHash::Sha256);
+    if (version != kProtocolVersion || expectFolder.size() != 32 ||
+        std::memcmp(folderHash, expectFolder.constData(), 32) != 0) {
         send_message(s, OP_AUTH_FAIL, 0, h.req_id, nullptr, 0);
         return false;
     }

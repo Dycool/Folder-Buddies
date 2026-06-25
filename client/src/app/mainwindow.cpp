@@ -283,7 +283,7 @@ QWidget* MainWindow::buildShareTab() {
     writeCheck_ = new QCheckBox("Allow clients to upload and delete files");
     form->addRow("Access:", writeCheck_);
 
-    secureHashCheck_ = new QCheckBox("Secure hash code (long code; stronger secret than 6 chars)");
+    secureHashCheck_ = new QCheckBox("Secure hash code (long code; stronger secret than the 10-char code)");
     form->addRow("Security:", secureHashCheck_);
 
     shareButton_ = new QPushButton("Host");

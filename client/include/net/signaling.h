@@ -3,7 +3,7 @@
 // The host seals the connection Token (ip/port/folder/data-path secret) once.
 // The data-path secret is delivered to the client without the client ever typing
 // a password: either embedded in a long offline blob, or wrapped behind the
-// secret half of a short 6-char code that Cloudflare never receives.
+// secret half of a short 10-char code that Cloudflare never receives.
 #pragma once
 
 #include "token.h"
@@ -12,9 +12,9 @@
 
 namespace fb {
 
-constexpr int kRoomCodeLength = 6;
+constexpr int kRoomCodeLength = 10;
 constexpr int kLookupLen = 2;   // public half: the Cloudflare KV key
-constexpr int kKeyPartLen = 4;  // secret half: never sent to Cloudflare
+constexpr int kKeyPartLen = 8;  // secret half: never sent to Cloudflare (~52-bit)
 constexpr int kRoomTtlSeconds = 30 * 24 * 60 * 60;
 
 struct HostedShareTicket {

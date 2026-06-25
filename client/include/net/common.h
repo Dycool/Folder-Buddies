@@ -31,6 +31,12 @@ constexpr uint32_t kProtocolVersion = 2; // v2: post-handshake ChaCha20-Poly1305
 constexpr uint32_t kMaxIO = 1u << 20;   // 1 MiB read/write chunk
 constexpr int kDefaultConns = 4;        // parallel TCP streams per client
 
+// Upper bound for an unauthenticated, plaintext handshake frame. recv_message()
+// is only used before the SecureChannel is active (HELLO/CHALLENGE/AUTH), all of
+// which are well under 1 KiB. Capping the advertised length stops an unauthed
+// peer from triggering a multi-gigabyte allocation with a single forged header.
+constexpr uint32_t kMaxHandshakeMsg = 64u * 1024;
+
 // Operation codes. Auth ops < 10, filesystem ops >= 10.
 enum Op : uint16_t {
     OP_HELLO = 1,
@@ -204,6 +210,7 @@ inline bool net_startup() {
 inline bool recv_message(socket_t s, MsgHeader& h, std::vector<uint8_t>& payload) {
     if (!recv_all(s, &h, sizeof(h))) return false;
     if (h.magic != kMagic) return false;
+    if (h.length > kMaxHandshakeMsg) return false; // reject oversized pre-auth frames
     payload.resize(h.length);
     if (h.length && !recv_all(s, payload.data(), h.length)) return false;
     return true;

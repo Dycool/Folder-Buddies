@@ -42,7 +42,7 @@ void print_usage() {
           << "      --max-clients <n>   limit distinct clients (default: unlimited)\n"
           << "      --write             allow clients to upload, edit, and delete files\n"
           << "      --secure-hash       skip Cloudflare/Firebase and print the long offline code\n"
-          << "      (prints a 6-char room code; if Cloudflare/Firebase are unavailable,\n"
+          << "      (prints a 10-char room code; if Cloudflare/Firebase are unavailable,\n"
           << "       prints a long self-contained offline Base91 blob instead)\n\n"
           << "  folderbuddies connect <room-code-or-offline-blob> [options]\n"
           << "      --mount <dir>       base mount directory (default: ~/FolderBuddies)\n"
