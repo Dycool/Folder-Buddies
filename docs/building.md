@@ -22,7 +22,7 @@ Folder Buddies uses **CMake ≥ 3.21** with **Ninja** as the preferred generator
 
 ```sh
 sudo apt-get install -y cmake ninja-build pkg-config qt6-base-dev \
-    libfuse3-dev libminiupnpc-dev libsodium-dev
+    libfuse3-dev fuse3 libminiupnpc-dev libsodium-dev
 
 cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
@@ -62,14 +62,17 @@ The Windows backend uses the native **Projected File System (ProjFS)** which shi
 ## macOS
 
 ```sh
-brew install cmake ninja qt6 miniupnpc libsodium
+brew install cmake ninja pkg-config qt@6 miniupnpc libsodium
+brew tap macos-fuse-t/homebrew-cask || true
+brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t
 
 cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release \
+  -DFB_MACOS_FUSE_BACKEND=fuse-t \
   -DFUSET_PKG=/path/to/FUSE-T.pkg
 cmake --build build
 ```
 
-macOS uses **FUSE-T** (preferred) or macFUSE for the mount backend. FUSE-T is auto-detected if installed via Homebrew (`brew install --cask fuse-t`).
+macOS uses **FUSE-T** for the mount backend by default. A macFUSE fallback is only allowed when configuring with `-DFB_MACOS_FUSE_BACKEND=auto` or `macfuse`, which keeps release builds from accidentally linking against the wrong backend.
 
 ### Notarization
 
@@ -100,6 +103,7 @@ cmake --build build/cloudflare-core
 |---|---|---|
 | `-DFB_SIGNALING_URL=<url>` | — | Hardcode your Worker endpoint into the build |
 | `-DFB_FIREBASE_DATABASE_URL=<url>` | — | Hardcode Firebase fallback endpoint |
+| `-DFB_MACOS_FUSE_BACKEND=<fuse-t|auto|macfuse>` | `fuse-t` | Select the macOS FUSE backend; release builds should use FUSE-T |
 | `-DFUSET_PKG=<path>` | — | Bundle a FUSE-T installer inside the macOS `.app` |
 | `-DFB_CODESIGN_IDENTITY=<name>` | — | Developer ID identity for macOS codesigning |
 | `-DFB_BUILD_TESTS=ON` | ON | Build the crypto + signaling self-tests |

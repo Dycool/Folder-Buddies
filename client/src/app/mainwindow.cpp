@@ -42,19 +42,140 @@ static double perSec(uint64_t cur, uint64_t& last) {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Folder Buddies");
-    auto* tabs = new QTabWidget(this);
+
+    auto* tabs = new QTabWidget;
     tabs->addTab(buildShareTab(), "Host");
     tabs->addTab(buildConnectTab(), "Connect");
-    setCentralWidget(tabs);
 
-    statsLabel_ = new QLabel("Idle", this);
+    auto* central = new QWidget;
+    auto* layout = new QVBoxLayout(central);
+    layout->setContentsMargins(16, 8, 16, 16);
+    layout->addWidget(tabs);
+    setCentralWidget(central);
+
+    statsLabel_ = new QLabel("Idle");
     statusBar()->addPermanentWidget(statsLabel_);
 
     statsTimer_ = new QTimer(this);
     connect(statsTimer_, &QTimer::timeout, this, &MainWindow::refreshStats);
     statsTimer_->start(500);
 
-    resize(560, 360);
+    resize(560, 400);
+
+    setStyleSheet(R"(
+        MainWindow {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                         stop:0 #dfe5ec, stop:1 #c7d0db);
+        }
+
+        QTabWidget::pane {
+            border: 1px solid #d4d4d7;
+            border-top: none;
+            border-bottom-left-radius: 10px;
+            border-bottom-right-radius: 10px;
+            background: #ffffff;
+        }
+
+        QTabBar::tab {
+            background: #e7e7e7;
+            border: 1px solid #d4d4d7;
+            border-bottom: none;
+            padding: 7px 18px;
+            border-top-left-radius: 7px;
+            border-top-right-radius: 7px;
+            color: #3a3a3c;
+            font-weight: 500;
+            min-width: 80px;
+        }
+
+        QTabBar::tab:selected {
+            background: #ffffff;
+            color: #1d1d1f;
+        }
+
+        QTabBar::tab:hover:!selected {
+            background: #efefef;
+        }
+
+        QLineEdit, QSpinBox {
+            border: 1px solid #c2c2c5;
+            border-radius: 5px;
+            padding: 6px 8px;
+            background: #ffffff;
+            color: #1d1d1f;
+        }
+
+        QLineEdit:focus, QSpinBox:focus {
+            border-color: #0a64d6;
+        }
+
+        QLineEdit[readOnly="true"] {
+            background: #f1f1f2;
+            color: #444444;
+        }
+
+        QPushButton {
+            border: 1px solid #c2c2c5;
+            border-radius: 6px;
+            padding: 6px 14px;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                         stop:0 #ffffff, stop:1 #efefef);
+            color: #1d1d1f;
+            font-weight: 500;
+        }
+
+        QPushButton:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                         stop:0 #ffffff, stop:1 #e8e8e8);
+        }
+
+        QPushButton:pressed {
+            background: #e1e1e1;
+        }
+
+        QPushButton:disabled {
+            color: #999999;
+        }
+
+        QPushButton#primaryButton {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                         stop:0 #0a64d6, stop:1 #0a58bd);
+            border-color: #0a58bd;
+            color: #ffffff;
+            font-weight: 600;
+            padding: 6px 18px;
+        }
+
+        QPushButton#primaryButton:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                         stop:0 #0f72e6, stop:1 #0a64d6);
+        }
+
+        QPushButton#primaryButton:pressed {
+            background: #0950a8;
+        }
+
+        QStatusBar {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                         stop:0 #f2f2f2, stop:1 #e6e6e6);
+            border-top: 1px solid #d4d4d7;
+            font-size: 12px;
+            color: #6e6e73;
+        }
+
+        QCheckBox {
+            spacing: 6px;
+        }
+
+        QLabel {
+            color: #6e6e73;
+        }
+
+        QLabel#statusLabel {
+            color: #1d1d1f;
+            font-weight: 500;
+        }
+    )");
 }
 
 MainWindow::~MainWindow() {
@@ -112,6 +233,7 @@ QWidget* MainWindow::buildShareTab() {
     form->addRow("", pwNote);
 
     shareButton_ = new QPushButton("Host");
+    shareButton_->setObjectName("primaryButton");
     connect(shareButton_, &QPushButton::clicked, this, &MainWindow::toggleShare);
     form->addRow("", shareButton_);
 
@@ -121,7 +243,7 @@ QWidget* MainWindow::buildShareTab() {
     tokenEdit_ = new QLineEdit;
     tokenEdit_->setReadOnly(true);
     tokenEdit_->setPlaceholderText("6-char room code or offline blob appears here");
-    copyButton_ = new QPushButton("Copy all");
+    copyButton_ = new QPushButton("Copy");
     copyButton_->setEnabled(false);
     connect(copyButton_, &QPushButton::clicked, this, &MainWindow::copyToken);
     tl->addWidget(tokenEdit_);
@@ -134,6 +256,7 @@ QWidget* MainWindow::buildShareTab() {
     form->addRow("Offline fallback:", offlineEdit_);
 
     shareStatus_ = new QLabel("Not hosting.");
+    shareStatus_->setObjectName("statusLabel");
     form->addRow("Status:", shareStatus_);
 
     w->setLayout(form);
@@ -164,6 +287,7 @@ QWidget* MainWindow::buildConnectTab() {
     form->addRow("Connections:", connsSpin_);
 
     connectButton_ = new QPushButton("Connect && mount");
+    connectButton_->setObjectName("primaryButton");
     connect(connectButton_, &QPushButton::clicked, this, &MainWindow::toggleConnect);
     form->addRow("", connectButton_);
 
@@ -173,6 +297,7 @@ QWidget* MainWindow::buildConnectTab() {
     form->addRow("", openButton_);
 
     connectStatus_ = new QLabel("Not connected.");
+    connectStatus_->setObjectName("statusLabel");
     form->addRow("Status:", connectStatus_);
 
     w->setLayout(form);

@@ -77,10 +77,16 @@ namespace fs = std::filesystem;
 
 bool backend_present() {
     const char* markers[] = {
-        "/Library/Filesystems/macfuse.fs",  // macFUSE
-        "/Library/Filesystems/fuse-t.fs",   // FUSE-T
+        "/Library/Filesystems/fuse-t.fs",
+        "/Library/Frameworks/fuse_t.framework",
+        "/Library/Frameworks/fuse-t.framework",
+        "/usr/local/lib/libfuse-t.dylib",
+        "/opt/homebrew/lib/libfuse-t.dylib",
+        // Fallback markers for developer builds when explicitly configured.
+        "/Library/Filesystems/macfuse.fs",
         "/usr/local/lib/libfuse.dylib",     "/usr/local/lib/libfuse.2.dylib",
-        "/usr/local/lib/libosxfuse.dylib",  "/usr/local/lib/libfuse-t.dylib",
+        "/usr/local/lib/libosxfuse.dylib",
+        "/opt/homebrew/lib/libfuse.dylib",  "/opt/homebrew/lib/libfuse.2.dylib",
     };
     std::error_code ec;
     for (const char* m : markers)
@@ -128,8 +134,8 @@ bool ensure_fuse_backend(std::string& err) {
 
     std::string installer = bundled_installer();
     if (installer.empty()) {
-        err = "No FUSE backend found and no bundled installer present. Install macFUSE "
-              "(https://macfuse.io) and try again.";
+        err = "No FUSE-T backend found and no bundled installer present. Install FUSE-T "
+              "with `brew install macos-fuse-t/homebrew-cask/fuse-t` and try again.";
         return false;
     }
 
@@ -168,7 +174,8 @@ bool ensure_fuse_backend(std::string& err) {
 } // namespace fb
 
 // ===========================================================================
-// Linux: libfuse is the prerequisite; the AppImage runtime already needs FUSE.
+// Linux: libfuse3/kernel FUSE is the prerequisite; packaging still needs the
+// AppImage runtime compatibility FUSE package on CI.
 // ===========================================================================
 #else
 
