@@ -40,13 +40,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep -q 'REPLACE_WITH_YOUR_KV_NAMESPACE_ID' cloudflare/wrangler.toml
-          grep -q 'REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID' cloudflare/wrangler.toml
-          if grep -Eq '^[[:space:]]*account_id[[:space:]]*=' cloudflare/wrangler.toml; then
+          grep -q 'REPLACE_WITH_YOUR_KV_NAMESPACE_ID' databases/cloudflare/wrangler.toml
+          grep -q 'REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID' databases/cloudflare/wrangler.toml
+          if grep -Eq '^[[:space:]]*account_id[[:space:]]*=' databases/cloudflare/wrangler.toml; then
             echo 'Do not commit Cloudflare account_id. Store it as CLOUDFLARE_ACCOUNT_ID in GitHub Secrets.' >&2
             exit 1
           fi
-          if grep -Eq '^[[:space:]]*(api_token|token)[[:space:]]*=' cloudflare/wrangler.toml; then
+          if grep -Eq '^[[:space:]]*(api_token|token)[[:space:]]*=' databases/cloudflare/wrangler.toml; then
             echo 'Do not commit Cloudflare API tokens. Store them as CLOUDFLARE_API_TOKEN in GitHub Secrets.' >&2
             exit 1
           fi
