@@ -1,4 +1,5 @@
-#define FUSE_USE_VERSION 31
+// Request FUSE 3.x API when available; fall back to FUSE 2 (macFUSE) otherwise.
+#define FUSE_USE_VERSION 30
 
 #include "fuse_fs.h"
 
@@ -8,6 +9,24 @@
 #include "osflags.h"
 
 #include <fuse.h>
+
+// After including fuse.h, detect the actual FUSE API version exposed by the
+// headers.  macFUSE (4.x) recognises FUSE_USE_VERSION 30 and provides most
+// FUSE 3 types, so we detect FUSE 2 by the absence of the FUSE 3-only symbol
+// FUSE_READDIR_PLUS (which is missing when macFUSE falls back to version 25
+// because 31 was unrecognised — though we now request 30, the check stays for
+// safety with older macFUSE releases).
+#ifndef FUSE_READDIR_PLUS
+#  define FB_FUSE2
+#endif
+
+// fuse_loop_mt signature: libfuse3 / FUSE-T accept a config pointer
+// (struct fuse_loop_config *), while macFUSE accepts only the fuse handle.
+// FUSE_MAJOR_VERSION is set to 3 by libfuse3-derived implementations but
+// NOT by macFUSE.  We use it to pick the right call.
+#ifndef FUSE_MAJOR_VERSION
+#  define FB_FUSE_LOOP_MT_1ARG
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -54,7 +73,11 @@ void fill_stat(FB_STAT& st, const WireAttr& a) {
 #endif
 }
 
+#ifndef FB_FUSE2
 int fs_getattr(const char* path, FB_STAT* stbuf, struct fuse_file_info*) {
+#else
+int fs_getattr(const char* path, FB_STAT* stbuf) {
+#endif
     Writer w;
     w.str(path);
     std::vector<uint8_t> resp;
@@ -67,8 +90,13 @@ int fs_getattr(const char* path, FB_STAT* stbuf, struct fuse_file_info*) {
     return 0;
 }
 
-int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, fb_off_t,
-               struct fuse_file_info*, enum fuse_readdir_flags rdflags) {
+#ifndef FB_FUSE2
+int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t,
+               struct fuse_file_info*, fuse_readdir_flags rdflags) {
+#else
+int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t,
+               struct fuse_file_info*) {
+#endif
     Writer w;
     w.str(path);
     std::vector<uint8_t> resp;
@@ -78,16 +106,19 @@ int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, fb_off_t,
     Reader r(resp.data(), resp.size());
     uint32_t n;
     if (!r.pod(n)) return -EIO;
-    auto none = static_cast<enum fuse_fill_dir_flags>(0);
-    filler(buf, ".", nullptr, 0, none);
-    filler(buf, "..", nullptr, 0, none);
+    filler(buf, ".", nullptr, 0, 0);
+    filler(buf, "..", nullptr, 0, 0);
     for (uint32_t i = 0; i < n; ++i) {
         std::string name;
         WireAttr a;
         if (!r.str(name) || !r.pod(a)) break;
         FB_STAT stbuf;
         fill_stat(stbuf, a);
-        auto fl = (rdflags & FUSE_READDIR_PLUS) ? FUSE_FILL_DIR_PLUS : none;
+#ifndef FB_FUSE2
+        auto fl = (rdflags & FUSE_READDIR_PLUS) ? FUSE_FILL_DIR_PLUS : 0;
+#else
+        auto fl = 0;
+#endif
         filler(buf, name.c_str(), &stbuf, 0, fl);
     }
     return 0;
@@ -202,7 +233,11 @@ int fs_mkdir(const char* path, fb_mode_t mode) {
     return st ? -st : 0;
 }
 
+#ifndef FB_FUSE2
 int fs_rename(const char* from, const char* to, unsigned int) {
+#else
+int fs_rename(const char* from, const char* to) {
+#endif
     Writer w;
     w.str(from);
     w.str(to);
@@ -211,7 +246,11 @@ int fs_rename(const char* from, const char* to, unsigned int) {
     return st ? -st : 0;
 }
 
-int fs_truncate(const char* path, fb_off_t size, struct fuse_file_info*) {
+#ifndef FB_FUSE2
+int fs_truncate(const char* path, off_t size, struct fuse_file_info*) {
+#else
+int fs_truncate(const char* path, off_t size) {
+#endif
     Writer w;
     w.str(path);
     uint64_t s = static_cast<uint64_t>(size);
@@ -252,7 +291,11 @@ int fs_access(const char* path, int mode) {
     return st ? -st : 0;
 }
 
-int fs_chmod(const char* path, fb_mode_t mode, struct fuse_file_info*) {
+#ifndef FB_FUSE2
+int fs_chmod(const char* path, mode_t mode, struct fuse_file_info*) {
+#else
+int fs_chmod(const char* path, mode_t mode) {
+#endif
     Writer w;
     w.str(path);
     uint32_t m = mode;
@@ -262,7 +305,11 @@ int fs_chmod(const char* path, fb_mode_t mode, struct fuse_file_info*) {
     return st ? -st : 0;
 }
 
-int fs_utimens(const char* path, const FB_TIMESPEC tv[2], struct fuse_file_info*) {
+#ifndef FB_FUSE2
+int fs_utimens(const char* path, const struct timespec tv[2], struct fuse_file_info*) {
+#else
+int fs_utimens(const char* path, const struct timespec tv[2]) {
+#endif
     Writer w;
     w.str(path);
     int64_t atime = tv ? tv[0].tv_sec : 0;
@@ -274,13 +321,16 @@ int fs_utimens(const char* path, const FB_TIMESPEC tv[2], struct fuse_file_info*
     return st ? -st : 0;
 }
 
+#ifndef FB_FUSE2
 void* fs_init(struct fuse_conn_info* conn, struct fuse_config* cfg) {
-    // Cache aggressively so most ops never hit the network.
     cfg->kernel_cache = 1;
     cfg->entry_timeout = 1.0;
     cfg->attr_timeout = 1.0;
     cfg->negative_timeout = 1.0;
     cfg->use_ino = 0;
+#else
+void* fs_init(struct fuse_conn_info* conn) {
+#endif
     conn->max_write = kMaxIO;
 #ifdef FUSE_CAP_WRITEBACK_CACHE
     if (conn->capable & FUSE_CAP_WRITEBACK_CACHE) conn->want |= FUSE_CAP_WRITEBACK_CACHE;
@@ -433,10 +483,23 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     (void)label;
 #endif
 
-    // Insert the RAM-only cache between the kernel and the transport. The mount
-    // layer talks to the cache; the cache talks to `client`. No persistence.
     cache_ = std::make_unique<RamCache>(client);
 
+#ifdef FB_FUSE2
+    // FUSE 2 (macFUSE): mount first, then create handle.
+    struct fuse_chan* ch = fuse_mount(mp_.c_str(), &args);
+    if (!ch) { fuse_opt_free_args(&args); err = "fuse_mount failed for " + mp_; cache_.reset(); return false; }
+    fuse_ = fuse_new(ch, &args, &g_ops, sizeof(g_ops), cache_.get());
+    fuse_opt_free_args(&args);
+    if (!fuse_) {
+        err = "fuse_new failed (is the FUSE driver installed?)";
+        fuse_unmount(mp_.c_str(), ch);
+        cache_.reset();
+        return false;
+    }
+    fuse_chan_ = ch;
+#else
+    // FUSE 3 (libfuse3 / FUSE-T): create handle, then mount.
     fuse_ = fuse_new(&args, &g_ops, sizeof(g_ops), cache_.get());
     fuse_opt_free_args(&args);
     if (!fuse_) { err = "fuse_new failed (is the FUSE driver installed?)"; cache_.reset(); return false; }
@@ -447,19 +510,30 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
         fuse_ = nullptr;
         return false;
     }
+#endif
 
-    thread_ = std::thread([this] { fuse_loop_mt(fuse_, 0); });
+#ifdef FB_FUSE_LOOP_MT_1ARG
+    thread_ = std::thread([this] { fuse_loop_mt(fuse_); });
+#else
+    thread_ = std::thread([this] { fuse_loop_mt(fuse_, nullptr); });
+#endif
     return true;
 }
 
 void Mount::stop() {
     if (!fuse_) return;
     fuse_exit(fuse_);
+#ifdef FB_FUSE2
+    if (fuse_chan_) {
+        fuse_unmount(mp_.c_str(), fuse_chan_);
+        fuse_chan_ = nullptr;
+    }
+#else
     fuse_unmount(fuse_);
+#endif
     if (thread_.joinable()) thread_.join();
     fuse_destroy(fuse_);
     fuse_ = nullptr;
-    // Drop the cache (joins prefetch threads) while the transport is still alive.
     cache_.reset();
 }
 

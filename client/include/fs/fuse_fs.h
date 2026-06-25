@@ -13,6 +13,7 @@
 
 #ifndef _WIN32
 struct fuse;
+struct fuse_chan;
 #endif
 
 namespace fb {
@@ -40,6 +41,7 @@ private:
     void* backend_ = nullptr; // ProjFS PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT
 #else
     struct fuse* fuse_ = nullptr;
+    struct fuse_chan* fuse_chan_ = nullptr;
 #endif
     std::unique_ptr<RamCache> cache_; // RAM-only read/metadata cache (no persistence)
     std::thread thread_;

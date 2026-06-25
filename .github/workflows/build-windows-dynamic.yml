@@ -17,6 +17,7 @@ concurrency:
 
 env:
   BUILD_TYPE: Release
+  QT_VERSION: "6.11.1"
   FB_SIGNALING_URL: ${{ vars.FB_SIGNALING_URL }}
   FIREBASE_DATABASE_URL: ${{ vars.FIREBASE_DATABASE_URL }}
   VCPKG_COMMIT: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
@@ -32,14 +33,19 @@ jobs:
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Install Qt (pre-built)
+        shell: pwsh
+        run: |
+          pip install aqtinstall
+          aqt install-qt -O "${{ github.workspace }}\qt" windows desktop "${{ env.QT_VERSION }}" win64_msvc2022_64
+
       - name: Restore vcpkg binary cache
         uses: actions/cache@v5
         with:
           path: _cache/vcpkg-bincache
-          key: vcpkg-windows-dynamic-qtbase-core-gui-widgets-network-miniupnpc-libsodium-${{ env.VCPKG_COMMIT }}
+          key: vcpkg-windows-dynamic-miniupnpc-libsodium-${{ env.VCPKG_COMMIT }}
           restore-keys: |
-            vcpkg-windows-dynamic-qtbase-core-gui-widgets-network-miniupnpc-libsodium-
-            vcpkg-windows-dynamic-qtbase-core-gui-widgets-network-
+            vcpkg-windows-dynamic-miniupnpc-libsodium-
 
       - name: Bootstrap vcpkg
         shell: pwsh
@@ -50,13 +56,12 @@ jobs:
           cd ../..
           .\_deps\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
-      - name: Install dependencies
+      - name: Install vcpkg dependencies
         shell: pwsh
         env:
           VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/_cache/vcpkg-bincache,readwrite"
         run: |
           .\_deps\vcpkg\vcpkg.exe install `
-            "qtbase[core,gui,widgets,network]:x64-windows" `
             "miniupnpc:x64-windows" `
             "libsodium:x64-windows" `
             --clean-after-build
@@ -66,6 +71,7 @@ jobs:
         env:
           VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/_cache/vcpkg-bincache,readwrite"
         run: |
+          $qtDir = "${{ github.workspace }}\qt\${{ env.QT_VERSION }}\msvc2022_64"
           $args = @(
             '-G', 'Ninja',
             '-S', 'client',
@@ -73,6 +79,7 @@ jobs:
             "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE",
             '-DCMAKE_CXX_STANDARD=23',
             '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL',
+            "-DCMAKE_PREFIX_PATH=$qtDir",
             "-DCMAKE_TOOLCHAIN_FILE=$PWD/_deps/vcpkg/scripts/buildsystems/vcpkg.cmake",
             '-DVCPKG_TARGET_TRIPLET=x64-windows'
           )
@@ -89,9 +96,9 @@ jobs:
       - name: Deploy Qt DLLs
         shell: pwsh
         run: |
-          $vcpkgQtTools = "$PWD\_deps\vcpkg\installed\x64-windows\tools\qt6"
-          Add-Content $env:GITHUB_PATH "$vcpkgQtTools"
-          & "$vcpkgQtTools\windeployqt.exe" build/folderbuddies.exe
+          $qtBin = "${{ github.workspace }}\qt\${{ env.QT_VERSION }}\msvc2022_64\bin"
+          Add-Content $env:GITHUB_PATH "$qtBin"
+          & "$qtBin\windeployqt.exe" build/folderbuddies.exe
 
       - name: Package
         shell: pwsh
