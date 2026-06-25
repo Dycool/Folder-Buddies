@@ -13,6 +13,9 @@
           "createdAt": {
             ".validate": "newData.isNumber() && newData.val() > now - 86400000 && newData.val() <= now + 300000"
           },
+          "max": {
+            ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 8"
+          },
           "$other": {
             ".validate": false
           }

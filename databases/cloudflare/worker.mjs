@@ -270,6 +270,7 @@ export class WebSignalingRoom {
     this.state = state;
     this.env = env;
     this.host = null;
+    this.hostMax = 0; // host-configured client cap (0 = use MAX_CLIENTS_PER_ROOM)
     this.clients = new Map();
     this.messageCounts = new WeakMap();
   }
@@ -286,19 +287,20 @@ export class WebSignalingRoom {
     const [client, server] = Object.values(pair);
     server.accept();
 
-    if (role === "host") this.attachHost(server, room);
+    if (role === "host") this.attachHost(server, room, url.searchParams.get("max"));
     else this.attachClient(server, room);
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  attachHost(ws, room) {
+  attachHost(ws, room, max) {
     if (this.host) {
       ws.send(JSON.stringify({ kind: "error", error: "host_already_connected" }));
       ws.close(4409, "host already connected");
       return;
     }
     this.host = ws;
+    this.hostMax = clampMax(max);
     ws.send(JSON.stringify({ kind: "ready", role: "host", room }));
     for (const peerId of this.clients.keys()) {
       ws.send(JSON.stringify({ kind: "client-joined", peerId }));
@@ -309,7 +311,8 @@ export class WebSignalingRoom {
   }
 
   attachClient(ws, room) {
-    if (this.clients.size >= MAX_CLIENTS_PER_ROOM) {
+    const limit = this.hostMax > 0 ? this.hostMax : MAX_CLIENTS_PER_ROOM;
+    if (this.clients.size >= limit) {
       ws.send(JSON.stringify({ kind: "error", error: "room_full" }));
       ws.close(4429, "room full");
       return;
@@ -377,4 +380,12 @@ function parseSignal(data) {
 
 function safeSend(ws, msg) {
   try { ws.send(JSON.stringify(msg)); } catch { /* peer is gone */ }
+}
+
+// Host-supplied client cap, floored at the hard room limit. Returns 0 (unlimited
+// up to MAX_CLIENTS_PER_ROOM) for missing/invalid/zero values.
+function clampMax(raw) {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(n, MAX_CLIENTS_PER_ROOM);
 }

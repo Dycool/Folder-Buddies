@@ -664,7 +664,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     });
   }
 
-  function signalUrl(lookup, role, token = "") {
+  function signalUrl(lookup, role, token = "", maxClients = 0) {
     const u = new URL(workerUrl());
     u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
     u.pathname = "/room";
@@ -673,13 +673,14 @@ import { argon2id } from "./vendor/noble/argon2.js";
     u.searchParams.set("role", role);
     u.searchParams.set("web", "1");
     if (token) u.searchParams.set("turnstile", token);
+    if (role === "host" && maxClients > 0) u.searchParams.set("max", String(maxClients));
     return u;
   }
 
-  function openSignal(role, lookup, onMessage, token = "") {
+  function openSignal(role, lookup, onMessage, token = "", maxClients = 0) {
     return new Promise((resolve, reject) => {
       let settled = false;
-      const ws = new WebSocket(signalUrl(lookup, role, token));
+      const ws = new WebSocket(signalUrl(lookup, role, token, maxClients));
       ws.provider = "cloudflare";
       const fail = (message) => {
         if (settled) return;
@@ -800,9 +801,11 @@ import { argon2id } from "./vendor/noble/argon2.js";
         }
       }
 
+      const host = { createdAt: Date.now() };
+      if (state.maxClients > 0) host.max = state.maxClients;
       const claim = await sdk.runTransaction(roomRef, (current) => {
         if (current !== null) return;
-        return { v: 1, host: { createdAt: Date.now() } };
+        return { v: 1, host };
       }, { applyLocally: false });
       if (!claim.committed) continue;
 
@@ -840,18 +843,30 @@ import { argon2id } from "./vendor/noble/argon2.js";
     throw new Error("Firebase fallback could not find a free room code");
   }
 
+  function taggedError(message, code) {
+    const err = new Error(message);
+    err.code = code;
+    return err;
+  }
+
   async function openFirebaseClientSignal(lookup) {
     if (!firebaseEnabled()) throw new Error("Firebase fallback is not configured");
     const sdk = await firebaseSdk();
     const path = firebaseRoomPath(lookup);
     const roomRef = sdk.ref(sdk.db, path);
     const snap = await sdk.get(roomRef);
-    if (!snap.exists()) throw new Error("no fallback room found for that code");
+    if (!snap.exists()) throw taggedError("Host not found", "room_not_found");
 
     const room = snap.val();
     if (firebaseRoomExpired(room)) {
       await firebaseDeleteIfExpired(sdk, path, room);
-      throw new Error("fallback room expired");
+      throw taggedError("Host not found", "room_not_found");
+    }
+
+    const max = Number(room?.host?.max) || 0;
+    if (max > 0) {
+      const count = room.clients ? Object.keys(room.clients).length : 0;
+      if (count >= max) throw taggedError("The host's client limit is full.", "room_full");
     }
 
     const peerId = crypto.randomUUID();
@@ -897,7 +912,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const code = preferredCode || randomRoom();
       const lookup = lookupOf(code);
       const token = await turnstileToken();
-      const ws = await openSignal("host", lookup, (msg) => handleHostSignal(msg).catch((err) => toast(err.message)), token);
+      const ws = await openSignal("host", lookup, (msg) => handleHostSignal(msg).catch((err) => toast(err.message)), token, state.maxClients);
       const claimed = await new Promise((resolve) => {
         const onReady = (event) => {
           let msg; try { msg = JSON.parse(event.data); } catch { return; }
@@ -1479,6 +1494,14 @@ import { argon2id } from "./vendor/noble/argon2.js";
       setConnectStatus("Host stopped sharing.");
       return;
     }
+    if (msg.kind === "error") {
+      const reason = msg.error === "room_full"
+        ? "The host's client limit is full."
+        : "The host rejected the connection.";
+      toast(reason);
+      setConnectStatus(reason);
+      return;
+    }
     if (msg.kind === "signal") {
       const peerId = state.clientPeer?.peerId || msg.peerId;
       const signal = await decryptSignal(peerId, msg.ciphertext);
@@ -1547,11 +1570,15 @@ import { argon2id } from "./vendor/noble/argon2.js";
   async function startHost() {
     if (!supportsHosting()) throw new Error("Hosting is not supported in this browser");
     if (isMobile()) throw new Error("Hosting is not available on mobile browsers");
+    const maxClientsRaw = (els.maxClients.value || "").trim();
+    const maxClients = Number(maxClientsRaw);
+    if (maxClientsRaw !== "" && (!Number.isInteger(maxClients) || maxClients < 0)) {
+      throw new Error("Max clients must be 0 (unlimited) or a positive whole number");
+    }
     if (!state.rootHandle) await pickFolder();
     setShareStatus("Starting…");
     els.shareToggle.disabled = true;
-    const maxClients = Number(els.maxClients.value);
-    state.maxClients = Number.isFinite(maxClients) && maxClients > 0 ? Math.floor(maxClients) : 0;
+    state.maxClients = maxClients > 0 ? maxClients : 0;
     state.allowWrites = wantsWriteAccess();
     if (state.allowWrites) await assertHostWritable();
 
@@ -1618,7 +1645,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   function setConnected(connected) {
-    els.connectToggle.textContent = connected ? "Disconnect" : "Connect & browse";
+    els.connectToggle.textContent = connected ? "Disconnect" : "Connect";
     els.connectInput.disabled = connected;
   }
 
@@ -1652,7 +1679,9 @@ import { argon2id } from "./vendor/noble/argon2.js";
         };
         toast(`Cloudflare failed; using Firebase fallback. ${cloudError}`);
       } catch (fb) {
-        throw new Error(`Cloudflare failed (${cloudError}); Firebase fallback failed (${fb?.message || String(fb)})`);
+        if (fb?.code === "room_not_found") throw new Error("Host not found");
+        if (fb?.code === "room_full") throw new Error("The host's client limit is full.");
+        throw new Error(cloudError || fb?.message || "Couldn't connect");
       }
     }
     setConnected(true);
