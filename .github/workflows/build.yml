@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   BUILD_TYPE: Release
@@ -43,7 +43,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config wget ca-certificates \
             qt6-base-dev qt6-base-dev-tools libfuse3-dev libminiupnpc-dev \
-            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev fuse3 imagemagick libsodium-dev
+            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev fuse3 imagemagick libsodium-dev python3-pil
 
       - name: Generate app icons
         run: |
@@ -72,6 +72,8 @@ jobs:
       - name: Package AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
+          QMAKE: qmake6
+          OUTPUT: folderbuddies-linux.AppImage
         run: |
           DESTDIR=AppDir cmake --install build --prefix /usr
           if [ -f client/src/icons/icon.png ]; then
@@ -85,7 +87,6 @@ jobs:
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             -d client/src/folderbuddies.desktop -i folderbuddies.png \
             --plugin qt --output appimage
-          mv ./*.AppImage folderbuddies-linux.AppImage
 
       - uses: actions/upload-artifact@v4
         with:
