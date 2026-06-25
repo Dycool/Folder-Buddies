@@ -114,7 +114,8 @@ jobs:
         run: |
           brew update
           brew install cmake ninja pkg-config qt@6 miniupnpc imagemagick
-          brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t || brew install --cask macfuse || true
+          brew tap macos-fuse-t/homebrew-cask || true
+          brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t
           echo "$(brew --prefix qt@6)/bin" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
@@ -151,6 +152,7 @@ jobs:
           if [ -n "${FUSET_PKG:-}" ] && [ -f "$FUSET_PKG" ]; then
             args+=(-DFUSET_PKG="$FUSET_PKG")
           fi
+          args+=(-DFB_MACOS_FUSE_BACKEND=fuse-t)
           cmake "${args[@]}"
 
       - name: Build and test
@@ -251,7 +253,9 @@ jobs:
         shell: pwsh
         run: |
           cmake --build build --config $env:BUILD_TYPE --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir build --output-on-failure -C $env:BUILD_TYPE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item build/folderbuddies.exe folderbuddies-windows.exe
 
       - uses: actions/upload-artifact@v4

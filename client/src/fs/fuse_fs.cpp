@@ -1,5 +1,6 @@
-// CMake defines the FUSE family from the pkg-config module it found. Request
-// the matching API before including fuse.h.
+// CMake defines the FUSE API shape from the pkg-config module it found.
+// FUSE-T currently exposes the FUSE 2 high-level API, so CMake defines both
+// FB_FUSE_T and FB_FUSE2 for that backend.
 #ifndef FUSE_USE_VERSION
 #  ifdef FB_FUSE2
 #    define FUSE_USE_VERSION 26
@@ -28,9 +29,9 @@
 #  endif
 #endif
 
-// FUSE-T uses FUSE 3 operation signatures, but keeps the FUSE 2 style
-// fuse_fill_dir_t and fuse_loop_mt calls.
-#if defined(FB_FUSE2) || defined(FB_FUSE_T)
+// FUSE 2 style APIs use a four-argument fuse_fill_dir_t and one-argument
+// fuse_loop_mt.
+#ifdef FB_FUSE2
 #  define FB_FUSE_FILLER_4ARG
 #  define FB_FUSE_LOOP_MT_1ARG
 #endif
