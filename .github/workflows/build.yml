@@ -69,6 +69,7 @@ jobs:
             fi
             chmod +x client/src/icons/make-icons.sh
             ./client/src/icons/make-icons.sh client/src/icons/icon.png || true
+            cp client/src/icons/icon.png client/icon.png
           fi
 
       # ---------------- Linux: native FUSE + AppImage ----------------
@@ -79,7 +80,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config wget ca-certificates \
             qt6-base-dev qt6-base-dev-tools libfuse3-dev libminiupnpc-dev \
-            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev fuse3 imagemagick
+            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev fuse3 imagemagick libsodium-dev
 
       - name: Configure Linux
         if: matrix.name == 'linux'
@@ -208,23 +209,14 @@ jobs:
           & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat"
           "VCPKG_ROOT=$env:RUNNER_TEMP/vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Enable vcpkg GitHub Actions cache
-        if: matrix.name == 'windows'
-        uses: actions/github-script@v8
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
       - name: Install Windows dependencies
         if: matrix.name == 'windows'
         shell: pwsh
-        env:
-          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
         run: |
           & "$env:VCPKG_ROOT/vcpkg.exe" install `
-            "qtbase[widgets]:x64-windows-static" `
-            "miniupnpc:x64-windows-static"
+            "qtbase[core,gui,widgets,network]:x64-windows-static" `
+            "miniupnpc:x64-windows-static" `
+            "libsodium:x64-windows-static"
 
       - name: Configure Windows
         if: matrix.name == 'windows'
