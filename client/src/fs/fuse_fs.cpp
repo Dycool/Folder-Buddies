@@ -1,5 +1,14 @@
-// Request FUSE 3.x API when available; fall back to FUSE 2 (macFUSE) otherwise.
-#define FUSE_USE_VERSION 30
+// CMake defines the FUSE family from the pkg-config module it found. Request
+// the matching API before including fuse.h.
+#ifndef FUSE_USE_VERSION
+#  ifdef FB_FUSE2
+#    define FUSE_USE_VERSION 26
+#  elif defined(FB_FUSE_T)
+#    define FUSE_USE_VERSION 30
+#  else
+#    define FUSE_USE_VERSION 31
+#  endif
+#endif
 
 #include "fuse_fs.h"
 
@@ -10,21 +19,19 @@
 
 #include <fuse.h>
 
-// After including fuse.h, detect the actual FUSE API version exposed by the
-// headers.  macFUSE (4.x) recognises FUSE_USE_VERSION 30 and provides most
-// FUSE 3 types, so we detect FUSE 2 by the absence of the FUSE 3-only symbol
-// FUSE_READDIR_PLUS (which is missing when macFUSE falls back to version 25
-// because 31 was unrecognised — though we now request 30, the check stays for
-// safety with older macFUSE releases).
-#ifndef FUSE_READDIR_PLUS
-#  define FB_FUSE2
+// Fallback for ad-hoc builds that do not go through the CMake pkg-config
+// detection above. Do not test FUSE_READDIR_PLUS here: libfuse3 exposes it as
+// an enum value, not a preprocessor macro.
+#if !defined(FB_FUSE2) && !defined(FB_FUSE_T)
+#  if !defined(FUSE_MAJOR_VERSION) || FUSE_MAJOR_VERSION < 3
+#    define FB_FUSE2
+#  endif
 #endif
 
-// fuse_loop_mt signature: libfuse3 / FUSE-T accept a config pointer
-// (struct fuse_loop_config *), while macFUSE accepts only the fuse handle.
-// FUSE_MAJOR_VERSION is set to 3 by libfuse3-derived implementations but
-// NOT by macFUSE.  We use it to pick the right call.
-#ifndef FUSE_MAJOR_VERSION
+// FUSE-T uses FUSE 3 operation signatures, but keeps the FUSE 2 style
+// fuse_fill_dir_t and fuse_loop_mt calls.
+#if defined(FB_FUSE2) || defined(FB_FUSE_T)
+#  define FB_FUSE_FILLER_4ARG
 #  define FB_FUSE_LOOP_MT_1ARG
 #endif
 
@@ -106,20 +113,29 @@ int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t,
     Reader r(resp.data(), resp.size());
     uint32_t n;
     if (!r.pod(n)) return -EIO;
-    filler(buf, ".", nullptr, 0, 0);
-    filler(buf, "..", nullptr, 0, 0);
+#ifdef FB_FUSE_FILLER_4ARG
+#  ifndef FB_FUSE2
+    (void)rdflags;
+#  endif
+    filler(buf, ".", nullptr, 0);
+    filler(buf, "..", nullptr, 0);
+#else
+    filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+    filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+#endif
     for (uint32_t i = 0; i < n; ++i) {
         std::string name;
         WireAttr a;
         if (!r.str(name) || !r.pod(a)) break;
         FB_STAT stbuf;
         fill_stat(stbuf, a);
-#ifndef FB_FUSE2
-        auto fl = (rdflags & FUSE_READDIR_PLUS) ? FUSE_FILL_DIR_PLUS : 0;
+#ifdef FB_FUSE_FILLER_4ARG
+        filler(buf, name.c_str(), &stbuf, 0);
 #else
-        auto fl = 0;
-#endif
+        fuse_fill_dir_flags fl = static_cast<fuse_fill_dir_flags>(0);
+        if (rdflags & FUSE_READDIR_PLUS) fl = FUSE_FILL_DIR_PLUS;
         filler(buf, name.c_str(), &stbuf, 0, fl);
+#endif
     }
     return 0;
 }
@@ -515,7 +531,7 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
 #ifdef FB_FUSE_LOOP_MT_1ARG
     thread_ = std::thread([this] { fuse_loop_mt(fuse_); });
 #else
-    thread_ = std::thread([this] { fuse_loop_mt(fuse_, nullptr); });
+    thread_ = std::thread([this] { fuse_loop_mt(fuse_, 0); });
 #endif
     return true;
 }

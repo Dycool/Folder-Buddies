@@ -17,7 +17,8 @@ concurrency:
 
 env:
   BUILD_TYPE: Release
-  QT_VERSION: "6.11.1"
+  # aqtinstall 3.3.0 does not understand Qt 6.11's arch-split online repo layout yet.
+  QT_VERSION: "6.10.3"
   FB_SIGNALING_URL: ${{ vars.FB_SIGNALING_URL }}
   FIREBASE_DATABASE_URL: ${{ vars.FIREBASE_DATABASE_URL }}
   VCPKG_COMMIT: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
