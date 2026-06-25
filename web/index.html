@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Folder Buddies Web</title>
+  <link rel="icon" href="icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Folder Buddies Web</p>
+        <h1>Private browser-to-browser folder sharing</h1>
+        <p class="muted">Cloudflare only coordinates encrypted WebRTC signaling. File bytes move P2P and the host reads files on demand from the selected folder.</p>
+      </div>
+      <div class="status-pill" id="connectionState">Idle</div>
+    </header>
+
+    <section class="card config-card">
+      <label>
+        Cloudflare Worker URL
+        <input id="workerUrl" type="url" placeholder="https://folderbuddies-signaling.example.workers.dev">
+      </label>
+      <label>
+        ICE servers
+        <input id="iceServers" spellcheck="false" value='[{"urls":"stun:stun.l.google.com:19302"}]'>
+      </label>
+      <p class="hint">The Worker URL is public and safe to hardcode. ICE servers are only used by WebRTC NAT traversal; files still do not pass through Cloudflare.</p>
+    </section>
+
+    <section class="grid two">
+      <article class="card">
+        <h2>Host a folder</h2>
+        <p class="muted">Choose a folder once. The browser keeps a handle and streams requested files in chunks only when a peer asks for them.</p>
+        <div class="row wrap">
+          <button id="pickFolder">Choose folder</button>
+          <button id="hostCloud" disabled>Host with 6-char room</button>
+          <button id="hostOffline" disabled>Make offline link</button>
+          <button id="stopHost" disabled class="secondary">Stop hosting</button>
+        </div>
+        <dl class="facts">
+          <div><dt>Folder</dt><dd id="hostFolder">None selected</dd></div>
+          <div><dt>Room</dt><dd><code id="hostRoom">—</code></dd></div>
+          <div><dt>Password</dt><dd><code id="hostPassword">—</code></dd></div>
+        </dl>
+        <label>
+          Share link
+          <textarea id="shareLink" readonly placeholder="Cloud room link or offline offer link appears here"></textarea>
+        </label>
+        <div class="row wrap">
+          <button id="copyShare" disabled>Copy link</button>
+          <button id="copyPassword" disabled class="secondary">Copy password</button>
+        </div>
+        <label>
+          Offline answer from client
+          <textarea id="offlineAnswer" placeholder="Paste the client's offline answer here when using the huge fallback link"></textarea>
+        </label>
+        <button id="acceptOfflineAnswer" disabled class="secondary">Accept offline answer</button>
+        <p class="hint">Host mode requires the File System Access API, currently best in Chromium/Edge. It never scans file contents up front.</p>
+      </article>
+
+      <article class="card">
+        <h2>Connect to someone</h2>
+        <p class="muted">Paste a 6-character room code, a shared link, or a huge offline offer link.</p>
+        <label>
+          Code / link / offline blob
+          <textarea id="joinCode" placeholder="6-char code, full link, or huge Base91 fallback"></textarea>
+        </label>
+        <label>
+          Password
+          <input id="joinPassword" type="text" autocomplete="off" placeholder="Room password">
+        </label>
+        <div class="row wrap">
+          <button id="joinCloud">Connect</button>
+          <button id="makeOfflineAnswer" class="secondary">Create offline answer</button>
+          <button id="disconnect" disabled class="secondary">Disconnect</button>
+        </div>
+        <label>
+          Offline answer to send back to host
+          <textarea id="offlineAnswerOut" readonly placeholder="Only used when connecting with the huge offline fallback link"></textarea>
+        </label>
+        <button id="copyOfflineAnswer" disabled class="secondary">Copy offline answer</button>
+      </article>
+    </section>
+
+    <section class="card explorer" id="explorer" hidden>
+      <div class="explorer-head">
+        <div>
+          <h2>Remote file explorer</h2>
+          <p id="remoteStatus" class="muted">Waiting for the data channel…</p>
+        </div>
+        <button id="upButton" class="secondary">Up</button>
+      </div>
+      <div class="pathbar"><span>Path:</span> <code id="currentPath">/</code></div>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th><th></th></tr>
+        </thead>
+        <tbody id="fileRows"></tbody>
+      </table>
+      <div id="transfers" class="transfers"></div>
+    </section>
+
+    <section class="card log-card">
+      <h2>Log</h2>
+      <pre id="log"></pre>
+    </section>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

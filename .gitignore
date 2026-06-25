@@ -1,0 +1,39 @@
+# Build outputs
+/build/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.o
+*.obj
+*.exe
+*.dll
+*.dylib
+*.so
+*.app/
+*.AppImage
+*.zip
+
+# Local credentials / machine-specific config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.mobileprovision
+
+# Cloudflare local/generated config
+cloudflare/wrangler.ci.toml
+cloudflare/wrangler.local.toml
+cloudflare/.wrangler/
+.wrangler/
+
+# Local assistant/editor state
+.claude/settings.local.json
+.claude/*.local.json
+.vscode/settings.json
+.idea/
+.DS_Store

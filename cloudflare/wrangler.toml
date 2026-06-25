@@ -1,0 +1,20 @@
+# Public-safe Wrangler config.
+# Do NOT paste real Cloudflare account IDs, API tokens, or KV namespace IDs here.
+# GitHub Actions creates cloudflare/wrangler.ci.toml at runtime from repository secrets.
+
+name = "folderbuddies-signaling"
+main = "worker.mjs"
+compatibility_date = "2026-06-25"
+
+[[kv_namespaces]]
+binding = "ROOMS"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+preview_id = "REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID"
+
+[[durable_objects.bindings]]
+name = "WEB_ROOMS"
+class_name = "WebSignalingRoom"
+
+[[migrations]]
+tag = "v1-web-rooms"
+new_sqlite_classes = ["WebSignalingRoom"]

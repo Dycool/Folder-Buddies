@@ -1,0 +1,254 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      release_build:
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-24.04
+          - name: macos
+            os: macos-15
+          - name: windows
+            os: windows-2025
+
+    env:
+      BUILD_TYPE: Release
+      FB_SIGNALING_URL: ${{ vars.FB_SIGNALING_URL }}
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify C++23 project settings
+        shell: bash
+        run: |
+          grep -q 'set(CMAKE_CXX_STANDARD 23)' CMakeLists.txt
+          grep -q 'set(CMAKE_CXX_STANDARD 23)' cloudflare/CMakeLists.txt
+
+      - name: Generate app icons
+        if: matrix.name != 'windows'
+        shell: bash
+        run: |
+          if [ -f icon.png ]; then
+            if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then
+              if command -v brew >/dev/null 2>&1; then
+                brew install imagemagick
+              else
+                sudo apt-get update
+                sudo apt-get install -y --no-install-recommends imagemagick
+              fi
+            fi
+            chmod +x branding/make-icons.sh
+            ./branding/make-icons.sh icon.png || true
+          fi
+
+      # ---------------- Linux: native FUSE + AppImage ----------------
+      - name: Install Linux dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config wget ca-certificates \
+            qt6-base-dev qt6-base-dev-tools libfuse3-dev libminiupnpc-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev fuse3 imagemagick
+
+      - name: Configure Linux
+        if: matrix.name == 'linux'
+        shell: bash
+        run: |
+          args=(-G Ninja -B build -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCMAKE_CXX_STANDARD=23)
+          if [ -n "${FB_SIGNALING_URL:-}" ]; then
+            args+=(-DFB_SIGNALING_URL="$FB_SIGNALING_URL")
+          fi
+          cmake "${args[@]}"
+
+      - name: Build and test Linux
+        if: matrix.name == 'linux'
+        run: |
+          cmake --build build --config "$BUILD_TYPE" --parallel
+          ctest --test-dir build --output-on-failure -C "$BUILD_TYPE"
+
+      - name: Package Linux AppImage
+        if: matrix.name == 'linux'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          DESTDIR=AppDir cmake --install build --prefix /usr
+          if [ -f icon.png ]; then
+            cp icon.png folderbuddies.png
+          else
+            convert -size 256x256 xc:'#2b6cb0' folderbuddies.png
+          fi
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy*.AppImage
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            -d packaging/folderbuddies.desktop -i folderbuddies.png \
+            --plugin qt --output appimage
+          mv ./*.AppImage folderbuddies-linux.AppImage
+
+      # ---------------- macOS: FUSE-T-preferred bundle ----------------
+      - name: Install macOS dependencies
+        if: matrix.name == 'macos'
+        run: |
+          brew update
+          brew install cmake ninja pkg-config qt@6 miniupnpc
+          brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t || brew install --cask macfuse || true
+          echo "$(brew --prefix qt@6)/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Import macOS signing certificate
+        if: matrix.name == 'macos' && env.MACOS_CERTIFICATE_P12 != '' && env.MACOS_CERTIFICATE_PASSWORD != ''
+        shell: bash
+        run: |
+          security create-keychain -p "$RUNNER_TEMP_KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$RUNNER_TEMP_KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 -D > certificate.p12
+          security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$RUNNER_TEMP_KEYCHAIN_PASSWORD" build.keychain
+        env:
+          RUNNER_TEMP_KEYCHAIN_PASSWORD: folderbuddies-ci-keychain
+
+      - name: Configure macOS
+        if: matrix.name == 'macos'
+        shell: bash
+        run: |
+          args=(-G Ninja -B build -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCMAKE_CXX_STANDARD=23)
+          if [ -n "${FB_SIGNALING_URL:-}" ]; then
+            args+=(-DFB_SIGNALING_URL="$FB_SIGNALING_URL")
+          fi
+          # Do not fail CI if the release-only FUSE-T installer package is absent.
+          if [ -n "${FUSET_PKG:-}" ] && [ -f "$FUSET_PKG" ]; then
+            args+=(-DFUSET_PKG="$FUSET_PKG")
+          fi
+          cmake "${args[@]}"
+
+      - name: Build and test macOS
+        if: matrix.name == 'macos'
+        run: |
+          cmake --build build --config "$BUILD_TYPE" --parallel
+          ctest --test-dir build --output-on-failure -C "$BUILD_TYPE"
+
+      - name: Bundle Qt into macOS app
+        if: matrix.name == 'macos'
+        run: |
+          macdeployqt build/folderbuddies.app -always-overwrite
+
+      - name: Codesign macOS app
+        if: matrix.name == 'macos' && env.MACOS_CODESIGN_IDENTITY != ''
+        run: |
+          codesign --force --deep --options runtime --timestamp \
+            --sign "$MACOS_CODESIGN_IDENTITY" build/folderbuddies.app
+          codesign --verify --deep --strict --verbose=2 build/folderbuddies.app
+
+      - name: Notarize and staple macOS app
+        if: matrix.name == 'macos' && env.MACOS_CODESIGN_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != '' && env.APPLE_TEAM_ID != ''
+        run: |
+          ditto -c -k --keepParent build/folderbuddies.app folderbuddies-macos-notary.zip
+          xcrun notarytool submit folderbuddies-macos-notary.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple build/folderbuddies.app
+
+      - name: Package macOS app
+        if: matrix.name == 'macos'
+        run: |
+          rm -f folderbuddies-macos.zip
+          ditto -c -k --keepParent build/folderbuddies.app folderbuddies-macos.zip
+
+      # ---------------- Windows: native ProjFS, no WinFsp ----------------
+      - name: Set up MSVC developer shell
+        if: matrix.name == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Bootstrap vcpkg
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP/vcpkg"
+          & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat"
+          "VCPKG_ROOT=$env:RUNNER_TEMP/vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Enable vcpkg GitHub Actions cache
+        if: matrix.name == 'windows'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install Windows dependencies
+        if: matrix.name == 'windows'
+        shell: pwsh
+        env:
+          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+        run: |
+          & "$env:VCPKG_ROOT/vcpkg.exe" install `
+            "qtbase[widgets]:x64-windows-static" `
+            "miniupnpc:x64-windows-static"
+
+      - name: Configure Windows
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $args = @(
+            '-G', 'Ninja',
+            '-B', 'build',
+            "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE",
+            '-DCMAKE_CXX_STANDARD=23',
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake",
+            '-DVCPKG_TARGET_TRIPLET=x64-windows-static'
+          )
+          if ($env:FB_SIGNALING_URL) { $args += "-DFB_SIGNALING_URL=$env:FB_SIGNALING_URL" }
+          cmake @args
+
+      - name: Build and test Windows
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          cmake --build build --config $env:BUILD_TYPE --parallel
+          ctest --test-dir build --output-on-failure -C $env:BUILD_TYPE
+          Copy-Item build/folderbuddies.exe folderbuddies-windows.exe
+
+      # ---------------- Upload ----------------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: folderbuddies-${{ matrix.name }}
+          path: |
+            folderbuddies-linux.AppImage
+            folderbuddies-macos.zip
+            folderbuddies-windows.exe
+          if-no-files-found: error

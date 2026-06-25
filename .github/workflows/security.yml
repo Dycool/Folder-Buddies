@@ -1,0 +1,103 @@
+name: Public Repo Safety
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-repo-safety-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Guard against committed secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Reject local/private config files
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden=$(find . -type f             \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' -o -name '*.mobileprovision' -o -name 'settings.local.json' -o -name 'wrangler.ci.toml' -o -name 'wrangler.local.toml' \)             ! -name '.env.example'             ! -path './.git/*'             -print)
+          if [ -n "$forbidden" ]; then
+            echo 'These files must not be committed to a public repository:' >&2
+            echo "$forbidden" >&2
+            exit 1
+          fi
+
+      - name: Verify Wrangler config stays public-safe
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'REPLACE_WITH_YOUR_KV_NAMESPACE_ID' cloudflare/wrangler.toml
+          grep -q 'REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID' cloudflare/wrangler.toml
+          if grep -Eq '^[[:space:]]*account_id[[:space:]]*=' cloudflare/wrangler.toml; then
+            echo 'Do not commit Cloudflare account_id. Store it as CLOUDFLARE_ACCOUNT_ID in GitHub Secrets.' >&2
+            exit 1
+          fi
+          if grep -Eq '^[[:space:]]*(api_token|token)[[:space:]]*=' cloudflare/wrangler.toml; then
+            echo 'Do not commit Cloudflare API tokens. Store them as CLOUDFLARE_API_TOKEN in GitHub Secrets.' >&2
+            exit 1
+          fi
+
+      - name: Scan for common accidental secret assignments
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          root = Path('.')
+          excluded_dirs = {'.git', 'build', 'cmake-build-debug', 'cmake-build-release'}
+          excluded_files = {'.github/workflows/security.yml', 'SECURITY.md'}
+          suspicious = []
+
+          assignment = re.compile(
+              r'(?i)(CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID|CF_KV_ROOMS_ID|CF_KV_ROOMS_PREVIEW_ID|API_TOKEN|ACCESS_TOKEN|SECRET_KEY|PRIVATE_KEY)'
+              r'\s*[:=]\s*["']?([A-Za-z0-9_./+=:-]{16,})'
+          )
+          obvious_tokens = [
+              re.compile(r'ghp_[A-Za-z0-9_]{30,}'),
+              re.compile(r'github_pat_[A-Za-z0-9_]{40,}'),
+              re.compile(r'-----BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY-----'),
+          ]
+          allowed_fragments = [
+              '${{ secrets.',
+              'REPLACE_WITH_',
+              '<your-',
+              '<your_',
+          ]
+
+          for path in root.rglob('*'):
+              if not path.is_file():
+                  continue
+              rel = path.as_posix().lstrip('./')
+              if rel in excluded_files:
+                  continue
+              if any(part in excluded_dirs for part in path.parts):
+                  continue
+              try:
+                  text = path.read_text(errors='ignore')
+              except Exception:
+                  continue
+              for i, line in enumerate(text.splitlines(), start=1):
+                  if any(ok in line for ok in allowed_fragments):
+                      continue
+                  if assignment.search(line) or any(p.search(line) for p in obvious_tokens):
+                      suspicious.append(f'{rel}:{i}: {line[:160]}')
+
+          if suspicious:
+              print('Potential committed secret material found:', file=sys.stderr)
+              for item in suspicious:
+                  print(item, file=sys.stderr)
+              sys.exit(1)
+          PY
