@@ -78,6 +78,8 @@ jobs:
           DESTDIR=AppDir cmake --install build --prefix /usr
           if [ -f client/src/icons/icon.png ]; then
             cp client/src/icons/icon.png folderbuddies.png
+            convert folderbuddies.png -resize 256x256 folderbuddies-256.png
+            cp folderbuddies-256.png folderbuddies.png
           else
             convert -size 256x256 xc:'#2b6cb0' folderbuddies.png
           fi
