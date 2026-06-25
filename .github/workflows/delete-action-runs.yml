@@ -1,0 +1,46 @@
+name: Delete all Action runs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  delete-runs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete all previous workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          echo "Fetching workflow runs for $REPO..."
+
+          run_ids="$(
+            gh api --paginate "repos/$REPO/actions/runs?per_page=100" \
+              --jq '.workflow_runs[].id' \
+              | grep -v "^${CURRENT_RUN_ID}$" || true
+          )"
+
+          if [ -z "$run_ids" ]; then
+            echo "No previous workflow runs found."
+            exit 0
+          fi
+
+          count=0
+
+          while IFS= read -r run_id; do
+            [ -z "$run_id" ] && continue
+            echo "Deleting workflow run: $run_id"
+            gh api --method DELETE "repos/$REPO/actions/runs/$run_id" || true
+            count=$((count + 1))
+            sleep 0.2
+          done <<< "$run_ids"
+
+          echo "Deleted $count workflow run(s)."
