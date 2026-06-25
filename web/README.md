@@ -1,43 +1,27 @@
 # Folder Buddies Web
 
-This is the no-install browser version of Folder Buddies. It is meant to be hosted as a static site on GitHub Pages and uses the Cloudflare Worker only for encrypted WebRTC signaling.
+Static browser client for GitHub Pages. The UI mirrors the native desktop app:
+a window with two tabs, **Share a folder** and **Connect to a share**, and a
+status bar showing live transfer rates.
 
-## What it can do
+- **Share a folder** — pick a folder, optionally cap the number of clients, then
+  press *Start sharing*. The app claims a free 6-character room on the relay and
+  shows the **connect code** (and a shareable link). There is no password.
+  *Copy all* copies the code and link.
+- **Connect to a share** — paste the connect code (or share link), press
+  *Connect & browse*, and the remote file explorer opens inline. Selected files
+  stream over a WebRTC DataChannel.
 
-- Host a user-selected folder from the browser with `showDirectoryPicker` / `FileSystemDirectoryHandle`.
-- Connect to a 6-character room link through the Cloudflare Worker WebSocket signaling path.
-- Use a huge offline fallback link with manual answer copy/paste when Cloudflare is unavailable.
-- Browse the remote folder in a dedicated web file explorer.
-- Download files on demand over WebRTC DataChannel.
+The 6-character code is split into a public 2-char relay-room half and a secret
+4-char half. The browser derives the WebRTC signaling-encryption key from the
+secret half with Argon2id (vendored, audited `@noble/hashes` in `web/vendor/`),
+so Cloudflare relays only opaque encrypted offers/answers and never learns the
+addresses exchanged. Note that the WebRTC DataChannel's own DTLS uses the
+browser's classical key exchange, which is not post-quantum.
 
-## What it intentionally does not do
+Hosting does not pre-cache or copy the selected folder. The browser keeps the
+user-granted `FileSystemDirectoryHandle`, lists directories on demand, and streams
+requested file chunks only when downloaded.
 
-- It does not mount a real OS filesystem. Use the native app for FUSE / ProjFS / FUSE-T.
-- It does not relay file bytes through Cloudflare or GitHub Pages.
-- It does not copy or cache the selected host folder. The host enumerates directories on request and streams each selected file with `File.stream()`.
-
-## Optional Turnstile protection
-
-The GitHub Pages build can embed Cloudflare Turnstile for cloud-room host/connect actions. Add the public site key as the repository variable `TURNSTILE_SITE_KEY`. The secret key must be stored only as the repository secret `TURNSTILE_SECRET_KEY` and uploaded to the Worker by the Cloudflare workflow.
-
-Turnstile is used only for Cloudflare WebRTC signaling connections. Offline fallback links continue to work without any Cloudflare request.
-
-## Browser notes
-
-Hosting requires the File System Access API, so Chromium/Edge are the best targets. Browsing/downloading as a client works in more browsers, but saving very large files is best when `showSaveFilePicker` is available because chunks can be streamed straight to disk instead of being accumulated in memory as a Blob fallback.
-
-## Link formats
-
-Cloud room links use the URL fragment so the code/password are not sent to GitHub Pages:
-
-```text
-https://<user>.github.io/<repo>/#r=<6-char-room>&p=<password>
-```
-
-Offline fallback links also use the fragment and carry an encrypted WebRTC offer:
-
-```text
-https://<user>.github.io/<repo>/#o=<huge-encrypted-offer>&p=<password>
-```
-
-The client creates an encrypted answer blob and sends it back to the host manually.
+The browser cannot create a real OS mount point. Use the native app for Linux
+FUSE, Windows ProjFS, and macOS FUSE-T.

@@ -3,121 +3,111 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Folder Buddies Web</title>
-  <link rel="icon" href="icon.png">
+  <title>Folder Buddies</title>
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="icon.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main class="shell">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">Folder Buddies Web</p>
-        <h1>Private browser-to-browser folder sharing</h1>
-        <p class="muted">Cloudflare only coordinates encrypted WebRTC signaling. File bytes move P2P and the host reads files on demand from the selected folder.</p>
+  <main class="window" aria-label="Folder Buddies">
+    <div class="titlebar">
+      <div class="dots" aria-hidden="true">
+        <span class="dot red"></span>
+        <span class="dot yellow"></span>
+        <span class="dot green"></span>
       </div>
-      <div class="status-pill" id="connectionState">Idle</div>
-    </header>
+      Folder Buddies
+    </div>
 
-    <section class="card config-card">
-      <label>
-        Cloudflare Worker URL
-        <input id="workerUrl" type="url" placeholder="https://folderbuddies-signaling.example.workers.dev">
-      </label>
-      <label>
-        ICE servers
-        <input id="iceServers" spellcheck="false" value='[{"urls":"stun:stun.l.google.com:19302"}]'>
-      </label>
-      <p class="hint">The Worker URL is public and safe to hardcode. ICE servers are only used by WebRTC NAT traversal; files still do not pass through Cloudflare.</p>
-    </section>
+    <div class="tabbar" role="tablist">
+      <button class="tab active" data-tab="share" role="tab" aria-selected="true">Share a folder</button>
+      <button class="tab" data-tab="connect" role="tab" aria-selected="false">Connect to a share</button>
+    </div>
 
-    <section class="card turnstile-card" id="turnstileBox" hidden>
-      <h2>Browser check</h2>
-      <p class="muted">Cloud rooms use Cloudflare Turnstile to slow down bots before opening signaling. Offline fallback does not need it.</p>
-      <div id="turnstileWidget" class="turnstile-widget"></div>
-      <p id="turnstileStatus" class="hint">Waiting for Turnstile…</p>
-    </section>
-
-    <section class="grid two">
-      <article class="card">
-        <h2>Host a folder</h2>
-        <p class="muted">Choose a folder once. The browser keeps a handle and streams requested files in chunks only when a peer asks for them.</p>
-        <div class="row wrap">
-          <button id="pickFolder">Choose folder</button>
-          <button id="hostCloud" disabled>Host with 6-char room</button>
-          <button id="hostOffline" disabled>Make offline link</button>
-          <button id="stopHost" disabled class="secondary">Stop hosting</button>
+    <section class="tabpage" data-page="share" role="tabpanel">
+      <form onsubmit="return false">
+        <div class="row">
+          <label for="folderInput">Folder:</label>
+          <div class="field">
+            <input id="folderInput" type="text" readonly placeholder="Choose a folder to share">
+            <button id="browseFolder" type="button">Browse…</button>
+          </div>
         </div>
-        <dl class="facts">
-          <div><dt>Folder</dt><dd id="hostFolder">None selected</dd></div>
-          <div><dt>Room</dt><dd><code id="hostRoom">—</code></dd></div>
-          <div><dt>Password</dt><dd><code id="hostPassword">—</code></dd></div>
-        </dl>
-        <label>
-          Share link
-          <textarea id="shareLink" readonly placeholder="Cloud room link or offline offer link appears here"></textarea>
-        </label>
-        <div class="row wrap">
-          <button id="copyShare" disabled>Copy link</button>
-          <button id="copyPassword" disabled class="secondary">Copy password</button>
-        </div>
-        <label>
-          Offline answer from client
-          <textarea id="offlineAnswer" placeholder="Paste the client's offline answer here when using the huge fallback link"></textarea>
-        </label>
-        <button id="acceptOfflineAnswer" disabled class="secondary">Accept offline answer</button>
-        <p class="hint">Host mode requires the File System Access API, currently best in Chromium/Edge. It never scans file contents up front.</p>
-      </article>
 
-      <article class="card">
-        <h2>Connect to someone</h2>
-        <p class="muted">Paste a 6-character room code, a shared link, or a huge offline offer link.</p>
-        <label>
-          Code / link / offline blob
-          <textarea id="joinCode" placeholder="6-char code, full link, or huge Base91 fallback"></textarea>
-        </label>
-        <label>
-          Password
-          <input id="joinPassword" type="text" autocomplete="off" placeholder="Room password">
-        </label>
-        <div class="row wrap">
-          <button id="joinCloud">Connect</button>
-          <button id="makeOfflineAnswer" class="secondary">Create offline answer</button>
-          <button id="disconnect" disabled class="secondary">Disconnect</button>
+        <div class="row">
+          <label for="maxClients">Max clients:</label>
+          <div class="field">
+            <input id="maxClients" type="number" min="0" max="9999" step="1" value="0">
+            <span class="hint">0 = unlimited</span>
+          </div>
         </div>
-        <label>
-          Offline answer to send back to host
-          <textarea id="offlineAnswerOut" readonly placeholder="Only used when connecting with the huge offline fallback link"></textarea>
-        </label>
-        <button id="copyOfflineAnswer" disabled class="secondary">Copy offline answer</button>
-      </article>
+
+        <div class="row">
+          <span></span>
+          <p class="note">Share just the 6-character code (or the link) — there is no separate
+          password. Cloudflare only relays an opaque encrypted handshake and never sees the
+          addresses exchanged.</p>
+        </div>
+
+        <div class="row">
+          <span></span>
+          <button id="shareToggle" type="button" class="primary">Start sharing</button>
+        </div>
+
+        <div class="row">
+          <label for="connectCode">Connect code:</label>
+          <div class="field">
+            <input id="connectCode" type="text" readonly placeholder="6-char room code appears here">
+            <button id="copyAll" type="button" disabled>Copy all</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <label>Status:</label>
+          <span id="shareStatus" class="statusvalue">Not sharing.</span>
+        </div>
+      </form>
     </section>
 
-    <section class="card explorer" id="explorer" hidden>
-      <div class="explorer-head">
-        <div>
-          <h2>Remote file explorer</h2>
-          <p id="remoteStatus" class="muted">Waiting for the data channel…</p>
+    <section class="tabpage" data-page="connect" role="tabpanel" hidden>
+      <form onsubmit="return false">
+        <div class="row">
+          <label for="connectInput">Connect code:</label>
+          <input id="connectInput" type="text" autocomplete="off" placeholder="paste the 6-char room code or share link">
         </div>
-        <button id="upButton" class="secondary">Up</button>
-      </div>
-      <div class="pathbar"><span>Path:</span> <code id="currentPath">/</code></div>
-      <table>
-        <thead>
-          <tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th><th></th></tr>
-        </thead>
-        <tbody id="fileRows"></tbody>
-      </table>
-      <div id="transfers" class="transfers"></div>
+
+        <div class="row">
+          <span></span>
+          <button id="connectToggle" type="button" class="primary">Connect &amp; browse</button>
+        </div>
+
+        <div class="row">
+          <label>Status:</label>
+          <span id="connectStatus" class="statusvalue">Not connected.</span>
+        </div>
+      </form>
+
+      <section id="explorer" class="explorer" hidden aria-label="Remote files">
+        <div class="explorerbar">
+          <code id="currentPath">/</code>
+          <button id="upButton" type="button">Up</button>
+        </div>
+        <table>
+          <thead><tr><th>Name</th><th>Size</th><th></th></tr></thead>
+          <tbody id="fileRows"></tbody>
+        </table>
+        <div id="transfers"></div>
+      </section>
     </section>
 
-    <section class="card log-card">
-      <h2>Log</h2>
-      <pre id="log"></pre>
-    </section>
+    <div class="statusbar"><span id="statsLabel">Idle</span></div>
   </main>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="turnstileMount" class="turnstile-mount" aria-hidden="true"></div>
 
   <script src="config.js"></script>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -69,9 +69,6 @@ bool Client::handshake(Conn& c, const Token& tok, std::string& err) {
         return false;
     }
 
-    // Switch this connection to its encrypted channel. Keys come from the same
-    // authenticated material as the proof, so only a peer holding the token (and
-    // password, if any) can read or write the data path from here on.
     Key256 txKey, rxKey;
     derive_session_keys(key, nonceCQ, nonceSQ, /*isServer=*/false, txKey, rxKey);
     c.chan.activate(txKey, rxKey);

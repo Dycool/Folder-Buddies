@@ -209,8 +209,7 @@ HRESULT CALLBACK file_data_cb(const PRJ_CALLBACK_DATA* data, UINT64 byteOffset, 
         w.pod(pseudoFh); // server OP_READ expects a file handle, so open first below
         (void)w;
 
-        // Open/read/release keeps ProjFS stateless. This costs one metadata op
-        // on first hydration, but avoids leaking handles if Explorer abandons a read.
+        // Open/read/release keeps ProjFS stateless and avoids leaking handles.
         Writer ow;
         ow.str(narrow(data->FilePathName));
         int32_t flags = 0; // read-only

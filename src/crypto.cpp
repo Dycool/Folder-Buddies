@@ -254,7 +254,7 @@ bool aead_decrypt(const Key256& key, std::span<const uint8_t, 12> nonce,
 // ---- secure framing -------------------------------------------------------
 
 namespace {
-constexpr uint32_t kMaxRecord = 256u << 20; // generous cap vs. a corrupt length
+constexpr uint32_t kMaxRecord = 256u << 20;
 
 void nonce_from_counter(uint64_t ctr, uint8_t out[12]) {
     for (int i = 0; i < 8; ++i) out[i] = static_cast<uint8_t>(ctr >> (8 * i));

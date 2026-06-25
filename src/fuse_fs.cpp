@@ -275,7 +275,7 @@ int fs_utimens(const char* path, const FB_TIMESPEC tv[2], struct fuse_file_info*
 }
 
 void* fs_init(struct fuse_conn_info* conn, struct fuse_config* cfg) {
-    // The whole point: cache aggressively so most ops never hit the network.
+    // Cache aggressively so most ops never hit the network.
     cfg->kernel_cache = 1;
     cfg->entry_timeout = 1.0;
     cfg->attr_timeout = 1.0;
@@ -337,8 +337,7 @@ std::string sanitize(const std::string& name) {
 }
 
 #ifdef _WIN32
-// A free drive letter like "Z:" — that is what makes the share appear as a real
-// disk in Explorer. High letters first so we don't fight C:/system drives.
+// A free drive letter; high letters first to avoid C:/system drives.
 std::string free_drive_letter() {
     DWORD mask = ::GetLogicalDrives();
     for (char c = 'Z'; c >= 'D'; --c)
@@ -386,9 +385,6 @@ std::string dedupe_path(const std::string& base, const std::string& name) {
 
 bool Mount::start(Client* client, const std::string& mountBase, const std::string& volname,
                   std::string& err) {
-    // Make sure the userspace filesystem backend is actually present. On macOS
-    // the release .app can bundle a FUSE-T installer; on Linux libfuse3 is an
-    // install-time prerequisite.
     if (!ensure_fuse_backend(err)) return false;
 
     std::string name = sanitize(volname);

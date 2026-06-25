@@ -1,8 +1,4 @@
 // Folder Buddies — optional UPnP-IGD port mapping for WAN reachability.
-//
-// On a LAN nothing here is needed. For internet use we try to auto-forward the
-// listen port via the router's IGD and learn the public IP to bake into the
-// token. If UPnP is unavailable, callers fall back to the LAN IP.
 #pragma once
 
 #include <cstdint>

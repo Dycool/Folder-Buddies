@@ -5,9 +5,7 @@
 #include <QIcon>
 
 int main(int argc, char** argv) {
-    // A recognised subcommand runs headless (no display needed); otherwise we
-    // launch the GUI. This is what lets `folderbuddies host …` / `connect …`
-    // work from a terminal while a plain launch opens the window.
+    // A recognised subcommand runs headless; a plain launch opens the GUI.
     if (fb::is_cli_invocation(argc, argv)) return fb::run_cli(argc, argv);
 
     QApplication app(argc, argv);

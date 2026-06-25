@@ -1,62 +1,70 @@
-// Folder Buddies — zero-knowledge Cloudflare signaling and offline room blobs.
+// Folder Buddies — Cloudflare-blind share codes and self-contained offline blobs.
 //
-// The Worker only stores:
-//   key   = 6-character Base91 room code
-//   value = encrypted payload + password-derived verifier
-// It never receives the plaintext IP/port/folder/session secret. The client
-// resolves a 6-char code through the Worker, or decrypts a long Base91 blob
-// locally when offline mode is used.
+// The host seals the connection Token (ip/port/folder/data-path secret) once.
+// The data-path secret is delivered to the client without the client ever typing
+// a password: either embedded in a long offline blob, or wrapped behind the
+// secret half of a short 6-char code that Cloudflare never receives.
 #pragma once
 
 #include "token.h"
 
-#include <optional>
 #include <string>
 
 namespace fb {
 
 constexpr int kRoomCodeLength = 6;
+constexpr int kLookupLen = 2;   // public half: the Cloudflare KV key
+constexpr int kKeyPartLen = 4;  // secret half: never sent to Cloudflare
 constexpr int kRoomTtlSeconds = 30 * 24 * 60 * 60;
 
 struct HostedShareTicket {
-    std::string roomCode;       // exactly 6 Base91 chars when Cloudflare publish succeeds
-    std::string password;       // strong random password; never sent plaintext to Cloudflare
-    std::string offlineBlob;    // massive Base91 encrypted fallback blob
+    std::string roomCode;       // 6 Base91 chars when Cloudflare publish succeeds
+    std::string offlineBlob;    // long self-contained Base91 blob
     std::string connectCode;    // roomCode if cloudPublished, otherwise offlineBlob
+    std::string ownerToken;     // delete credential, not shown to the user
+    std::string lookupId;       // Cloudflare KV key (public half of the code)
     std::string reach;
     std::string cloudStatus;
     bool cloudPublished = false;
 };
 
-std::string random_room_code();
-std::string random_room_password();
-bool looks_like_room_code(const std::string& text);
+// A sealed record ready to upload to Cloudflare. All fields are Base91 text.
+struct CloudRecord {
+    std::string lookupId;   // KV key
+    std::string salt;       // Argon2id salt for the wrap key
+    std::string wrapped;    // blobKey sealed under argon2id(keyPart, salt)
+    std::string payload;    // the Token ciphertext bundle
+    std::string owner;      // delete credential
+};
 
-// Payload encryption used for both Worker KV values and offline fallback blobs.
-std::string encrypt_room_payload(const Token& tok, const std::string& password,
-                                 const std::string& aadRoomCode, std::string& err);
-bool decrypt_room_payload(const std::string& encryptedBase91, const std::string& password,
-                          const std::string& aadRoomCode, Token& out, std::string& err);
+std::string random_room_code();                       // 6 Base91 chars
+bool looks_like_room_code(const std::string& text);   // exactly 6 clean Base91
 
-// Password-derived proof sent to the Worker. The Worker stores the verifier,
-// not the plaintext password, and GET/DELETE send only an HMAC proof.
-std::string worker_auth_verifier(const std::string& password);
-std::string worker_auth_proof(const std::string& password, const std::string& method,
-                              const std::string& roomCode);
+// Seal `tok` into a self-contained offline blob (embeds its own key).
+bool seal_for_offline(const Token& tok, std::string& offlineBlob, std::string& err);
+
+// Seal `tok` for Cloudflare under `roomCode`. `ownerOut` is the delete credential.
+bool seal_for_cloud(const Token& tok, const std::string& roomCode, CloudRecord& rec,
+                    std::string& ownerOut, std::string& err);
+
+// Open a long offline blob.
+bool open_offline_blob(const std::string& blob, Token& out, std::string& err);
+
+// Open a Cloudflare record fetched for `roomCode` (uses the secret half of the code).
+bool open_cloud_record(const std::string& roomCode, const std::string& salt,
+                       const std::string& wrapped, const std::string& payload,
+                       Token& out, std::string& err);
 
 class SignalingClient {
 public:
-    // The Cloudflare Worker URL is intentionally centralized here so you can
-    // hardcode your deployed endpoint once. It can also be overridden for local
-    // tests with FOLDERBUDDIES_SIGNALING_URL.
+    // Hardcoded at build time; overridable with FOLDERBUDDIES_SIGNALING_URL.
     static std::string base_url();
     static bool configured();
 
-    bool create_room(const std::string& roomCode, const std::string& password,
-                     const std::string& encryptedPayload, std::string& err);
-    bool get_room(const std::string& roomCode, const std::string& password,
-                  std::string& encryptedPayload, std::string& err);
-    bool delete_room(const std::string& roomCode, const std::string& password, std::string& err);
+    bool create(const CloudRecord& rec, std::string& err);
+    bool get(const std::string& lookupId, std::string& salt, std::string& wrapped,
+             std::string& payload, std::string& err);
+    bool remove(const std::string& lookupId, const std::string& owner, std::string& err);
 };
 
 } // namespace fb

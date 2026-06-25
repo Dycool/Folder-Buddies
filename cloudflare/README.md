@@ -6,7 +6,7 @@ The Worker exposes only:
 - `GET /room?code=<6-char Base91>`
 - `DELETE /room?code=<6-char Base91>`
 
-Native app mode uses KV: the 6-character room code is the key and the encrypted payload is the value. It never stores plaintext IP, port, folder name, filesystem secret, or plaintext password.
+Native app mode uses KV: the **public 2-char lookup half** of the code is the key, and the value is an opaque sealed record (the connection metadata plus a key wrapped under `Argon2id` of the *secret* half of the code, which never reaches Cloudflare). It never stores plaintext IP, port, folder name, filesystem secret, or the secret half of the code. Deletes are gated by a random owner token (`X-FB-Owner`).
 
 Webapp mode reuses `GET /room` as a WebSocket upgrade. The Worker routes each room to a Durable Object that forwards encrypted WebRTC signaling messages between host and client. It does not store or relay file bytes.
 
@@ -83,6 +83,19 @@ https://folderbuddies-signaling.<your-subdomain>.workers.dev
 For local testing without rebuilding, set `FOLDERBUDDIES_SIGNALING_URL` in the environment.
 
 
+## Bot and AI-crawler hardening
+
+The Worker addresses the Cloudflare security recommendations that can be handled in code:
+
+- `GET /robots.txt` disallows all crawlers and lists the major AI/training bots explicitly.
+- `GET /.well-known/security.txt` (and `/security.txt`) returns an RFC 9116 contact record.
+- Requests from known AI bot user-agents (GPTBot, ClaudeBot, CCBot, Bytespider, PerplexityBot, and others) get a `403`.
+
+Two recommendations are zone settings that must be toggled in the Cloudflare dashboard; they cannot be set from Worker code:
+
+- **Bot Fight Mode** — enable under *Security → Bots* for the zone.
+- **AI Labyrinth** — enable under *Security → Bots*. The Worker already hard-blocks AI bots by user-agent, so Labyrinth is an optional extra layer.
+
 ## Webapp signaling
 
 The static webapp connects to:
@@ -92,4 +105,4 @@ wss://<worker-host>/room?code=<6-char-room>&role=host&web=1
 wss://<worker-host>/room?code=<6-char-room>&role=client&web=1
 ```
 
-The Durable Object sees only room codes, peer IDs, and opaque encrypted signaling blobs. SDP offers/answers are encrypted in the browser with the room password before being sent to Cloudflare. Actual folder data moves over WebRTC DataChannel directly between browsers.
+The Durable Object sees only the public lookup half, peer IDs, and opaque encrypted signaling blobs. SDP offers/answers are encrypted in the browser with a key derived (via Argon2id) from the secret half of the code before being sent to Cloudflare. Actual folder data moves over WebRTC DataChannel directly between browsers.

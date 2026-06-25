@@ -1,6 +1,4 @@
-// Folder Buddies — high-level host/mount orchestration shared by the GUI and
-// the CLI. Keeping it in one place means both front-ends pick an available
-// port, drive UPnP, publish the zero-knowledge room and mount identically.
+// Folder Buddies — high-level host/mount orchestration shared by the GUI and CLI.
 #pragma once
 
 #include "client.h"
@@ -17,15 +15,14 @@ namespace fb {
 
 // Start sharing `folder`. The returned ticket contains either a 6-character
 // Cloudflare room code or, if the Worker is unavailable/quota-exhausted, a long
-// offline encrypted Base91 blob. The same strong password decrypts either form.
+// self-contained offline Base91 blob. Neither requires a separate password.
 bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int port,
                    int maxClients, bool lanOnly, HostedShareTicket& ticket,
                    std::string& err);
 
 // Resolve a user-entered connect code. Exactly 6 clean Base91 chars trigger the
-// Worker GET path; any longer Base91 string is decrypted locally as offline mode.
-bool resolve_share_code(const std::string& codeOrBlob, const std::string& password,
-                        Token& tok, std::string& err);
+// Worker GET path; any longer Base91 string is opened locally as an offline blob.
+bool resolve_share_code(const std::string& codeOrBlob, Token& tok, std::string& err);
 
 // Connect to and mount the share described by `tok` under `mountBase`. On
 // success `mountpoint` is the full path/volume the folder appears at.

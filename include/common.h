@@ -1,7 +1,4 @@
 // Folder Buddies — shared wire protocol, framing, and cross-platform socket helpers.
-//
-// Design goals: minimal framing, no allocations on the hot header path, and a
-// transport (TCP) tuned so the only limits are NIC, disk, and RTT.
 #pragma once
 
 #include <cstdint>
@@ -216,7 +213,6 @@ inline bool recv_message(socket_t s, MsgHeader& h, std::vector<uint8_t>& payload
 inline bool send_message(socket_t s, uint16_t op, int16_t status, uint64_t req_id,
                          const uint8_t* payload, uint32_t len) {
     MsgHeader h{kMagic, op, status, req_id, len};
-    // Two writes; TCP_NODELAY keeps latency low and the kernel coalesces.
     if (!send_all(s, &h, sizeof(h))) return false;
     if (len && !send_all(s, payload, len)) return false;
     return true;

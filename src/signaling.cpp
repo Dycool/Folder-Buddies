@@ -1,12 +1,10 @@
 #include "signaling.h"
 
-#include "auth.h"
 #include "base91.h"
 #include "common.h"
+#include "crypto.h"
 
 #include <QByteArray>
-#include <QCoreApplication>
-#include <QCryptographicHash>
 #include <QEventLoop>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -17,6 +15,8 @@
 #include <QUrl>
 #include <QUrlQuery>
 
+#include <sodium.h>
+
 #include <array>
 #include <cstdlib>
 #include <cstring>
@@ -25,8 +25,6 @@
 namespace fb {
 namespace {
 
-// Replace this after you deploy the Worker, for example:
-//   https://folderbuddies-signaling.<your-subdomain>.workers.dev
 #ifndef FB_SIGNALING_URL
 constexpr const char* kHardcodedWorkerUrl = "";
 #else
@@ -34,34 +32,24 @@ constexpr const char* kHardcodedWorkerUrl = FB_SIGNALING_URL;
 #endif
 
 constexpr char kPayloadMagic[5] = {'F', 'B', 'Z', 'K', '1'};
-constexpr char kPayloadAadPrefix[] = "FB-room-payload-v1";
+constexpr char kOfflineMagic[5] = {'F', 'B', 'O', 'F', '1'};
 constexpr uint32_t kPayloadVersion = 1;
 
-QByteArray qbytes(const std::vector<uint8_t>& v) {
-    return QByteArray(reinterpret_cast<const char*>(v.data()), static_cast<int>(v.size()));
-}
+// Argon2id parameters. Must match the webapp (@noble/hashes) exactly so both
+// sides derive the same wrap key from the secret half of the code.
+constexpr unsigned long long kArgonOps = 3;            // iterations (t)
+constexpr size_t kArgonMem = 64ull * 1024 * 1024;      // 64 MiB (m)
+constexpr size_t kArgonSaltLen = 16;
 
-std::vector<uint8_t> vec(const QByteArray& b) {
+std::vector<uint8_t> vecOf(const QByteArray& b) {
     return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(b.constData()),
                                 reinterpret_cast<const uint8_t*>(b.constData()) + b.size());
 }
 
-QByteArray password_root(const std::string& password) {
-    QByteArray material("FolderBuddies-password-root-v1", 31);
-    material.append('\0');
-    material.append(password.data(), static_cast<int>(password.size()));
-    return QCryptographicHash::hash(material, QCryptographicHash::Sha256);
-}
-
-Key256 payload_key(const std::string& password, const std::vector<uint8_t>& salt) {
-    QByteArray root = password_root(password);
-    QByteArray material = QByteArray(kPayloadAadPrefix) + "\0" + qbytes(salt);
-    return to_key256(hmac_sha256(root, material));
-}
-
-QByteArray payload_aad(const std::string& aadRoomCode) {
-    return QByteArray(kPayloadAadPrefix) + "\0" + QByteArray(aadRoomCode.data(),
-                                                             static_cast<int>(aadRoomCode.size()));
+Key256 to_key(const std::vector<uint8_t>& v) {
+    Key256 k{};
+    std::memcpy(k.data(), v.data(), 32);
+    return k;
 }
 
 std::vector<uint8_t> serialize_token_payload(const Token& tok) {
@@ -89,6 +77,65 @@ bool deserialize_token_payload(const std::vector<uint8_t>& plain, Token& out) {
     return !out.ip.empty() && out.port != 0 && !out.secret.empty();
 }
 
+// Derive a 32-byte key from the secret half of a code via Argon2id.
+bool argon2id_key(const std::string& keyPart, const std::vector<uint8_t>& salt, Key256& out,
+                  std::string& err) {
+    if (sodium_init() < 0) { err = "libsodium init failed"; return false; }
+    if (salt.size() != kArgonSaltLen) { err = "bad salt length"; return false; }
+    if (crypto_pwhash(out.data(), out.size(),
+                      keyPart.data(), keyPart.size(), salt.data(),
+                      kArgonOps, kArgonMem, crypto_pwhash_ALG_ARGON2ID13) != 0) {
+        err = "Argon2id derivation failed (out of memory?)";
+        return false;
+    }
+    return true;
+}
+
+// Seal a Token under a fresh random 256-bit key. Returns the key and the
+// ciphertext bundle (MAGIC || nonce || ct || tag).
+void seal_token(const Token& tok, std::vector<uint8_t>& blobKey, std::vector<uint8_t>& bundle) {
+    blobKey = random_bytes(32);
+    std::vector<uint8_t> plain = serialize_token_payload(tok);
+    std::vector<uint8_t> nonceVec = random_bytes(12);
+    std::array<uint8_t, 12> nonce{};
+    std::memcpy(nonce.data(), nonceVec.data(), nonce.size());
+    std::vector<uint8_t> ct(plain.size());
+    uint8_t tag[16];
+    aead_encrypt(to_key(blobKey), nonce, {}, plain, ct.data(), tag);
+
+    bundle.clear();
+    bundle.insert(bundle.end(), kPayloadMagic, kPayloadMagic + sizeof(kPayloadMagic));
+    bundle.insert(bundle.end(), nonceVec.begin(), nonceVec.end());
+    bundle.insert(bundle.end(), ct.begin(), ct.end());
+    bundle.insert(bundle.end(), tag, tag + 16);
+}
+
+bool open_bundle(const std::vector<uint8_t>& blobKey, const std::vector<uint8_t>& bundle,
+                 Token& out, std::string& err) {
+    if (blobKey.size() != 32) { err = "bad key"; return false; }
+    size_t header = sizeof(kPayloadMagic) + 12 + 16;
+    if (bundle.size() < header ||
+        std::memcmp(bundle.data(), kPayloadMagic, sizeof(kPayloadMagic)) != 0) {
+        err = "malformed payload bundle";
+        return false;
+    }
+    size_t off = sizeof(kPayloadMagic);
+    std::array<uint8_t, 12> nonce{};
+    std::memcpy(nonce.data(), bundle.data() + off, 12); off += 12;
+    size_t ctLen = bundle.size() - off - 16;
+    std::vector<uint8_t> ct(bundle.begin() + off, bundle.begin() + off + ctLen); off += ctLen;
+    uint8_t tag[16];
+    std::memcpy(tag, bundle.data() + off, 16);
+
+    std::vector<uint8_t> plain(ct.size());
+    if (!aead_decrypt(to_key(blobKey), nonce, {}, ct, tag, plain.data())) {
+        err = "wrong code or tampered payload";
+        return false;
+    }
+    if (!deserialize_token_payload(plain, out)) { err = "decrypted payload is malformed"; return false; }
+    return true;
+}
+
 bool sync_http(QNetworkRequest req, const QByteArray& method, const QByteArray& body,
                int& status, QByteArray& response, std::string& err) {
     QNetworkAccessManager nam;
@@ -107,7 +154,6 @@ bool sync_http(QNetworkRequest req, const QByteArray& method, const QByteArray& 
         err = "Cloudflare signaling timed out";
         return false;
     }
-
     status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     response = reply->readAll();
     if (reply->error() != QNetworkReply::NoError && status == 0) {
@@ -123,7 +169,7 @@ QNetworkRequest json_request(const std::string& path) {
     QNetworkRequest req(QUrl(QString::fromStdString(SignalingClient::base_url() + path)));
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     req.setRawHeader("Accept", "application/json");
-    req.setRawHeader("User-Agent", "FolderBuddies/1 zero-knowledge-cpp23");
+    req.setRawHeader("User-Agent", "FolderBuddies/1");
     return req;
 }
 
@@ -145,98 +191,99 @@ std::string random_room_code() {
     return code;
 }
 
-std::string random_room_password() {
-    // 32 random bytes ≈ 256 bits before Base91 encoding. The password is not
-    // shortened for display; the whole generated string is required.
-    return base91_encode(random_bytes(32));
-}
-
 bool looks_like_room_code(const std::string& text) {
     std::string s = clean_one_line(text);
     return s.size() == kRoomCodeLength && base91_is_clean(s);
 }
 
-std::string encrypt_room_payload(const Token& tok, const std::string& password,
-                                 const std::string& aadRoomCode, std::string& err) {
-    if (password.empty()) { err = "password is empty"; return {}; }
-    std::vector<uint8_t> plain = serialize_token_payload(tok);
-    std::vector<uint8_t> salt = random_bytes(16);
-    std::vector<uint8_t> nonceVec = random_bytes(12);
-    std::array<uint8_t, 12> nonce{};
-    std::memcpy(nonce.data(), nonceVec.data(), nonce.size());
-    Key256 key = payload_key(password, salt);
-    QByteArray aad = payload_aad(aadRoomCode);
-
-    std::vector<uint8_t> ct(plain.size());
-    uint8_t tag[16];
-    aead_encrypt(key, nonce, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(aad.constData()),
-                                                       static_cast<size_t>(aad.size())),
-                 plain, ct.data(), tag);
-
+bool seal_for_offline(const Token& tok, std::string& offlineBlob, std::string& err) {
+    std::vector<uint8_t> blobKey, bundle;
+    seal_token(tok, blobKey, bundle);
     std::vector<uint8_t> blob;
-    blob.reserve(sizeof(kPayloadMagic) + 16 + 12 + ct.size() + 16);
-    blob.insert(blob.end(), kPayloadMagic, kPayloadMagic + sizeof(kPayloadMagic));
-    blob.insert(blob.end(), salt.begin(), salt.end());
-    blob.insert(blob.end(), nonceVec.begin(), nonceVec.end());
-    blob.insert(blob.end(), ct.begin(), ct.end());
-    blob.insert(blob.end(), tag, tag + 16);
-    return base91_encode(blob);
-}
-
-bool decrypt_room_payload(const std::string& encryptedBase91, const std::string& password,
-                          const std::string& aadRoomCode, Token& out, std::string& err) {
-    if (password.empty()) { err = "password is required"; return false; }
-    bool ok = false;
-    std::vector<uint8_t> blob = base91_decode(encryptedBase91, &ok);
-    if (!ok || blob.size() < sizeof(kPayloadMagic) + 16 + 12 + 16) {
-        err = "encrypted room payload is not valid Base91";
-        return false;
-    }
-    size_t off = 0;
-    if (std::memcmp(blob.data(), kPayloadMagic, sizeof(kPayloadMagic)) != 0) {
-        err = "encrypted room payload has the wrong format";
-        return false;
-    }
-    off += sizeof(kPayloadMagic);
-    std::vector<uint8_t> salt(blob.begin() + off, blob.begin() + off + 16); off += 16;
-    std::array<uint8_t, 12> nonce{};
-    std::memcpy(nonce.data(), blob.data() + off, nonce.size()); off += nonce.size();
-    size_t ctLen = blob.size() - off - 16;
-    std::vector<uint8_t> ct(blob.begin() + off, blob.begin() + off + ctLen); off += ctLen;
-    uint8_t tag[16];
-    std::memcpy(tag, blob.data() + off, 16);
-
-    std::vector<uint8_t> plain(ct.size());
-    Key256 key = payload_key(password, salt);
-    QByteArray aad = payload_aad(aadRoomCode);
-    if (!aead_decrypt(key, nonce,
-                      std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(aad.constData()),
-                                               static_cast<size_t>(aad.size())),
-                      ct, tag, plain.data())) {
-        err = "wrong password or tampered room payload";
-        return false;
-    }
-    if (!deserialize_token_payload(plain, out)) {
-        err = "decrypted room payload is malformed";
-        return false;
-    }
+    blob.insert(blob.end(), kOfflineMagic, kOfflineMagic + sizeof(kOfflineMagic));
+    blob.insert(blob.end(), blobKey.begin(), blobKey.end());
+    blob.insert(blob.end(), bundle.begin(), bundle.end());
+    offlineBlob = base91_encode(blob);
+    (void)err;
     return true;
 }
 
-std::string worker_auth_verifier(const std::string& password) {
-    QByteArray root = password_root(password);
-    QByteArray verifier = hmac_sha256(root, "FB-worker-auth-verifier-v1");
-    return base91_encode(vec(verifier));
+bool open_offline_blob(const std::string& blob, Token& out, std::string& err) {
+    bool ok = false;
+    std::vector<uint8_t> raw = base91_decode(blob, &ok);
+    size_t header = sizeof(kOfflineMagic) + 32;
+    if (!ok || raw.size() < header || std::memcmp(raw.data(), kOfflineMagic, sizeof(kOfflineMagic)) != 0) {
+        err = "not a valid offline blob";
+        return false;
+    }
+    std::vector<uint8_t> blobKey(raw.begin() + sizeof(kOfflineMagic),
+                                 raw.begin() + sizeof(kOfflineMagic) + 32);
+    std::vector<uint8_t> bundle(raw.begin() + header, raw.end());
+    return open_bundle(blobKey, bundle, out, err);
 }
 
-std::string worker_auth_proof(const std::string& password, const std::string& method,
-                              const std::string& roomCode) {
-    QByteArray verifier = qbytes(base91_decode(worker_auth_verifier(password)));
-    QByteArray msg = QByteArray(method.data(), static_cast<int>(method.size())) + "\n" +
-                     QByteArray(roomCode.data(), static_cast<int>(roomCode.size())) +
-                     "\nFB-worker-auth-proof-v1";
-    QByteArray proof = hmac_sha256(verifier, msg);
-    return base91_encode(vec(proof));
+bool seal_for_cloud(const Token& tok, const std::string& roomCode, CloudRecord& rec,
+                    std::string& ownerOut, std::string& err) {
+    if (roomCode.size() != kRoomCodeLength) { err = "bad room code"; return false; }
+    std::string keyPart = roomCode.substr(kLookupLen, kKeyPartLen);
+
+    std::vector<uint8_t> blobKey, bundle;
+    seal_token(tok, blobKey, bundle);
+
+    std::vector<uint8_t> salt = random_bytes(kArgonSaltLen);
+    Key256 wrapKey;
+    if (!argon2id_key(keyPart, salt, wrapKey, err)) return false;
+
+    std::vector<uint8_t> wnonceVec = random_bytes(12);
+    std::array<uint8_t, 12> wnonce{};
+    std::memcpy(wnonce.data(), wnonceVec.data(), wnonce.size());
+    std::vector<uint8_t> wct(blobKey.size());
+    uint8_t wtag[16];
+    aead_encrypt(wrapKey, wnonce, {}, blobKey, wct.data(), wtag);
+
+    std::vector<uint8_t> wrapped;
+    wrapped.insert(wrapped.end(), wnonceVec.begin(), wnonceVec.end());
+    wrapped.insert(wrapped.end(), wct.begin(), wct.end());
+    wrapped.insert(wrapped.end(), wtag, wtag + 16);
+
+    ownerOut = base91_encode(random_bytes(16));
+    rec.lookupId = roomCode.substr(0, kLookupLen);
+    rec.salt = base91_encode(salt);
+    rec.wrapped = base91_encode(wrapped);
+    rec.payload = base91_encode(bundle);
+    rec.owner = ownerOut;
+    return true;
+}
+
+bool open_cloud_record(const std::string& roomCode, const std::string& saltB91,
+                       const std::string& wrappedB91, const std::string& payloadB91,
+                       Token& out, std::string& err) {
+    if (roomCode.size() != kRoomCodeLength) { err = "bad room code"; return false; }
+    std::string keyPart = roomCode.substr(kLookupLen, kKeyPartLen);
+
+    bool ok = false;
+    std::vector<uint8_t> salt = base91_decode(saltB91, &ok);
+    if (!ok || salt.size() != kArgonSaltLen) { err = "bad record salt"; return false; }
+    std::vector<uint8_t> wrapped = base91_decode(wrappedB91, &ok);
+    if (!ok || wrapped.size() != 12 + 32 + 16) { err = "bad wrapped key"; return false; }
+    std::vector<uint8_t> bundle = base91_decode(payloadB91, &ok);
+    if (!ok) { err = "bad record payload"; return false; }
+
+    Key256 wrapKey;
+    if (!argon2id_key(keyPart, salt, wrapKey, err)) return false;
+
+    std::array<uint8_t, 12> wnonce{};
+    std::memcpy(wnonce.data(), wrapped.data(), 12);
+    std::vector<uint8_t> wct(wrapped.begin() + 12, wrapped.begin() + 12 + 32);
+    uint8_t wtag[16];
+    std::memcpy(wtag, wrapped.data() + 12 + 32, 16);
+
+    std::vector<uint8_t> blobKey(32);
+    if (!aead_decrypt(wrapKey, wnonce, {}, wct, wtag, blobKey.data())) {
+        err = "wrong code";
+        return false;
+    }
+    return open_bundle(blobKey, bundle, out, err);
 }
 
 std::string SignalingClient::base_url() {
@@ -254,13 +301,14 @@ bool SignalingClient::configured() {
     return !u.empty() && u.rfind("https://", 0) == 0;
 }
 
-bool SignalingClient::create_room(const std::string& roomCode, const std::string& password,
-                                  const std::string& encryptedPayload, std::string& err) {
+bool SignalingClient::create(const CloudRecord& rec, std::string& err) {
     if (!configured()) { err = "Cloudflare signaling URL is not configured"; return false; }
     QJsonObject obj;
-    obj["room"] = QString::fromStdString(roomCode);
-    obj["auth"] = QString::fromStdString(worker_auth_verifier(password));
-    obj["payload"] = QString::fromStdString(encryptedPayload);
+    obj["lookup"] = QString::fromStdString(rec.lookupId);
+    obj["salt"] = QString::fromStdString(rec.salt);
+    obj["wrapped"] = QString::fromStdString(rec.wrapped);
+    obj["payload"] = QString::fromStdString(rec.payload);
+    obj["owner"] = QString::fromStdString(rec.owner);
     obj["ttl"] = kRoomTtlSeconds;
     QByteArray body = QJsonDocument(obj).toJson(QJsonDocument::Compact);
 
@@ -273,23 +321,23 @@ bool SignalingClient::create_room(const std::string& roomCode, const std::string
     return false;
 }
 
-bool SignalingClient::get_room(const std::string& roomCode, const std::string& password,
-                               std::string& encryptedPayload, std::string& err) {
+bool SignalingClient::get(const std::string& lookupId, std::string& salt, std::string& wrapped,
+                          std::string& payload, std::string& err) {
     if (!configured()) { err = "Cloudflare signaling URL is not configured"; return false; }
     QUrl url(QString::fromStdString(base_url() + "/room"));
     QUrlQuery q;
-    q.addQueryItem("code", QString::fromStdString(roomCode));
+    q.addQueryItem("code", QString::fromStdString(lookupId));
     url.setQuery(q);
     QNetworkRequest req(url);
     req.setRawHeader("Accept", "application/json");
-    req.setRawHeader("X-FB-Auth", QByteArray::fromStdString(worker_auth_proof(password, "GET", roomCode)));
 
     int status = 0;
     QByteArray resp;
     if (!sync_http(req, "GET", {}, status, resp, err)) return false;
     if (status != 200) {
         err = status == 429 ? "rate limited by signaling server; wait a minute and try again"
-                            : "Cloudflare room lookup failed (HTTP " + std::to_string(status) + ")";
+              : status == 404 ? "no share found for that code"
+                              : "Cloudflare room lookup failed (HTTP " + std::to_string(status) + ")";
         return false;
     }
     QJsonParseError pe{};
@@ -298,28 +346,73 @@ bool SignalingClient::get_room(const std::string& roomCode, const std::string& p
         err = "Cloudflare returned invalid JSON";
         return false;
     }
-    encryptedPayload = doc.object().value("payload").toString().toStdString();
-    if (encryptedPayload.empty()) { err = "Cloudflare returned an empty payload"; return false; }
+    QJsonObject o = doc.object();
+    salt = o.value("salt").toString().toStdString();
+    wrapped = o.value("wrapped").toString().toStdString();
+    payload = o.value("payload").toString().toStdString();
+    if (salt.empty() || wrapped.empty() || payload.empty()) { err = "Cloudflare returned an incomplete record"; return false; }
     return true;
 }
 
-bool SignalingClient::delete_room(const std::string& roomCode, const std::string& password,
-                                  std::string& err) {
+bool SignalingClient::remove(const std::string& lookupId, const std::string& owner, std::string& err) {
     if (!configured()) { err = "Cloudflare signaling URL is not configured"; return false; }
     QUrl url(QString::fromStdString(base_url() + "/room"));
     QUrlQuery q;
-    q.addQueryItem("code", QString::fromStdString(roomCode));
+    q.addQueryItem("code", QString::fromStdString(lookupId));
     url.setQuery(q);
     QNetworkRequest req(url);
     req.setRawHeader("Accept", "application/json");
-    req.setRawHeader("X-FB-Auth", QByteArray::fromStdString(worker_auth_proof(password, "DELETE", roomCode)));
+    req.setRawHeader("X-FB-Owner", QByteArray::fromStdString(owner));
     int status = 0;
     QByteArray resp;
     if (!sync_http(req, "DELETE", {}, status, resp, err)) return false;
     if (status == 200 || status == 204 || status == 404) return true;
-    err = status == 429 ? "rate limited by signaling server; wait a minute and try again"
-                        : "Cloudflare room delete failed (HTTP " + std::to_string(status) + "): " + resp.toStdString();
+    err = "Cloudflare room delete failed (HTTP " + std::to_string(status) + ")";
     return false;
 }
 
 } // namespace fb
+
+#ifdef FB_SIGNALING_SELFTEST
+#  include <cstdio>
+int main() {
+    using namespace fb;
+    if (sodium_init() < 0) { std::printf("signaling self-test FAIL (sodium)\n"); return 1; }
+
+    Token tok;
+    tok.ip = "2001:db8::1";
+    tok.port = 50321;
+    tok.folder = "cool folder";
+    tok.secret = random_bytes(kSecretBytes);
+
+    auto same = [&](const Token& a, const Token& b) {
+        return a.ip == b.ip && a.port == b.port && a.folder == b.folder && a.secret == b.secret;
+    };
+
+    std::string err;
+    bool ok = true;
+
+    // Offline blob round-trip.
+    std::string blob;
+    Token back;
+    ok = ok && seal_for_offline(tok, blob, err) && open_offline_blob(blob, back, err) && same(tok, back);
+
+    // Cloudflare record round-trip.
+    std::string code = random_room_code();
+    CloudRecord rec;
+    std::string owner;
+    Token back2;
+    ok = ok && seal_for_cloud(tok, code, rec, owner, err) &&
+         open_cloud_record(code, rec.salt, rec.wrapped, rec.payload, back2, err) && same(tok, back2);
+
+    // Wrong secret half must fail.
+    std::string wrong = code;
+    wrong[kLookupLen] = (wrong[kLookupLen] == 'A') ? 'B' : 'A';
+    Token bad;
+    bool wrongFails = !open_cloud_record(wrong, rec.salt, rec.wrapped, rec.payload, bad, err);
+    ok = ok && wrongFails;
+
+    std::printf("%s\n", ok ? "signaling self-test PASS" : "signaling self-test FAIL");
+    return ok ? 0 : 1;
+}
+#endif

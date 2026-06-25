@@ -1,127 +1,103 @@
+import { argon2id } from "./vendor/noble/argon2.js";
+
 (() => {
   "use strict";
 
   const BASE91 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+,-./:;<=>?@[]^_`{|}~";
   const ROOM_LEN = 6;
-  const BIN_MAGIC = 0x4642494e; // "FBIN"
+  const LOOKUP_LEN = 2;          // public half: the Durable Object room name
+  const ARGON = { t: 3, m: 65536, p: 1, dkLen: 32 }; // matches libsodium in the native app
+  const BIN_MAGIC = 0x4642494e; // FBIN
   const CHUNK_SIZE = 64 * 1024;
   const ICE_TIMEOUT_MS = 8000;
+  const STATS_INTERVAL_MS = 500;
+  const DEFAULT_ICE = [{ urls: "stun:stun.l.google.com:19302" }];
 
   const $ = (id) => document.getElementById(id);
   const els = {
-    workerUrl: $("workerUrl"),
-    iceServers: $("iceServers"),
-    turnstileBox: $("turnstileBox"),
-    turnstileWidget: $("turnstileWidget"),
-    turnstileStatus: $("turnstileStatus"),
-    connectionState: $("connectionState"),
-    pickFolder: $("pickFolder"),
-    hostCloud: $("hostCloud"),
-    hostOffline: $("hostOffline"),
-    stopHost: $("stopHost"),
-    hostFolder: $("hostFolder"),
-    hostRoom: $("hostRoom"),
-    hostPassword: $("hostPassword"),
-    shareLink: $("shareLink"),
-    copyShare: $("copyShare"),
-    copyPassword: $("copyPassword"),
-    offlineAnswer: $("offlineAnswer"),
-    acceptOfflineAnswer: $("acceptOfflineAnswer"),
-    joinCode: $("joinCode"),
-    joinPassword: $("joinPassword"),
-    joinCloud: $("joinCloud"),
-    makeOfflineAnswer: $("makeOfflineAnswer"),
-    disconnect: $("disconnect"),
-    offlineAnswerOut: $("offlineAnswerOut"),
-    copyOfflineAnswer: $("copyOfflineAnswer"),
+    tabs: [...document.querySelectorAll(".tab")],
+    pages: [...document.querySelectorAll(".tabpage")],
+    folderInput: $("folderInput"),
+    browseFolder: $("browseFolder"),
+    maxClients: $("maxClients"),
+    shareToggle: $("shareToggle"),
+    connectCode: $("connectCode"),
+    copyAll: $("copyAll"),
+    shareStatus: $("shareStatus"),
+    connectInput: $("connectInput"),
+    connectToggle: $("connectToggle"),
+    connectStatus: $("connectStatus"),
     explorer: $("explorer"),
-    remoteStatus: $("remoteStatus"),
     currentPath: $("currentPath"),
-    fileRows: $("fileRows"),
     upButton: $("upButton"),
+    fileRows: $("fileRows"),
     transfers: $("transfers"),
-    log: $("log"),
+    statsLabel: $("statsLabel"),
+    toast: $("toast"),
+    turnstileMount: $("turnstileMount"),
   };
 
   const state = {
     rootHandle: null,
-    rootName: "",
-    password: "",
-    room: "",
+    code: "",          // full 6-char code
+    lookup: "",        // public half (relay room)
+    rootBase: null,    // HKDF base key derived from the secret half
+    maxClients: 0,
     hostWs: null,
     clientWs: null,
-    hostPeers: new Map(), // peerId -> { pc, dc }
+    hostPeers: new Map(),
     clientPeer: null,
     dataChannel: null,
     currentPath: "/",
     pending: new Map(),
-    nextReqId: 1,
     downloads: new Map(),
-    offlineHostPeer: null,
+    nextReqId: 1,
     turnstileWidgetId: null,
-    turnstileToken: "",
+    turnstileResolver: null,
+    toastTimer: 0,
+    bytesServed: 0,
+    bytesReceived: 0,
+    lastServed: 0,
+    lastReceived: 0,
   };
 
-  function log(message, cls = "") {
-    const line = document.createElement("div");
-    if (cls) line.className = cls;
-    line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-    els.log.appendChild(line);
-    els.log.scrollTop = els.log.scrollHeight;
+  const te = new TextEncoder();
+  const td = new TextDecoder();
+
+  function setShareStatus(text) { els.shareStatus.textContent = text; }
+  function setConnectStatus(text) { els.connectStatus.textContent = text; }
+
+  function toast(text) {
+    els.toast.textContent = text;
+    els.toast.classList.add("show");
+    clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(() => els.toast.classList.remove("show"), 2400);
   }
 
-  function setStatus(text) {
-    els.connectionState.textContent = text;
-  }
-
-  function cleanInput(value) {
+  function clean(value) {
     return String(value || "").trim();
   }
 
-  function encodeHash(params) {
-    const sp = new URLSearchParams();
-    for (const [k, v] of Object.entries(params)) if (v) sp.set(k, v);
-    return `${location.origin}${location.pathname}#${sp.toString()}`;
+  function config() {
+    return window.FB_WEBAPP_CONFIG || {};
   }
 
-  function parseSharedInput(raw) {
-    const text = cleanInput(raw);
-    try {
-      const url = new URL(text);
-      if (url.hash) {
-        const sp = new URLSearchParams(url.hash.slice(1));
-        return {
-          room: sp.get("r") || "",
-          offlineOffer: sp.get("o") || "",
-          password: sp.get("p") || "",
-        };
-      }
-    } catch { /* not a URL */ }
-    if (text.includes("#")) {
-      const sp = new URLSearchParams(text.split("#").pop());
-      return {
-        room: sp.get("r") || "",
-        offlineOffer: sp.get("o") || "",
-        password: sp.get("p") || "",
-      };
-    }
-    return looksLikeRoom(text) ? { room: text, offlineOffer: "", password: "" }
-                               : { room: "", offlineOffer: text, password: "" };
+  function workerUrl() {
+    const value = clean(config().signalingUrl);
+    if (!value) throw new Error("Worker URL is missing. Set FB_SIGNALING_URL in GitHub Actions variables.");
+    return value.replace(/\/+$/, "");
   }
 
-  function applyHashToJoinForm() {
-    if (!location.hash) return;
-    const sp = new URLSearchParams(location.hash.slice(1));
-    const room = sp.get("r") || "";
-    const offlineOffer = sp.get("o") || "";
-    const password = sp.get("p") || "";
-    if (room || offlineOffer) els.joinCode.value = room || offlineOffer;
-    if (password) els.joinPassword.value = password;
+  function iceServers() {
+    return Array.isArray(config().iceServers) ? config().iceServers : DEFAULT_ICE;
   }
 
   function looksLikeRoom(text) {
     return text.length === ROOM_LEN && [...text].every((c) => BASE91.includes(c));
   }
+
+  function lookupOf(code) { return code.slice(0, LOOKUP_LEN); }
+  function keyPartOf(code) { return code.slice(LOOKUP_LEN); }
 
   function randomBytes(n) {
     const b = new Uint8Array(n);
@@ -133,8 +109,35 @@
     return [...randomBytes(ROOM_LEN)].map((b) => BASE91[b % BASE91.length]).join("");
   }
 
-  function randomPassword() {
-    return base91Encode(randomBytes(32));
+  function concatBytes(...parts) {
+    const size = parts.reduce((n, p) => n + p.length, 0);
+    const out = new Uint8Array(size);
+    let off = 0;
+    for (const p of parts) { out.set(p, off); off += p.length; }
+    return out;
+  }
+
+  async function sha256Bytes(bytes) {
+    return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  }
+
+  // Derive an HKDF base key from the secret half of the code via Argon2id. The
+  // salt is fixed per public half so host and client agree without exchanging it.
+  // The secret half never reaches Cloudflare, so the relayed signaling stays blind.
+  async function deriveRootBase(code) {
+    const saltSeed = await sha256Bytes(te.encode("FolderBuddies-web-salt-v1\0" + lookupOf(code)));
+    const root = argon2id(te.encode(keyPartOf(code)), saltSeed.slice(0, 16), ARGON);
+    return crypto.subtle.importKey("raw", root, "HKDF", false, ["deriveKey"]);
+  }
+
+  async function deriveAesKey(base, salt, aad) {
+    return crypto.subtle.deriveKey(
+      { name: "HKDF", hash: "SHA-256", salt, info: te.encode(aad) },
+      base,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"]
+    );
   }
 
   function base91Encode(data) {
@@ -163,7 +166,7 @@
     for (const ch of text) {
       if (/\s/.test(ch)) continue;
       const c = table.get(ch);
-      if (c === undefined) throw new Error("Invalid Base91 text");
+      if (c === undefined) throw new Error("Invalid encrypted text");
       if (v < 0) v = c;
       else {
         v += c * 91;
@@ -177,145 +180,172 @@
     return new Uint8Array(out);
   }
 
-  function concatBytes(...parts) {
-    const size = parts.reduce((n, p) => n + p.length, 0);
-    const out = new Uint8Array(size);
-    let off = 0;
-    for (const p of parts) { out.set(p, off); off += p.length; }
-    return out;
-  }
-
-  const te = new TextEncoder();
-  const td = new TextDecoder();
-
-  async function deriveAesKey(password, salt, aad) {
-    const root = await crypto.subtle.digest("SHA-256", te.encode(`FolderBuddies-web-root-v1\0${password}`));
-    const baseKey = await crypto.subtle.importKey("raw", root, "HKDF", false, ["deriveKey"]);
-    return crypto.subtle.deriveKey(
-      { name: "HKDF", hash: "SHA-256", salt, info: te.encode(aad) },
-      baseKey,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt", "decrypt"]
-    );
-  }
-
-  async function encryptJson(password, aad, obj) {
+  async function encryptJson(aad, obj) {
     const salt = randomBytes(16);
     const iv = randomBytes(12);
-    const key = await deriveAesKey(password, salt, aad);
+    const key = await deriveAesKey(state.rootBase, salt, aad);
     const plain = te.encode(JSON.stringify(obj));
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: te.encode(aad) }, key, plain));
     return base91Encode(concatBytes(te.encode("FBW1"), salt, iv, ct));
   }
 
-  async function decryptJson(password, aad, blob) {
+  async function decryptJson(aad, blob) {
     const data = base91Decode(blob);
-    if (data.length < 4 + 16 + 12 + 16 || td.decode(data.slice(0, 4)) !== "FBW1") {
-      throw new Error("Not a Folder Buddies Web encrypted blob");
-    }
+    if (data.length < 48 || td.decode(data.slice(0, 4)) !== "FBW1") throw new Error("Invalid encrypted signal");
     const salt = data.slice(4, 20);
     const iv = data.slice(20, 32);
     const ct = data.slice(32);
-    const key = await deriveAesKey(password, salt, aad);
+    const key = await deriveAesKey(state.rootBase, salt, aad);
     const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: te.encode(aad) }, key, ct);
     return JSON.parse(td.decode(plain));
   }
 
-  function getWorkerUrl() {
-    const value = cleanInput(els.workerUrl.value || window.FB_WEBAPP_CONFIG?.signalingUrl || "");
-    if (!value) throw new Error("Set your Cloudflare Worker URL first.");
-    return value.replace(/\/+$/, "");
+  function shareLink(code) {
+    return `${location.origin}${location.pathname}#r=${code}`;
   }
 
-  function getTurnstileSiteKey() {
-    return cleanInput(window.FB_WEBAPP_CONFIG?.turnstileSiteKey || "");
-  }
-
-  function initTurnstile() {
-    const siteKey = getTurnstileSiteKey();
-    if (!siteKey) {
-      els.turnstileBox.hidden = true;
-      return;
+  function parseJoinInput(raw) {
+    const text = clean(raw);
+    const fromHash = (frag) => new URLSearchParams(frag).get("r") || "";
+    try {
+      const url = new URL(text);
+      const r = fromHash(url.hash.slice(1));
+      if (r) return r;
+    } catch { /* not a URL */ }
+    if (text.includes("#")) {
+      const r = fromHash(text.split("#").pop());
+      if (r) return r;
     }
-    els.turnstileBox.hidden = false;
-    els.turnstileStatus.textContent = "Loading Cloudflare Turnstile…";
+    return text;
+  }
 
-    const render = () => {
-      if (!window.turnstile) {
-        setTimeout(render, 150);
-        return;
-      }
-      if (state.turnstileWidgetId !== null) return;
-      state.turnstileWidgetId = window.turnstile.render(els.turnstileWidget, {
-        sitekey: siteKey,
+  function applyHash() {
+    if (!location.hash) return;
+    const room = new URLSearchParams(location.hash.slice(1)).get("r") || "";
+    if (looksLikeRoom(room)) {
+      els.connectInput.value = room;
+      selectTab("connect");
+    }
+  }
+
+  async function turnstileToken() {
+    const sitekey = clean(config().turnstileSiteKey);
+    if (!sitekey) return "";
+    await waitForTurnstile();
+    if (state.turnstileWidgetId === null) {
+      state.turnstileWidgetId = window.turnstile.render(els.turnstileMount, {
+        sitekey,
+        size: "invisible",
         callback: (token) => {
-          state.turnstileToken = token || "";
-          els.turnstileStatus.textContent = state.turnstileToken
-            ? "Browser check ready for the next cloud connection."
-            : "Browser check did not return a token.";
-        },
-        "expired-callback": () => {
-          state.turnstileToken = "";
-          els.turnstileStatus.textContent = "Browser check expired. Please complete it again.";
+          if (state.turnstileResolver) {
+            state.turnstileResolver.resolve(token || "");
+            state.turnstileResolver = null;
+          }
         },
         "error-callback": () => {
-          state.turnstileToken = "";
-          els.turnstileStatus.textContent = "Turnstile failed to load. Offline fallback still works.";
+          if (state.turnstileResolver) {
+            state.turnstileResolver.reject(new Error("Browser check failed"));
+            state.turnstileResolver = null;
+          }
         },
+        "expired-callback": () => {},
       });
-    };
-    render();
-  }
-
-  function resetTurnstile() {
-    const siteKey = getTurnstileSiteKey();
-    if (!siteKey || !window.turnstile || state.turnstileWidgetId === null) return;
-    state.turnstileToken = "";
-    els.turnstileStatus.textContent = "Refreshing browser check…";
-    try { window.turnstile.reset(state.turnstileWidgetId); }
-    catch { els.turnstileStatus.textContent = "Refresh the page to run Turnstile again."; }
-  }
-
-  async function takeTurnstileToken() {
-    if (!getTurnstileSiteKey()) return "";
-    if (!state.turnstileToken) {
-      throw new Error("Complete the Turnstile browser check before using a cloud room.");
     }
-    const token = state.turnstileToken;
-    state.turnstileToken = "";
-    // Turnstile tokens are short-lived and validated server-side, so consume one
-    // per WebSocket connection and immediately ask the widget for the next one.
-    setTimeout(resetTurnstile, 0);
-    return token;
+    return new Promise((resolve, reject) => {
+      state.turnstileResolver = { resolve, reject };
+      try { window.turnstile.execute(state.turnstileWidgetId); }
+      catch (e) { state.turnstileResolver = null; reject(e); }
+      setTimeout(() => {
+        if (state.turnstileResolver) {
+          state.turnstileResolver = null;
+          reject(new Error("Browser check timed out"));
+        }
+      }, 15000);
+    });
   }
 
-  function makeWsUrl(room, role, turnstileToken = "") {
-    const u = new URL(getWorkerUrl());
+  function waitForTurnstile() {
+    if (window.turnstile) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const start = Date.now();
+      const tick = () => {
+        if (window.turnstile) return resolve();
+        if (Date.now() - start > 10000) return reject(new Error("Turnstile did not load"));
+        setTimeout(tick, 150);
+      };
+      tick();
+    });
+  }
+
+  function signalUrl(lookup, role, token = "") {
+    const u = new URL(workerUrl());
     u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
     u.pathname = "/room";
     u.search = "";
-    u.searchParams.set("code", room);
+    u.searchParams.set("code", lookup);
     u.searchParams.set("role", role);
     u.searchParams.set("web", "1");
-    if (turnstileToken) u.searchParams.set("turnstile", turnstileToken);
+    if (token) u.searchParams.set("turnstile", token);
     return u;
   }
 
-  function parseIceServers() {
-    try {
-      const value = JSON.parse(els.iceServers.value || "[]");
-      if (!Array.isArray(value)) throw new Error("ICE config must be an array");
-      return value;
-    } catch (e) {
-      throw new Error(`Bad ICE servers JSON: ${e.message}`);
-    }
+  function openSignal(role, lookup, onMessage, token = "") {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(signalUrl(lookup, role, token));
+      const timer = setTimeout(() => reject(new Error("Signaling timed out")), 12000);
+      ws.onopen = () => { clearTimeout(timer); resolve(ws); };
+      ws.onerror = () => { clearTimeout(timer); reject(new Error("Signaling failed")); };
+      ws.onclose = () => {
+        if (role === "host" && state.hostWs === ws) setShareStatus("Not sharing.");
+        if (role === "client" && state.clientWs === ws) setConnectStatus("Disconnected.");
+      };
+      ws.onmessage = (event) => {
+        try { onMessage(JSON.parse(event.data)); }
+        catch { /* ignore malformed signaling */ }
+      };
+    });
   }
 
-  function makePeerConnection(label) {
-    const pc = new RTCPeerConnection({ iceServers: parseIceServers() });
-    pc.onconnectionstatechange = () => log(`${label}: WebRTC ${pc.connectionState}`);
-    pc.oniceconnectionstatechange = () => log(`${label}: ICE ${pc.iceConnectionState}`);
+  // Connect as host, regenerating the code if the relay room is already taken.
+  async function openHostSignal() {
+    for (let attempt = 0; attempt < 12; ++attempt) {
+      const code = randomRoom();
+      const lookup = lookupOf(code);
+      const token = await turnstileToken().catch(() => "");
+      const ws = await openSignal("host", lookup, (msg) => handleHostSignal(msg).catch((err) => toast(err.message)), token);
+      const claimed = await new Promise((resolve) => {
+        const onReady = (event) => {
+          let msg; try { msg = JSON.parse(event.data); } catch { return; }
+          if (msg.kind === "ready") { cleanup(); resolve(true); }
+          else if (msg.kind === "error" && msg.error === "host_already_connected") { cleanup(); resolve(false); }
+        };
+        const onClose = () => { cleanup(); resolve(false); };
+        const cleanup = () => { ws.removeEventListener("message", onReady); ws.removeEventListener("close", onClose); };
+        ws.addEventListener("message", onReady);
+        ws.addEventListener("close", onClose);
+      });
+      if (claimed) return { code, lookup, ws };
+      try { ws.close(); } catch { /* already closing */ }
+    }
+    throw new Error("Could not find a free room code");
+  }
+
+  async function sendEncryptedSignal(ws, peerId, payload) {
+    const aad = `web-signal:${state.lookup}:${peerId}`;
+    const ciphertext = await encryptJson(aad, payload);
+    ws.send(JSON.stringify({ kind: "signal", peerId, ciphertext }));
+  }
+
+  function decryptSignal(peerId, ciphertext) {
+    const aad = `web-signal:${state.lookup}:${peerId}`;
+    return decryptJson(aad, ciphertext);
+  }
+
+  function makePeer(label) {
+    const pc = new RTCPeerConnection({ iceServers: iceServers() });
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed") toast(`${label} connection failed`);
+    };
     return pc;
   }
 
@@ -333,61 +363,26 @@
     });
   }
 
-  async function openSignal(role, room, onMessage, turnstileToken = "") {
-    const ws = new WebSocket(makeWsUrl(room, role, turnstileToken));
-    ws.onopen = () => log(`${role} signaling connected for room ${room}`, "ok");
-    ws.onclose = (event) => log(`${role} signaling closed (${event.code || "no code"})`);
-    ws.onerror = () => log(`${role} signaling error`, "err");
-    ws.onmessage = (event) => {
-      try { onMessage(JSON.parse(event.data)); }
-      catch { log("Bad signaling message ignored", "err"); }
-    };
-    return ws;
-  }
-
-  async function sendEncryptedSignal(ws, room, peerId, payload) {
-    const aad = `web-signal:${room}:${peerId}`;
-    const ciphertext = await encryptJson(state.password, aad, payload);
-    ws.send(JSON.stringify({ kind: "signal", peerId, ciphertext }));
-  }
-
-  async function decryptSignal(room, peerId, ciphertext) {
-    const aad = `web-signal:${room}:${peerId}`;
-    return decryptJson(state.password, aad, ciphertext);
-  }
-
-  function setupHostDataChannel(peerId, dc) {
+  function setupHostChannel(peerId, dc) {
     dc.binaryType = "arraybuffer";
-    dc.onopen = () => log(`Peer ${peerId} data channel open`, "ok");
-    dc.onclose = () => log(`Peer ${peerId} data channel closed`);
-    dc.onerror = () => log(`Peer ${peerId} data channel error`, "err");
     dc.onmessage = (event) => {
       if (typeof event.data !== "string") return;
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
-      handleHostRequest(peerId, dc, msg).catch((e) => {
-        safeSendJson(dc, { t: "error", id: msg?.id || 0, message: e.message });
-      });
+      handleHostRequest(peerId, dc, msg).catch((e) => safeSendJson(dc, { t: "error", id: msg?.id || 0, message: e.message }));
     };
   }
 
-  function setupClientDataChannel(dc) {
+  function setupClientChannel(dc) {
     state.dataChannel = dc;
     dc.binaryType = "arraybuffer";
     dc.onopen = () => {
-      log("Data channel open", "ok");
-      setStatus("Connected");
-      els.disconnect.disabled = false;
+      setConnectStatus("Connected.");
       els.explorer.hidden = false;
-      els.remoteStatus.textContent = "Connected. Browsing remote folder.";
-      listRemote("/").catch((e) => log(e.message, "err"));
+      listRemote("/").catch((e) => toast(e.message));
     };
-    dc.onclose = () => {
-      log("Data channel closed");
-      setStatus("Disconnected");
-      els.remoteStatus.textContent = "Disconnected.";
-    };
-    dc.onerror = () => log("Data channel error", "err");
+    dc.onclose = () => setConnectStatus("Disconnected.");
+    dc.onerror = () => toast("Connection error");
     dc.onmessage = (event) => {
       if (typeof event.data === "string") handleClientJson(event.data);
       else handleClientBinary(event.data);
@@ -426,7 +421,7 @@
         state.pending.delete(msg.id);
         pending.reject(new Error(msg.message || "Remote error"));
       }
-      log(msg.message || "Remote error", "err");
+      toast(msg.message || "Remote error");
       return;
     }
     if (msg.t === "listResult") {
@@ -440,18 +435,15 @@
     }
     if (msg.t === "fileStart") {
       const d = state.downloads.get(msg.id);
-      if (d) {
-        d.size = Number(msg.size || 0);
-        d.received = 0;
-        d.label.textContent = `${msg.name} — 0 / ${formatSize(d.size)}`;
-        d.progress.max = d.size || 1;
-        d.progress.value = 0;
-      }
+      if (!d) return;
+      d.size = Number(msg.size || 0);
+      d.received = 0;
+      d.label.textContent = `${msg.name} — 0 / ${formatSize(d.size)}`;
+      d.progress.max = d.size || 1;
+      d.progress.value = 0;
       return;
     }
-    if (msg.t === "fileEnd") {
-      finishDownload(msg.id).catch((e) => log(e.message, "err"));
-    }
+    if (msg.t === "fileEnd") finishDownload(msg.id).catch((e) => toast(e.message));
   }
 
   function handleClientBinary(buf) {
@@ -462,11 +454,12 @@
     if (!d) return;
     const chunk = new Uint8Array(buf, 8);
     d.received += chunk.byteLength;
+    state.bytesReceived += chunk.byteLength;
     d.progress.value = d.received;
     d.label.textContent = `${d.name} — ${formatSize(d.received)} / ${formatSize(d.size || d.received)}`;
     if (d.writer) {
       d.writeQueue = d.writeQueue.then(() => d.writer.write(chunk));
-      d.writeQueue.catch((e) => log(`Write failed: ${e.message}`, "err"));
+      d.writeQueue.catch((e) => toast(`Write failed: ${e.message}`));
     } else {
       d.chunks.push(chunk.slice());
     }
@@ -490,7 +483,6 @@
     }
     d.label.textContent = `${d.name} — done`;
     d.progress.value = d.progress.max;
-    log(`Downloaded ${d.name}`, "ok");
   }
 
   async function handleHostRequest(peerId, dc, msg) {
@@ -506,7 +498,7 @@
             const file = await handle.getFile();
             entry.size = file.size;
             entry.mtime = file.lastModified;
-          } catch { /* permission might have changed */ }
+          } catch { /* permission can change */ }
         }
         entries.push(entry);
       }
@@ -521,7 +513,6 @@
       safeSendJson(dc, { t: "fileStart", id: msg.id, name: file.name, size: file.size, mtime: file.lastModified });
       await streamFile(dc, msg.id, file);
       safeSendJson(dc, { t: "fileEnd", id: msg.id });
-      log(`Served ${path} to ${peerId}`);
       return;
     }
     throw new Error("Unknown request");
@@ -534,8 +525,7 @@
         const { value, done } = await reader.read();
         if (done) break;
         for (let off = 0; off < value.byteLength; off += CHUNK_SIZE) {
-          const chunk = value.slice(off, Math.min(off + CHUNK_SIZE, value.byteLength));
-          await sendBinaryChunk(dc, id, chunk);
+          await sendBinaryChunk(dc, id, value.slice(off, Math.min(off + CHUNK_SIZE, value.byteLength)));
         }
       }
     } finally {
@@ -557,6 +547,7 @@
     view.setUint32(4, id >>> 0, false);
     out.set(chunk, 8);
     dc.send(out);
+    state.bytesServed += chunk.byteLength;
   }
 
   function normalizePath(path) {
@@ -597,161 +588,182 @@
   }
 
   async function createHostPeer(peerId) {
-    const pc = makePeerConnection(`host ${peerId}`);
+    const pc = makePeer(`Peer ${peerId}`);
     const dc = pc.createDataChannel("folderbuddies-files", { ordered: true });
-    setupHostDataChannel(peerId, dc);
+    setupHostChannel(peerId, dc);
     state.hostPeers.set(peerId, { pc, dc });
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     await waitForIceComplete(pc);
-    await sendEncryptedSignal(state.hostWs, state.room, peerId, { type: "offer", sdp: pc.localDescription });
-    log(`Offer sent to ${peerId}`);
+    await sendEncryptedSignal(state.hostWs, peerId, { type: "offer", sdp: pc.localDescription });
   }
 
   async function handleHostSignal(msg) {
     if (msg.kind === "ready") {
-      setStatus("Hosting");
+      renderShareStatus();
       return;
     }
     if (msg.kind === "client-joined") {
-      log(`Client joined: ${msg.peerId}`);
-      createHostPeer(msg.peerId).catch((e) => log(e.message, "err"));
+      if (state.maxClients > 0 && state.hostPeers.size >= state.maxClients) {
+        toast("Max clients reached; ignoring a new connection");
+        return;
+      }
+      createHostPeer(msg.peerId).then(renderShareStatus).catch((e) => toast(e.message));
       return;
     }
     if (msg.kind === "client-left") {
       const peer = state.hostPeers.get(msg.peerId);
       if (peer) peer.pc.close();
       state.hostPeers.delete(msg.peerId);
-      log(`Client left: ${msg.peerId}`);
+      renderShareStatus();
       return;
     }
     if (msg.kind === "signal") {
-      const signal = await decryptSignal(state.room, msg.peerId, msg.ciphertext);
-      if (signal.type === "answer") {
-        const peer = state.hostPeers.get(msg.peerId);
-        if (!peer) return;
-        await peer.pc.setRemoteDescription(signal.sdp);
-        log(`Answer accepted from ${msg.peerId}`, "ok");
-      }
+      const signal = await decryptSignal(msg.peerId, msg.ciphertext);
+      if (signal.type !== "answer") return;
+      const peer = state.hostPeers.get(msg.peerId);
+      if (peer) await peer.pc.setRemoteDescription(signal.sdp);
     }
   }
 
   async function handleClientSignal(msg) {
     if (msg.kind === "ready") {
       state.clientPeer = { peerId: msg.peerId, pc: null };
-      setStatus("Waiting for host");
-      log(`Joined room ${msg.room}; waiting for encrypted offer`);
+      setConnectStatus("Waiting for host…");
       return;
     }
     if (msg.kind === "host-left") {
-      log("Host left the room", "err");
-      setStatus("Host left");
+      toast("Host stopped sharing");
+      setConnectStatus("Host stopped sharing.");
       return;
     }
     if (msg.kind === "signal") {
       const peerId = state.clientPeer?.peerId || msg.peerId;
-      const signal = await decryptSignal(state.room, peerId, msg.ciphertext);
+      const signal = await decryptSignal(peerId, msg.ciphertext);
       if (signal.type === "offer") {
-        await acceptOfferAndAnswer(peerId, signal.sdp, async (answer) => {
-          await sendEncryptedSignal(state.clientWs, state.room, peerId, { type: "answer", sdp: answer });
+        await acceptOffer(peerId, signal.sdp, async (answer) => {
+          await sendEncryptedSignal(state.clientWs, peerId, { type: "answer", sdp: answer });
         });
       }
     }
   }
 
-  async function acceptOfferAndAnswer(peerId, offerSdp, sendAnswer) {
-    const pc = makePeerConnection(`client ${peerId}`);
+  async function acceptOffer(peerId, offerSdp, sendAnswer) {
+    const pc = makePeer("Remote folder");
     state.clientPeer = { peerId, pc };
-    pc.ondatachannel = (event) => setupClientDataChannel(event.channel);
+    pc.ondatachannel = (event) => setupClientChannel(event.channel);
     await pc.setRemoteDescription(offerSdp);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     await waitForIceComplete(pc);
     await sendAnswer(pc.localDescription);
-    log("Encrypted answer sent", "ok");
   }
 
-  async function startCloudHost() {
-    if (!state.rootHandle) throw new Error("Choose a folder first");
-    state.password = randomPassword();
-    state.room = randomRoom();
-    const turnstileToken = await takeTurnstileToken();
-    state.hostWs = await openSignal("host", state.room, (msg) => handleHostSignal(msg).catch((e) => log(e.message, "err")), turnstileToken);
-    els.hostRoom.textContent = state.room;
-    els.hostPassword.textContent = state.password;
-    els.shareLink.value = encodeHash({ r: state.room, p: state.password });
-    els.copyShare.disabled = false;
-    els.copyPassword.disabled = false;
-    els.stopHost.disabled = false;
-    els.acceptOfflineAnswer.disabled = true;
-    log("Cloud room link created. Share the link with the client.", "ok");
+  function renderShareStatus() {
+    if (!state.hostWs) { setShareStatus("Not sharing."); return; }
+    setShareStatus(`Sharing — ${state.hostPeers.size} client(s)`);
   }
 
-  async function startOfflineHost() {
-    if (!state.rootHandle) throw new Error("Choose a folder first");
-    state.password = randomPassword();
-    state.room = "offline";
-    const pc = makePeerConnection("offline host");
-    const dc = pc.createDataChannel("folderbuddies-files", { ordered: true });
-    setupHostDataChannel("offline", dc);
-    state.offlineHostPeer = pc;
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await waitForIceComplete(pc);
-    const blob = await encryptJson(state.password, "web-offline-offer", { type: "offer", sdp: pc.localDescription });
-    els.hostRoom.textContent = "offline";
-    els.hostPassword.textContent = state.password;
-    els.shareLink.value = encodeHash({ o: blob, p: state.password });
-    els.copyShare.disabled = false;
-    els.copyPassword.disabled = false;
-    els.stopHost.disabled = false;
-    els.acceptOfflineAnswer.disabled = false;
-    setStatus("Offline offer ready");
-    log("Huge offline offer link created. The client must send an offline answer back.", "ok");
-  }
-
-  async function acceptOfflineAnswer() {
-    if (!state.offlineHostPeer) throw new Error("No offline host session is waiting");
-    const blob = cleanInput(els.offlineAnswer.value);
-    const answer = await decryptJson(state.password, "web-offline-answer", blob);
-    if (answer.type !== "answer") throw new Error("Offline blob is not an answer");
-    await state.offlineHostPeer.setRemoteDescription(answer.sdp);
-    setStatus("Offline connected");
-    log("Offline answer accepted", "ok");
-  }
-
-  async function joinCloud() {
-    const parsed = parseSharedInput(els.joinCode.value);
-    const password = cleanInput(els.joinPassword.value || parsed.password);
-    if (!password) throw new Error("Password is required");
-    state.password = password;
-    state.room = parsed.room || cleanInput(els.joinCode.value);
-    if (!looksLikeRoom(state.room)) {
-      if (parsed.offlineOffer) return makeOfflineAnswer();
-      throw new Error("Paste a 6-character room code/link, or use the offline answer button for huge fallback links.");
+  function setShareRunning(running) {
+    els.shareToggle.textContent = running ? "Stop sharing" : "Start sharing";
+    els.folderInput.disabled = running;
+    els.browseFolder.disabled = running;
+    els.maxClients.disabled = running;
+    els.copyAll.disabled = !running;
+    if (!running) {
+      els.connectCode.value = "";
     }
-    const turnstileToken = await takeTurnstileToken();
-    state.clientWs = await openSignal("client", state.room, (msg) => handleClientSignal(msg).catch((e) => log(e.message, "err")), turnstileToken);
-    els.disconnect.disabled = false;
-    setStatus("Connecting");
   }
 
-  async function makeOfflineAnswer() {
-    const parsed = parseSharedInput(els.joinCode.value);
-    const password = cleanInput(els.joinPassword.value || parsed.password);
-    const offerBlob = parsed.offlineOffer || cleanInput(els.joinCode.value);
-    if (!password) throw new Error("Password is required");
-    state.password = password;
-    const offer = await decryptJson(password, "web-offline-offer", offerBlob);
-    if (offer.type !== "offer") throw new Error("Offline blob is not an offer");
-    await acceptOfferAndAnswer("offline", offer.sdp, async (answerSdp) => {
-      const answerBlob = await encryptJson(password, "web-offline-answer", { type: "answer", sdp: answerSdp });
-      els.offlineAnswerOut.value = answerBlob;
-      els.copyOfflineAnswer.disabled = false;
-      log("Offline answer created. Send it back to the host.", "ok");
-    });
-    els.disconnect.disabled = false;
-    setStatus("Offline answer ready");
+  async function pickFolder() {
+    if (!window.showDirectoryPicker) throw new Error("Folder hosting needs Chromium or Edge");
+    state.rootHandle = await window.showDirectoryPicker({ mode: "read" });
+    els.folderInput.value = state.rootHandle.name;
+  }
+
+  async function startHost() {
+    if (!state.rootHandle) await pickFolder();
+    setShareStatus("Starting…");
+    els.shareToggle.disabled = true;
+    const maxClients = Number(els.maxClients.value);
+    state.maxClients = Number.isFinite(maxClients) && maxClients > 0 ? Math.floor(maxClients) : 0;
+
+    try {
+      const { code, lookup, ws } = await openHostSignal();
+      state.code = code;
+      state.lookup = lookup;
+      state.rootBase = await deriveRootBase(code);
+      state.hostWs = ws;
+      ws.onmessage = (event) => {
+        try { handleHostSignal(JSON.parse(event.data)).catch((e) => toast(e.message)); }
+        catch { /* ignore */ }
+      };
+    } catch (e) {
+      state.code = "";
+      state.lookup = "";
+      state.rootBase = null;
+      throw e;
+    } finally {
+      els.shareToggle.disabled = false;
+    }
+
+    els.connectCode.value = state.code;
+    setShareRunning(true);
+    renderShareStatus();
+    toast("Sharing.");
+  }
+
+  async function stopHost() {
+    if (state.hostWs) state.hostWs.close();
+    for (const p of state.hostPeers.values()) p.pc.close();
+    state.hostWs = null;
+    state.hostPeers.clear();
+    state.code = "";
+    state.lookup = "";
+    state.rootBase = null;
+    setShareRunning(false);
+    setShareStatus("Not sharing.");
+    toast("Stopped sharing");
+  }
+
+  function copyShareDetails() {
+    return ["Connect code:", els.connectCode.value, "", "Share link:", shareLink(els.connectCode.value)].join("\n");
+  }
+
+  function setConnected(connected) {
+    els.connectToggle.textContent = connected ? "Disconnect" : "Connect & browse";
+    els.connectInput.disabled = connected;
+  }
+
+  async function connect() {
+    const code = parseJoinInput(els.connectInput.value);
+    if (!looksLikeRoom(code)) throw new Error("Paste the 6-character room code or share link");
+
+    setConnectStatus("Connecting…");
+    state.code = code;
+    state.lookup = lookupOf(code);
+    state.rootBase = await deriveRootBase(code);
+    const token = await turnstileToken();
+    state.clientWs = await openSignal("client", state.lookup, (msg) => handleClientSignal(msg).catch((e) => toast(e.message)), token);
+    setConnected(true);
+  }
+
+  function disconnectClient() {
+    if (state.clientWs) state.clientWs.close();
+    if (state.clientPeer?.pc) state.clientPeer.pc.close();
+    state.clientWs = null;
+    state.clientPeer = null;
+    state.dataChannel = null;
+    setConnected(false);
+    els.explorer.hidden = true;
+    els.fileRows.textContent = "";
+    els.transfers.textContent = "";
+    setConnectStatus("Not connected.");
+  }
+
+  function disconnectAll() {
+    stopHost().catch(() => {});
+    disconnectClient();
   }
 
   async function listRemote(path) {
@@ -767,7 +779,11 @@
     els.fileRows.textContent = "";
     if (!entries.length) {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td colspan="5" class="muted">Empty folder</td>`;
+      const td = document.createElement("td");
+      td.colSpan = 3;
+      td.className = "muted";
+      td.textContent = "Empty folder";
+      tr.appendChild(td);
       els.fileRows.appendChild(tr);
       return;
     }
@@ -777,27 +793,30 @@
       const name = document.createElement("td");
       name.className = "name";
       name.textContent = e.kind === "directory" ? `📁 ${e.name}` : `📄 ${e.name}`;
-      if (e.kind === "directory") name.onclick = () => listRemote(e.path).catch((err) => log(err.message, "err"));
-      const kind = document.createElement("td");
-      kind.textContent = e.kind;
+      if (e.kind === "directory") name.onclick = () => listRemote(e.path).catch((err) => toast(err.message));
       const size = document.createElement("td");
       size.textContent = e.kind === "file" ? formatSize(e.size || 0) : "—";
-      const mtime = document.createElement("td");
-      mtime.textContent = e.mtime ? new Date(e.mtime).toLocaleString() : "—";
       const action = document.createElement("td");
       if (e.kind === "file") {
         const btn = document.createElement("button");
         btn.textContent = "Download";
-        btn.onclick = () => downloadRemote(e).catch((err) => log(err.message, "err"));
+        btn.onclick = () => downloadRemote(e).catch((err) => toast(err.message));
         action.appendChild(btn);
       }
-      tr.append(name, kind, size, mtime, action);
+      tr.append(name, size, action);
       els.fileRows.appendChild(tr);
     }
   }
 
   async function downloadRemote(entry) {
     if (!state.dataChannel || state.dataChannel.readyState !== "open") throw new Error("Not connected");
+
+    let writer = null;
+    if (window.showSaveFilePicker) {
+      const saveHandle = await window.showSaveFilePicker({ suggestedName: entry.name });
+      writer = await saveHandle.createWritable();
+    }
+
     const id = nextId();
     const transfer = document.createElement("div");
     transfer.className = "transfer";
@@ -809,11 +828,6 @@
     transfer.append(label, progress);
     els.transfers.prepend(transfer);
 
-    let writer = null;
-    if (window.showSaveFilePicker) {
-      const saveHandle = await window.showSaveFilePicker({ suggestedName: entry.name });
-      writer = await saveHandle.createWritable();
-    }
     state.downloads.set(id, { name: entry.name, size: entry.size || 0, received: 0, chunks: [], writer, writeQueue: Promise.resolve(), label, progress });
     safeSendJson(state.dataChannel, { t: "download", id, path: entry.path });
   }
@@ -826,66 +840,70 @@
     return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
   }
 
-  function disconnectAll() {
-    if (state.hostWs) state.hostWs.close();
-    if (state.clientWs) state.clientWs.close();
-    for (const p of state.hostPeers.values()) p.pc.close();
-    if (state.clientPeer?.pc) state.clientPeer.pc.close();
-    if (state.offlineHostPeer) state.offlineHostPeer.close();
-    state.hostWs = null;
-    state.clientWs = null;
-    state.hostPeers.clear();
-    state.clientPeer = null;
-    state.dataChannel = null;
-    state.offlineHostPeer = null;
-    els.stopHost.disabled = true;
-    els.disconnect.disabled = true;
-    els.acceptOfflineAnswer.disabled = true;
-    setStatus("Idle");
-    log("Disconnected");
+  function humanRate(bytesPerSec) {
+    const u = ["B/s", "KB/s", "MB/s", "GB/s"];
+    let i = 0;
+    while (bytesPerSec >= 1024 && i < u.length - 1) { bytesPerSec /= 1024; ++i; }
+    return `${bytesPerSec.toFixed(1)} ${u[i]}`;
   }
 
-  async function pickFolder() {
-    if (!window.showDirectoryPicker) {
-      throw new Error("This browser cannot host folders yet. Use Chromium/Edge, or the native app.");
+  function refreshStats() {
+    const scale = 1000 / STATS_INTERVAL_MS;
+    const parts = [];
+    if (state.hostWs) {
+      parts.push(`Serve ↑${humanRate((state.bytesServed - state.lastServed) * scale)}`);
+      state.lastServed = state.bytesServed;
     }
-    state.rootHandle = await window.showDirectoryPicker({ mode: "read" });
-    state.rootName = state.rootHandle.name || "selected folder";
-    els.hostFolder.textContent = state.rootName;
-    els.hostCloud.disabled = false;
-    els.hostOffline.disabled = false;
-    log(`Selected folder: ${state.rootName}`, "ok");
+    if (state.dataChannel) {
+      parts.push(`Mount ↓${humanRate((state.bytesReceived - state.lastReceived) * scale)}`);
+      state.lastReceived = state.bytesReceived;
+    }
+    els.statsLabel.textContent = parts.length ? parts.join("   |   ") : "Idle";
   }
 
   function copy(text) {
     return navigator.clipboard.writeText(text);
   }
 
+  function selectTab(name) {
+    for (const tab of els.tabs) {
+      const active = tab.dataset.tab === name;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", active ? "true" : "false");
+    }
+    for (const page of els.pages) page.hidden = page.dataset.page !== name;
+  }
+
   function initEvents() {
-    els.pickFolder.onclick = () => pickFolder().catch((e) => log(e.message, "err"));
-    els.hostCloud.onclick = () => startCloudHost().catch((e) => log(e.message, "err"));
-    els.hostOffline.onclick = () => startOfflineHost().catch((e) => log(e.message, "err"));
-    els.stopHost.onclick = disconnectAll;
-    els.copyShare.onclick = () => copy(els.shareLink.value).then(() => log("Share link copied", "ok")).catch((e) => log(e.message, "err"));
-    els.copyPassword.onclick = () => copy(state.password).then(() => log("Password copied", "ok")).catch((e) => log(e.message, "err"));
-    els.acceptOfflineAnswer.onclick = () => acceptOfflineAnswer().catch((e) => log(e.message, "err"));
-    els.joinCloud.onclick = () => joinCloud().catch((e) => log(e.message, "err"));
-    els.makeOfflineAnswer.onclick = () => makeOfflineAnswer().catch((e) => log(e.message, "err"));
-    els.disconnect.onclick = disconnectAll;
-    els.copyOfflineAnswer.onclick = () => copy(els.offlineAnswerOut.value).then(() => log("Offline answer copied", "ok")).catch((e) => log(e.message, "err"));
+    for (const tab of els.tabs) tab.onclick = () => selectTab(tab.dataset.tab);
+
+    els.browseFolder.onclick = () => pickFolder().catch((e) => toast(e.message));
+
+    els.shareToggle.onclick = () => {
+      if (state.hostWs) stopHost().catch((e) => toast(e.message));
+      else startHost().catch((e) => { els.shareToggle.disabled = false; toast(e.message); });
+    };
+
+    els.copyAll.onclick = () => copy(copyShareDetails()).then(() => toast("Copied")).catch((e) => toast(e.message));
+
+    els.connectToggle.onclick = () => {
+      if (state.clientWs || state.dataChannel) disconnectClient();
+      else connect().catch((e) => toast(e.message));
+    };
+
     els.upButton.onclick = () => {
       const parts = state.currentPath.split("/").filter(Boolean);
       parts.pop();
-      listRemote("/" + parts.join("/")).catch((e) => log(e.message, "err"));
+      listRemote("/" + parts.join("/")).catch((e) => toast(e.message));
     };
+
+    window.addEventListener("beforeunload", disconnectAll);
   }
 
   function init() {
-    els.workerUrl.value = window.FB_WEBAPP_CONFIG?.signalingUrl || "";
-    applyHashToJoinForm();
+    applyHash();
     initEvents();
-    initTurnstile();
-    log("Ready. Host mode streams files on demand; it does not pre-cache the folder.");
+    setInterval(refreshStats, STATS_INTERVAL_MS);
   }
 
   init();

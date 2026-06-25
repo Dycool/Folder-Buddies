@@ -90,13 +90,12 @@ bool Server::start(const std::string& folder, int port, int maxClients, std::str
     shareName = fs::path(root_).filename().string();
     if (shareName.empty()) shareName = "share";
 
-    secret = random_bytes(kSecretBytes); // the auto-generated password baked into the code
+    secret = random_bytes(kSecretBytes);
     authKey_ = derive_key(secret);
     maxClients_ = maxClients;
 
-    // Listen on IPv6 in dual-stack mode (IPV6_V6ONLY off) so one socket accepts
-    // both IPv6 and IPv4-mapped clients — IPv6 is preferred, IPv4 still works.
-    // Fall back to a plain IPv4 socket on the rare host without IPv6.
+    // Dual-stack IPv6 socket (IPV6_V6ONLY off) accepts IPv6 and IPv4-mapped
+    // clients; fall back to plain IPv4 when IPv6 is unavailable.
     bool v6 = true;
     listen_ = ::socket(AF_INET6, SOCK_STREAM, 0);
     if (listen_ == FB_BAD_SOCKET) {
@@ -112,11 +111,8 @@ bool Server::start(const std::string& folder, int port, int maxClients, std::str
                      sizeof(off));
     }
 
-    // Find an available port. Port 0 lets the OS pick a free ephemeral one,
-    // which is how two instances on the same machine end up on different ports
-    // without coordinating. If a *specific* port is requested but busy, scan
-    // upward so a second instance can still start. The bound port is read back
-    // and baked into the share code, so each instance is independently reachable.
+    // Port 0 lets the OS pick a free port; a specific busy port scans upward.
+    // The bound port is read back and baked into the share code.
     sockaddr_storage ss{};
     socklen_t addrlen;
     auto set_port = [&](uint16_t p) {
@@ -245,7 +241,6 @@ bool Server::handshake(socket_t s, std::string& clientId, SecureChannel& chan) {
     }
     send_message(s, OP_AUTH_OK, 0, h.req_id, nullptr, 0);
 
-    // Both sides now hold the same authenticated material; seal the channel.
     Key256 txKey, rxKey;
     derive_session_keys(authKey_, nonceCQ, nonceSQ, /*isServer=*/true, txKey, rxKey);
     chan.activate(txKey, rxKey);

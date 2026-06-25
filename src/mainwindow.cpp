@@ -52,7 +52,7 @@ MainWindow::~MainWindow() {
     if (client_) client_->disconnect();
     if (activeTicket_.cloudPublished) {
         std::string derr;
-        fb::SignalingClient().delete_room(activeTicket_.roomCode, activeTicket_.password, derr);
+        fb::SignalingClient().remove(activeTicket_.lookupId, activeTicket_.ownerToken, derr);
     }
     upnp_.unmap();
     if (server_) server_->stop();
@@ -87,8 +87,9 @@ QWidget* MainWindow::buildShareTab() {
     lanCheck_ = new QCheckBox("Share on this LAN only (don't expose to the internet)");
     form->addRow("", lanCheck_);
 
-    auto* pwNote = new QLabel("A strong password is generated automatically. Cloudflare only gets a "
-                             "6-character room code and an encrypted payload; keep the password private.");
+    auto* pwNote = new QLabel("Share just the 6-character code (or the offline blob) — there is no "
+                             "separate password. Cloudflare only stores an opaque encrypted record "
+                             "and never sees the IP, port, or secret.");
     pwNote->setWordWrap(true);
     form->addRow("", pwNote);
 
@@ -109,11 +110,6 @@ QWidget* MainWindow::buildShareTab() {
     tl->addWidget(copyButton_);
     form->addRow("Connect code:", tokenRow);
 
-    passwordEdit_ = new QLineEdit;
-    passwordEdit_->setReadOnly(true);
-    passwordEdit_->setPlaceholderText("password appears here");
-    form->addRow("Password:", passwordEdit_);
-
     offlineEdit_ = new QLineEdit;
     offlineEdit_->setReadOnly(true);
     offlineEdit_->setPlaceholderText("offline fallback blob appears here");
@@ -133,10 +129,6 @@ QWidget* MainWindow::buildConnectTab() {
     tokenInput_ = new QLineEdit;
     tokenInput_->setPlaceholderText("paste the 6-char room code or long offline Base91 blob");
     form->addRow("Connect code:", tokenInput_);
-
-    passwordInput_ = new QLineEdit;
-    passwordInput_->setPlaceholderText("paste the room password");
-    form->addRow("Password:", passwordInput_);
 
     auto* mbRow = new QWidget;
     auto* ml = new QHBoxLayout(mbRow);
@@ -187,7 +179,6 @@ void MainWindow::setShareRunning(bool running) {
     lanCheck_->setEnabled(!running);
     copyButton_->setEnabled(running);
     if (!running) {
-        passwordEdit_->clear();
         offlineEdit_->clear();
     }
 }
@@ -199,11 +190,10 @@ void MainWindow::toggleShare() {
         server_.reset();
         if (activeTicket_.cloudPublished) {
             std::string derr;
-            fb::SignalingClient().delete_room(activeTicket_.roomCode, activeTicket_.password, derr);
+            fb::SignalingClient().remove(activeTicket_.lookupId, activeTicket_.ownerToken, derr);
         }
         activeTicket_ = fb::HostedShareTicket{};
         tokenEdit_->clear();
-        passwordEdit_->clear();
         offlineEdit_->clear();
         shareStatus_->setText("Not sharing.");
         setShareRunning(false);
@@ -233,7 +223,6 @@ void MainWindow::toggleShare() {
 
     activeTicket_ = ticket;
     tokenEdit_->setText(QString::fromStdString(ticket.connectCode));
-    passwordEdit_->setText(QString::fromStdString(ticket.password));
     offlineEdit_->setText(QString::fromStdString(ticket.offlineBlob));
     shareStatus_->setText(QString("Sharing on port %1 — %2 — %3 — 0 client(s)")
                               .arg(server_->boundPort)
@@ -251,8 +240,8 @@ void MainWindow::onClientsChanged() {
 }
 
 void MainWindow::copyToken() {
-    QString text = "Connect code:\n" + tokenEdit_->text() + "\n\nPassword:\n" +
-                   passwordEdit_->text() + "\n\nOffline fallback:\n" + offlineEdit_->text();
+    QString text = "Connect code:\n" + tokenEdit_->text() +
+                   "\n\nOffline fallback:\n" + offlineEdit_->text();
     QApplication::clipboard()->setText(text);
 }
 
@@ -260,7 +249,6 @@ void MainWindow::copyToken() {
 void MainWindow::setConnected(bool connected) {
     connectButton_->setText(connected ? "Disconnect" : "Connect && mount");
     tokenInput_->setEnabled(!connected);
-    passwordInput_->setEnabled(!connected);
     mountBaseEdit_->setEnabled(!connected);
     connsSpin_->setEnabled(!connected);
     openButton_->setEnabled(connected);
@@ -278,8 +266,7 @@ void MainWindow::toggleConnect() {
 
     fb::Token tok;
     std::string decodeErr;
-    if (!fb::resolve_share_code(tokenInput_->text().trimmed().toStdString(),
-                                passwordInput_->text().toStdString(), tok, decodeErr)) {
+    if (!fb::resolve_share_code(tokenInput_->text().trimmed().toStdString(), tok, decodeErr)) {
         QMessageBox::warning(this, "Folder Buddies", QString::fromStdString(decodeErr));
         return;
     }

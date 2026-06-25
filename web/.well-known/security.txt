@@ -1,0 +1,4 @@
+Contact: https://github.com/Dycool/Folder-Buddies/security/advisories/new
+Expires: 2027-06-25T00:00:00Z
+Policy: https://github.com/Dycool/Folder-Buddies/blob/main/SECURITY.md
+Preferred-Languages: en

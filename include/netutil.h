@@ -1,9 +1,6 @@
-// Folder Buddies — local address discovery, IPv6-first.
-//
-// We prefer IPv6 and fall back to IPv4. For "LAN only" we deliberately advertise
-// a *non-globally-routable* address (ULA IPv6 or private IPv4) so the code can't
-// be used from the open internet; for internet sharing we prefer a globally
-// reachable IPv6 (no NAT, so no UPnP needed) and only fall back to IPv4 + UPnP.
+// Folder Buddies — local address discovery, IPv6-first. LAN-only mode advertises
+// a non-globally-routable address; internet mode prefers global IPv6, else
+// IPv4 + UPnP.
 #pragma once
 
 #include <string>

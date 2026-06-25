@@ -1,25 +1,32 @@
 // Folder Buddies Cloudflare Worker
-// Public API surface stays intentionally tiny:
-//   POST   /create
-//   GET    /room?code=<6-char Base91 room>
-//   DELETE /room?code=<6-char Base91 room>
+//   POST   /create                       store an opaque sealed record
+//   GET    /room?code=<lookup>           fetch the sealed record
+//   DELETE /room?code=<lookup>           delete (X-FB-Owner credential)
 //
-// Native app mode uses KV for long-lived encrypted rendezvous blobs.
-// Webapp mode uses GET /room as a WebSocket upgrade into a Durable Object for
-// short-lived encrypted WebRTC signaling. File bytes never touch Cloudflare.
+// The KV key is only the public "lookup" half of the share code; the secret
+// half never reaches Cloudflare, so the stored record is undecryptable here.
+// Webapp mode reuses GET /room as a WebSocket upgrade into a Durable Object for
+// encrypted WebRTC signaling. File bytes never touch Cloudflare.
 
 const BASE91 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+,-./:;<=>?@[]^_`{|}~";
-const ROOM_RE = new RegExp(`^[${BASE91.replace(/[\\^$.*+?()[\]{}|\-]/g, "\\$&")}] {6}$`.replace(" ", ""));
+const LOOKUP_LEN = 2;
+const ROOM_RE = new RegExp(`^[${BASE91.replace(/[\\^$.*+?()[\]{}|\-]/g, "\\$&")}]{${LOOKUP_LEN}}$`);
 const ROOM_TTL_SECONDS = 30 * 24 * 60 * 60;
 const RATE_LIMIT_TTL_SECONDS = 60;
 const RATE_LIMIT_MAX = 5;
+const MAX_FIELD_BYTES = 8 * 1024;
 const MAX_SIGNAL_BYTES = 96 * 1024;
 const MAX_TURNSTILE_TOKEN_BYTES = 4096;
+
+const SECURITY_CONTACT = "https://github.com/Dycool/Folder-Buddies/security/advisories/new";
+const SECURITY_POLICY = "https://github.com/Dycool/Folder-Buddies/blob/main/SECURITY.md";
+
+const AI_BOT_RE = /(GPTBot|ChatGPT-User|OAI-SearchBot|CCBot|ClaudeBot|Claude-Web|anthropic-ai|Google-Extended|Applebot-Extended|PerplexityBot|Perplexity-User|Amazonbot|Bytespider|Bytedance|Diffbot|FacebookBot|Meta-ExternalAgent|ImagesiftBot|Omgili|YouBot|cohere-ai|Timpibot|PetalBot|DataForSeoBot|magpie-crawler|Scrapy|AI2Bot|Webzio)/i;
 
 const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "POST, GET, DELETE, OPTIONS",
-  "access-control-allow-headers": "content-type, x-fb-auth",
+  "access-control-allow-headers": "content-type, x-fb-owner",
   "access-control-max-age": "86400",
 };
 
@@ -35,6 +42,58 @@ function json(body, status = 200, extraHeaders = {}) {
   });
 }
 
+function text(body, status = 200) {
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=86400", ...CORS },
+  });
+}
+
+function isAiBot(request) {
+  return AI_BOT_RE.test(request.headers.get("User-Agent") || "");
+}
+
+function robotsTxt() {
+  return [
+    "User-agent: *",
+    "Disallow: /",
+    "",
+    "# AI and training crawlers are not permitted.",
+    "User-agent: GPTBot",
+    "Disallow: /",
+    "User-agent: ChatGPT-User",
+    "Disallow: /",
+    "User-agent: CCBot",
+    "Disallow: /",
+    "User-agent: ClaudeBot",
+    "Disallow: /",
+    "User-agent: Google-Extended",
+    "Disallow: /",
+    "User-agent: Applebot-Extended",
+    "Disallow: /",
+    "User-agent: PerplexityBot",
+    "Disallow: /",
+    "User-agent: Bytespider",
+    "Disallow: /",
+    "User-agent: Amazonbot",
+    "Disallow: /",
+    "User-agent: Meta-ExternalAgent",
+    "Disallow: /",
+    "",
+  ].join("\n");
+}
+
+function securityTxt() {
+  const expires = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d+Z$/, "Z");
+  return [
+    `Contact: ${SECURITY_CONTACT}`,
+    `Expires: ${expires}`,
+    `Policy: ${SECURITY_POLICY}`,
+    "Preferred-Languages: en",
+    "",
+  ].join("\n");
+}
+
 function clientKey(request) {
   return request.headers.get("CF-Connecting-IP") || request.headers.get("X-Forwarded-For") || "unknown";
 }
@@ -43,8 +102,8 @@ function validRoom(room) {
   return typeof room === "string" && ROOM_RE.test(room);
 }
 
-async function rateLimit(env, request, method, room) {
-  const key = `rl:${method}:${clientKey(request)}:${room}`;
+async function rateLimit(env, request, method) {
+  const key = `rl:${method}:${clientKey(request)}`;
   const current = parseInt((await env.ROOMS.get(key)) || "0", 10);
   if (current >= RATE_LIMIT_MAX) return false;
   await env.ROOMS.put(key, String(current + 1), { expirationTtl: RATE_LIMIT_TTL_SECONDS });
@@ -54,15 +113,13 @@ async function rateLimit(env, request, method, room) {
 async function readRoom(env, room) {
   const raw = await env.ROOMS.get(room, { type: "json", cacheTtl: 30 });
   if (!raw || typeof raw !== "object") return null;
-  if (typeof raw.auth !== "string" || typeof raw.payload !== "string") return null;
+  if (typeof raw.salt !== "string" || typeof raw.wrapped !== "string" ||
+      typeof raw.payload !== "string" || typeof raw.owner !== "string") return null;
   return raw;
 }
 
-async function hmacBase91(keyBase91, message) {
-  const rawKey = base91Decode(keyBase91);
-  const key = await crypto.subtle.importKey("raw", rawKey, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
-  return base91Encode(new Uint8Array(sig));
+function validField(s, min = 4) {
+  return typeof s === "string" && s.length >= min && s.length <= MAX_FIELD_BYTES;
 }
 
 function timingSafeEqual(a, b) {
@@ -72,18 +129,7 @@ function timingSafeEqual(a, b) {
   return diff === 0;
 }
 
-async function verifyRequestAuth(request, stored, method, room) {
-  const got = request.headers.get("X-FB-Auth") || "";
-  const msg = `${method}\n${room}\nFB-worker-auth-proof-v1`;
-  const expect = await hmacBase91(stored.auth, msg);
-  return timingSafeEqual(got, expect);
-}
-
-
 async function verifyTurnstile(request, env, token) {
-  // Turnstile is intentionally optional so native clients keep working when the
-  // secret is not configured. When TURNSTILE_SECRET_KEY exists, browser
-  // WebSocket signaling must provide a fresh token.
   if (!env.TURNSTILE_SECRET_KEY) return { ok: true, disabled: true };
   if (typeof token !== "string" || token.length < 20) {
     return { ok: false, status: 403, error: "turnstile_required" };
@@ -116,45 +162,49 @@ async function verifyTurnstile(request, env, token) {
 async function create(request, env) {
   let body;
   try { body = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
-  const room = body?.room;
-  const auth = body?.auth;
+  const lookup = body?.lookup;
+  const salt = body?.salt;
+  const wrapped = body?.wrapped;
   const payload = body?.payload;
+  const owner = body?.owner;
   const ttl = Math.min(Math.max(Number(body?.ttl || ROOM_TTL_SECONDS), 60), ROOM_TTL_SECONDS);
-  if (!validRoom(room)) return json({ error: "room_must_be_exactly_6_base91_chars" }, 400);
-  if (typeof auth !== "string" || auth.length < 20) return json({ error: "bad_auth_verifier" }, 400);
-  if (typeof payload !== "string" || payload.length < 40) return json({ error: "bad_payload" }, 400);
+  if (!(await rateLimit(env, request, "POST"))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
+  if (!validRoom(lookup)) return json({ error: "bad_lookup" }, 400);
+  if (!validField(salt) || !validField(wrapped) || !validField(payload) || !validField(owner)) {
+    return json({ error: "bad_record" }, 400);
+  }
   if (body?.turnstileToken) {
     const turnstile = await verifyTurnstile(request, env, body.turnstileToken);
     if (!turnstile.ok) return json({ error: turnstile.error, codes: turnstile.codes || [] }, turnstile.status || 403);
   }
 
-  // KV has no compare-and-swap. This avoids normal collisions; hosts retry on 409.
-  if (await env.ROOMS.get(room)) return json({ error: "room_exists" }, 409);
-  await env.ROOMS.put(room, JSON.stringify({ auth, payload, createdAt: Date.now() }), {
+  if (await env.ROOMS.get(lookup)) return json({ error: "room_exists" }, 409);
+  await env.ROOMS.put(lookup, JSON.stringify({ salt, wrapped, payload, owner, createdAt: Date.now() }), {
     expirationTtl: ttl,
   });
   return json({ ok: true, ttl }, 201);
 }
 
 async function getRoom(request, env, room) {
-  if (!(await rateLimit(env, request, "GET", room))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
+  if (!(await rateLimit(env, request, "GET"))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
   const stored = await readRoom(env, room);
   if (!stored) return json({ error: "not_found" }, 404);
-  if (!(await verifyRequestAuth(request, stored, "GET", room))) return json({ error: "unauthorized" }, 401);
-  return json({ payload: stored.payload });
+  return json({ salt: stored.salt, wrapped: stored.wrapped, payload: stored.payload });
 }
 
 async function deleteRoom(request, env, room) {
-  if (!(await rateLimit(env, request, "DELETE", room))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
+  if (!(await rateLimit(env, request, "DELETE"))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
   const stored = await readRoom(env, room);
   if (!stored) return json({ ok: true }, 404);
-  if (!(await verifyRequestAuth(request, stored, "DELETE", room))) return json({ error: "unauthorized" }, 401);
+  if (!timingSafeEqual(request.headers.get("X-FB-Owner") || "", stored.owner)) {
+    return json({ error: "unauthorized" }, 401);
+  }
   await env.ROOMS.delete(room);
   return json({ ok: true });
 }
 
 async function webSocketRoom(request, env, room) {
-  if (!(await rateLimit(env, request, "GET", room))) {
+  if (!(await rateLimit(env, request, "GET"))) {
     return json({ error: "rate_limited", waitSeconds: 60 }, 429);
   }
   const url = new URL(request.url);
@@ -169,10 +219,15 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    if (request.method === "GET" && url.pathname === "/robots.txt") return text(robotsTxt());
+    if (request.method === "GET" && (url.pathname === "/.well-known/security.txt" || url.pathname === "/security.txt")) {
+      return text(securityTxt());
+    }
+    if (isAiBot(request)) return json({ error: "ai_bots_not_allowed" }, 403);
     if (request.method === "POST" && url.pathname === "/create") return create(request, env);
     if ((request.method === "GET" || request.method === "DELETE") && url.pathname === "/room") {
       const room = url.searchParams.get("code") || "";
-      if (!validRoom(room)) return json({ error: "room_must_be_exactly_6_base91_chars" }, 400);
+      if (!validRoom(room)) return json({ error: "bad_lookup" }, 400);
       if (request.method === "GET" && request.headers.get("Upgrade") === "websocket") {
         return webSocketRoom(request, env, room);
       }
@@ -194,7 +249,7 @@ export class WebSignalingRoom {
     const url = new URL(request.url);
     const room = url.searchParams.get("code") || "";
     const role = url.searchParams.get("role") || "";
-    if (!validRoom(room)) return json({ error: "room_must_be_exactly_6_base91_chars" }, 400);
+    if (!validRoom(room)) return json({ error: "bad_lookup" }, 400);
     if (request.headers.get("Upgrade") !== "websocket") return json({ error: "websocket_required" }, 426);
     if (role !== "host" && role !== "client") return json({ error: "bad_role" }, 400);
 
@@ -276,45 +331,4 @@ function parseSignal(data) {
 
 function safeSend(ws, msg) {
   try { ws.send(JSON.stringify(msg)); } catch { /* peer is gone */ }
-}
-
-// Same Base91 alphabet as the C++23 app and webapp.
-function base91Decode(text) {
-  const table = new Map([...BASE91].map((c, i) => [c, i]));
-  const out = [];
-  let v = -1, b = 0, n = 0;
-  for (const ch of text) {
-    if (/\s/.test(ch)) continue;
-    const c = table.get(ch);
-    if (c === undefined) throw new Error("invalid_base91");
-    if (v < 0) v = c;
-    else {
-      v += c * 91;
-      b |= v << n;
-      n += (v & 8191) > 88 ? 13 : 14;
-      do { out.push(b & 255); b >>= 8; n -= 8; } while (n > 7);
-      v = -1;
-    }
-  }
-  if (v >= 0) out.push((b | (v << n)) & 255);
-  return new Uint8Array(out);
-}
-
-function base91Encode(data) {
-  let out = "", b = 0, n = 0;
-  for (const byte of data) {
-    b |= byte << n;
-    n += 8;
-    if (n > 13) {
-      let v = b & 8191;
-      if (v > 88) { b >>= 13; n -= 13; }
-      else { v = b & 16383; b >>= 14; n -= 14; }
-      out += BASE91[v % 91] + BASE91[Math.floor(v / 91)];
-    }
-  }
-  if (n) {
-    out += BASE91[b % 91];
-    if (n > 7 || b > 90) out += BASE91[Math.floor(b / 91)];
-  }
-  return out;
 }

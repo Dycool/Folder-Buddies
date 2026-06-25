@@ -10,53 +10,57 @@ blind signaling, never as a relay and never as plaintext storage.
 
 ---
 
-## Zero-knowledge signaling
+## Zero-knowledge signaling — no password to type
 
-The host generates two separate secrets:
-
-1. a **filesystem session secret** used by the direct P2P encrypted transport;
-2. a **strong room password** used to encrypt/decrypt the rendezvous payload.
-
-When Cloudflare signaling is configured, the host publishes:
-
-- KV key: an **exactly 6-character Base91 room code**;
-- KV value: an opaque encrypted Base91 payload;
-- auth verifier: a password-derived verifier used for request authentication.
-
-The encrypted payload contains the connection metadata the client needs:
+The host seals the connection metadata the client needs:
 
 - IPv4/IPv6 address;
 - port;
 - folder display name;
-- filesystem session secret.
+- filesystem session secret (the 256-bit data-path bearer key).
 
-Cloudflare never receives the plaintext password, IP address, port, folder name,
-or filesystem secret. The client performs one `GET /room?code=...` request and
-sends a password-derived HMAC proof in `X-FB-Auth`; the Worker returns the opaque
-payload only if the proof matches.
+This is sealed once with ChaCha20-Poly1305 under a fresh random 256-bit key, then
+delivered to the client **without the client ever typing a password**. There are
+two share forms, and the client pastes exactly one of them:
 
-### Offline mode
+1. **6-character code (Cloudflare).** The code is split into a public 2-char
+   *lookup* half (the Cloudflare KV key) and a secret 4-char half that **never
+   reaches Cloudflare**. The KV value stores the sealed metadata plus the random
+   key *wrapped* under `Argon2id(secret half)`. The client splits the code,
+   fetches by the lookup half, and unwraps locally.
+2. **Offline blob.** A long, self-contained Base91 string that embeds its own
+   random 256-bit key. Used when the Worker is unavailable; needs nothing else.
 
-If the Worker URL is not configured, the Worker is down, or the free-tier quota is
-exhausted, the app automatically falls back to offline mode. The host prints a
-long Base91 blob containing the same encrypted payload. The client auto-detects:
+The client auto-detects: **6 clean Base91 characters → Cloudflare**; **a long
+Base91 string → local offline open**.
 
-- **6 clean Base91 characters** → Cloudflare `GET /room`;
-- **long Base91 string** → local offline decryption.
+Cloudflare only ever stores the lookup half and an opaque encrypted record. It
+never receives the IP, port, folder name, data-path secret, or the secret half of
+the code. Deletes are gated by a random owner token, not a password.
 
-In both cases the client also needs the room password.
+### Security posture (honest)
+
+- **Offline blob and the direct data path** are symmetric, 256-bit, and therefore
+  brute-force **and** quantum resistant (Grover only halves a symmetric key).
+- **The 6-character Cloudflare code** hides ~26 bits behind Argon2id with a
+  per-room salt and per-IP rate limiting. This resists casual attack but is, by
+  the laws of entropy, **not** proof against a determined offline brute-force (or
+  a quantum search) by whoever holds the ciphertext. For maximum strength, share
+  the offline blob instead.
+- No post-quantum KEM is used because the scheme is entirely symmetric; there is
+  no public-key key-exchange to break.
 
 ### Cloudflare endpoints
 
 Only these endpoints exist:
 
 - `POST /create`
-- `GET /room?code=<room>`
-- `DELETE /room?code=<room>`
+- `GET /room?code=<lookup>`
+- `DELETE /room?code=<lookup>` (with an `X-FB-Owner` credential)
 
-Rooms expire passively through Cloudflare KV `expirationTtl = 30 days`. There is
-no host-alive polling. `GET /room` and `DELETE /room` are rate-limited to 5
-requests per minute per client/room pair.
+Records expire passively through Cloudflare KV `expirationTtl = 30 days`. Each
+method is rate-limited to 5 requests per minute per client IP. The Worker also
+serves `/robots.txt` and `/.well-known/security.txt` and blocks known AI bots.
 
 ---
 
@@ -148,17 +152,16 @@ The Cloudflare workflow creates a temporary ignored `cloudflare/wrangler.ci.toml
 ## CLI
 
 ```sh
-# Host a folder. Prints either a 6-char room code or an offline blob, plus password.
+# Host a folder. Prints either a 6-char room code or a self-contained offline blob.
 folderbuddies host /path/to/folder [--lan] [--port N] [--max-clients N]
 
-# Connect using a room code or offline blob.
-folderbuddies connect "<room-code-or-offline-blob>" --password "<password>" \
-  [--mount ~/FolderBuddies] [--conns 4]
+# Connect using just the room code or offline blob — no password.
+folderbuddies connect "<room-code-or-offline-blob>" [--mount ~/FolderBuddies] [--conns 4]
 ```
 
-The GUI exposes the same flow: share tab gives a connect code, password, and
-offline fallback; connect tab accepts either the 6-character room code or the
-long fallback blob plus password.
+The GUI exposes the same flow: the share tab gives a connect code and an offline
+fallback; the connect tab accepts either the 6-character room code or the long
+fallback blob. There is no password field on either side.
 
 ## CI / GitHub Actions
 

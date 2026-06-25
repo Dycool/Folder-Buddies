@@ -40,12 +40,9 @@ bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int po
     tok.secret = server.secret;
     tok.folder = server.shareName;
 
-    ticket.password = random_room_password();
-
     std::string e;
-    ticket.offlineBlob = encrypt_room_payload(tok, ticket.password, /*aadRoomCode=*/"offline", e);
-    if (ticket.offlineBlob.empty()) {
-        err = "failed to create encrypted offline room blob: " + e;
+    if (!seal_for_offline(tok, ticket.offlineBlob, e) || ticket.offlineBlob.empty()) {
+        err = "failed to create offline room blob: " + e;
         return false;
     }
 
@@ -54,11 +51,14 @@ bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int po
     if (SignalingClient::configured()) {
         for (int attempt = 0; attempt < 12; ++attempt) {
             std::string room = random_room_code();
-            std::string payload = encrypt_room_payload(tok, ticket.password, room, e);
-            if (payload.empty()) { ticket.cloudStatus = e; continue; }
-            if (sig.create_room(room, ticket.password, payload, e)) {
+            CloudRecord rec;
+            std::string owner;
+            if (!seal_for_cloud(tok, room, rec, owner, e)) { ticket.cloudStatus = e; continue; }
+            if (sig.create(rec, e)) {
                 ticket.roomCode = room;
                 ticket.connectCode = room;
+                ticket.lookupId = rec.lookupId;
+                ticket.ownerToken = owner;
                 ticket.cloudPublished = true;
                 ticket.cloudStatus = "Cloudflare room published; KV expires passively in 30 days";
                 break;
@@ -76,16 +76,15 @@ bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int po
     return true;
 }
 
-bool resolve_share_code(const std::string& codeOrBlob, const std::string& password,
-                        Token& tok, std::string& err) {
-    if (password.empty()) { err = "password is required"; return false; }
+bool resolve_share_code(const std::string& codeOrBlob, Token& tok, std::string& err) {
     if (looks_like_room_code(codeOrBlob)) {
-        std::string payload;
+        std::string lookupId = codeOrBlob.substr(0, kLookupLen);
+        std::string salt, wrapped, payload;
         SignalingClient sig;
-        if (!sig.get_room(codeOrBlob, password, payload, err)) return false;
-        return decrypt_room_payload(payload, password, codeOrBlob, tok, err);
+        if (!sig.get(lookupId, salt, wrapped, payload, err)) return false;
+        return open_cloud_record(codeOrBlob, salt, wrapped, payload, tok, err);
     }
-    return decrypt_room_payload(codeOrBlob, password, "offline", tok, err);
+    return open_offline_blob(codeOrBlob, tok, err);
 }
 
 bool start_mounting(Client& client, Mount& mount, const Token& tok, const std::string& mountBase,

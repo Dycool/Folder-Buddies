@@ -34,7 +34,8 @@ jobs:
       - name: Syntax-check browser scripts
         run: |
           node --check web/config.js
-          node --check web/app.js
+          node --input-type=module --check < web/app.js
+          node --input-type=module --check < web/vendor/noble/argon2.js
 
       - name: Verify static webapp files
         shell: bash
@@ -43,6 +44,7 @@ jobs:
           test -f web/index.html
           test -f web/style.css
           test -f web/app.js
+          test -f web/vendor/noble/argon2.js
           test -f icon.png
           grep -q 'showDirectoryPicker' web/app.js
           grep -q 'RTCPeerConnection' web/app.js

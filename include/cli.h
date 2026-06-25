@@ -1,8 +1,7 @@
 // Folder Buddies — headless command-line front-end.
 //
 //   folderbuddies host <folder> [--lan] [--port N] [--max-clients N]
-//   folderbuddies connect <room-code-or-offline-blob> --password <password>
-//       [--mount DIR] [--conns N]
+//   folderbuddies connect <room-code-or-offline-blob> [--mount DIR] [--conns N]
 #pragma once
 
 namespace fb {

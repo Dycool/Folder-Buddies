@@ -47,7 +47,6 @@ private:
     QCheckBox* lanCheck_;
     QPushButton* shareButton_;
     QLineEdit* tokenEdit_;
-    QLineEdit* passwordEdit_;
     QLineEdit* offlineEdit_;
     QPushButton* copyButton_;
     QLabel* shareStatus_;
@@ -55,7 +54,6 @@ private:
 
     // Connect (client) side
     QLineEdit* tokenInput_;
-    QLineEdit* passwordInput_;
     QLineEdit* mountBaseEdit_;
     QSpinBox* connsSpin_;
     QPushButton* connectButton_;

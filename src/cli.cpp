@@ -38,10 +38,9 @@ void print_usage() {
           << "      --lan               share on this LAN only (don't expose to the internet)\n"
           << "      --port <n>          listen port (default: auto / OS-chosen)\n"
           << "      --max-clients <n>   limit distinct clients (default: unlimited)\n"
-          << "      (prints a 6-char room code plus a separate strong password; if the\n"
-          << "       Cloudflare Worker is unavailable, prints a long offline Base91 blob)\n\n"
+          << "      (prints a 6-char room code; if the Cloudflare Worker is unavailable,\n"
+          << "       prints a long self-contained offline Base91 blob instead)\n\n"
           << "  folderbuddies connect <room-code-or-offline-blob> [options]\n"
-          << "      --password <s>      required room password from the host\n"
           << "      --mount <dir>       base mount directory (default: ~/FolderBuddies)\n"
           << "      --conns <n>         parallel connections (default: "
           << kDefaultConns << ")\n\n"
@@ -61,8 +60,7 @@ struct Args {
 };
 
 bool takes_value(std::string_view f) {
-    return f == "--port" || f == "--max-clients" || f == "--mount" || f == "--conns" ||
-           f == "--password";
+    return f == "--port" || f == "--max-clients" || f == "--mount" || f == "--conns";
 }
 
 bool parse(int argc, char** argv, int start, Args& a, std::string& perr) {
@@ -124,11 +122,11 @@ int cli_host(const Args& a) {
         out() << "Room code (exactly 6 Base91 chars):\n  "
               << QString::fromStdString(ticket.roomCode) << "\n\n";
     } else {
-        out() << "Offline encrypted Base91 blob:\n  "
+        out() << "Offline Base91 blob:\n  "
               << QString::fromStdString(ticket.offlineBlob) << "\n\n";
     }
-    out() << "Password:\n  " << QString::fromStdString(ticket.password) << "\n\n"
-          << "Keep the password with the code/blob. Cloudflare never receives it.\n"
+    out() << "Share only the code/blob — no password. Cloudflare never receives the\n"
+          << "IP, port, data-path secret, or the secret half of the code.\n"
           << "Press Ctrl+C to stop sharing.\n";
     out().flush();
 
@@ -137,7 +135,7 @@ int cli_host(const Args& a) {
     out().flush();
     if (ticket.cloudPublished) {
         std::string derr;
-        SignalingClient().delete_room(ticket.roomCode, ticket.password, derr);
+        SignalingClient().remove(ticket.lookupId, ticket.ownerToken, derr);
     }
     upnp.unmap();
     server.stop();
@@ -147,16 +145,9 @@ int cli_host(const Args& a) {
 int cli_connect(const Args& a) {
     if (a.positional.empty()) { err() << "connect: missing <room-code-or-offline-blob>\n"; err().flush(); return 2; }
 
-    std::string password = a.get("--password").value_or("");
-    if (password.empty()) {
-        err() << "connect: missing --password <password>\n";
-        err().flush();
-        return 2;
-    }
-
     Token tok;
     std::string decodeErr;
-    if (!resolve_share_code(a.positional, password, tok, decodeErr)) {
+    if (!resolve_share_code(a.positional, tok, decodeErr)) {
         err() << "connect: " << QString::fromStdString(decodeErr) << "\n";
         err().flush();
         return 2;
