@@ -53,6 +53,10 @@ endif()
 
 add_executable(folderbuddies WIN32 MACOSX_BUNDLE ${FB_COMMON_SOURCES})
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_compile_options(folderbuddies PRIVATE -Wno-stringop-overflow)
+endif()
+
 target_include_directories(folderbuddies PRIVATE ${FB_INCLUDE_DIRS})
 target_compile_definitions(folderbuddies PRIVATE _FILE_OFFSET_BITS=64)
 target_link_libraries(folderbuddies PRIVATE Qt6::Widgets Qt6::Network Threads::Threads)
