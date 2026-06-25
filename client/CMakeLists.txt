@@ -103,6 +103,7 @@ if(WIN32)
   # ProjectedFSLib.h / ProjectedFSLib.lib ship with the Windows SDK. At runtime
   # fuse_backend.cpp enables the Client-ProjFS optional feature with UAC + DISM
   # if ProjectedFSLib.dll is not available yet.
+  target_compile_definitions(folderbuddies PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(folderbuddies PRIVATE ProjectedFSLib ws2_32 iphlpapi shell32 advapi32 Rpcrt4)
 else()
   find_package(PkgConfig REQUIRED)
@@ -234,6 +235,7 @@ target_link_libraries(folderbuddies PRIVATE ${FB_SODIUM_TARGET})
 install(TARGETS folderbuddies RUNTIME DESTINATION bin BUNDLE DESTINATION .)
 install(FILES src/icons/icon.png DESTINATION share/icons/hicolor/1024x1024/apps RENAME folderbuddies.png)
 install(FILES src/folderbuddies.desktop DESTINATION share/applications)
+install(FILES src/folderbuddies.appdata.xml DESTINATION share/metainfo)
 
 # ---- Crypto/Base91 self-test (no external deps; runs in CI) ---------------
 option(FB_BUILD_TESTS "Build the crypto self-test" ON)

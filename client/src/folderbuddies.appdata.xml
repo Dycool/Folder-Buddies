@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>folderbuddies.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>Folder Buddies</name>
+  <summary>Share and mount folders over encrypted peer-to-peer connections</summary>
+  <description>
+    <p>
+      Folder Buddies lets you host a local folder and mount it on another
+      computer as a native virtual filesystem. Connection metadata and file data
+      are protected with short-code pairing and end-to-end encryption.
+    </p>
+  </description>
+  <launchable type="desktop-id">folderbuddies.desktop</launchable>
+  <categories>
+    <category>Network</category>
+    <category>FileTransfer</category>
+  </categories>
+  <provides>
+    <binary>folderbuddies</binary>
+  </provides>
+  <url type="homepage">https://github.com/Dycool/Folder-Buddies</url>
+  <releases>
+    <release version="0.1.0" date="2026-06-25"/>
+  </releases>
+</component>

@@ -4,5 +4,5 @@ Name=Folder Buddies
 Comment=Share a folder and mount it elsewhere as a real disk
 Exec=folderbuddies
 Icon=folderbuddies
-Categories=Network;FileTransfer;Utility;
+Categories=Network;FileTransfer;
 Terminal=false

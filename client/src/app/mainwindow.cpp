@@ -10,14 +10,16 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFormLayout>
-#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSizePolicy>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
 #include <QUrl>
@@ -40,16 +42,37 @@ static double perSec(uint64_t cur, uint64_t& last) {
     return static_cast<double>(delta) * 2.0;
 }
 
+static QPlainTextEdit* codeEdit(const QString& placeholder, bool readOnly = false) {
+    auto* edit = new QPlainTextEdit;
+    edit->setPlaceholderText(placeholder);
+    edit->setReadOnly(readOnly);
+    edit->setTabChangesFocus(true);
+    edit->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    edit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    edit->setFixedHeight(edit->fontMetrics().lineSpacing() * 3 + 22);
+    return edit;
+}
+
+static QLabel* hintLabel(const QString& text) {
+    auto* label = new QLabel(text);
+    label->setObjectName("hintLabel");
+    return label;
+}
+
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Folder Buddies");
 
     auto* tabs = new QTabWidget;
+    tabs->setObjectName("modeTabs");
+    tabs->tabBar()->setExpanding(false);
     tabs->addTab(buildShareTab(), "Host");
     tabs->addTab(buildConnectTab(), "Connect");
 
     auto* central = new QWidget;
+    central->setObjectName("windowChrome");
     auto* layout = new QVBoxLayout(central);
-    layout->setContentsMargins(16, 8, 16, 16);
+    layout->setContentsMargins(0, 12, 0, 0);
+    layout->setSpacing(0);
     layout->addWidget(tabs);
     setCentralWidget(central);
 
@@ -60,20 +83,31 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(statsTimer_, &QTimer::timeout, this, &MainWindow::refreshStats);
     statsTimer_->start(500);
 
-    resize(560, 400);
+    resize(560, 500);
 
     setStyleSheet(R"(
-        MainWindow {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                         stop:0 #dfe5ec, stop:1 #c7d0db);
+        QMainWindow {
+            background: #f5f5f5;
+            font-size: 13px;
+            color: #1d1d1f;
         }
 
-        QTabWidget::pane {
-            border: 1px solid #d4d4d7;
-            border-top: none;
-            border-bottom-left-radius: 10px;
-            border-bottom-right-radius: 10px;
+        QWidget#windowChrome {
+            background: #f5f5f5;
+        }
+
+        QWidget#tabPage {
             background: #ffffff;
+        }
+
+        QTabWidget#modeTabs::pane {
+            border: none;
+            border-top: 1px solid #d4d4d7;
+            background: #ffffff;
+        }
+
+        QTabWidget#modeTabs::tab-bar {
+            alignment: center;
         }
 
         QTabBar::tab {
@@ -97,7 +131,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             background: #efefef;
         }
 
-        QLineEdit, QSpinBox {
+        QLineEdit, QSpinBox, QPlainTextEdit {
             border: 1px solid #c2c2c5;
             border-radius: 5px;
             padding: 6px 8px;
@@ -105,11 +139,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             color: #1d1d1f;
         }
 
-        QLineEdit:focus, QSpinBox:focus {
+        QPlainTextEdit {
+            font-family: Menlo, Consolas, monospace;
+            font-size: 12px;
+        }
+
+        QLineEdit:focus, QSpinBox:focus, QPlainTextEdit:focus {
             border-color: #0a64d6;
         }
 
-        QLineEdit[readOnly="true"] {
+        QLineEdit[readOnly="true"], QPlainTextEdit[readOnly="true"] {
             background: #f1f1f2;
             color: #444444;
         }
@@ -165,10 +204,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
         QCheckBox {
             spacing: 6px;
+            color: #1d1d1f;
         }
 
         QLabel {
             color: #6e6e73;
+        }
+
+        QLabel#hintLabel {
+            color: #6e6e73;
+            font-size: 12px;
         }
 
         QLabel#statusLabel {
@@ -193,12 +238,21 @@ MainWindow::~MainWindow() {
 
 QWidget* MainWindow::buildShareTab() {
     auto* w = new QWidget;
-    auto* form = new QFormLayout;
+    w->setObjectName("tabPage");
+    auto* form = new QFormLayout(w);
+    form->setContentsMargins(18, 18, 18, 18);
+    form->setHorizontalSpacing(12);
+    form->setVerticalSpacing(12);
+    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
 
     auto* folderRow = new QWidget;
     auto* fl = new QHBoxLayout(folderRow);
     fl->setContentsMargins(0, 0, 0, 0);
+    fl->setSpacing(8);
     folderEdit_ = new QLineEdit;
+    folderEdit_->setReadOnly(true);
+    folderEdit_->setPlaceholderText("Choose a folder to host");
     auto* browse = new QPushButton("Browse…");
     connect(browse, &QPushButton::clicked, this, &MainWindow::browseFolder);
     fl->addWidget(folderEdit_);
@@ -208,8 +262,14 @@ QWidget* MainWindow::buildShareTab() {
     maxClientsSpin_ = new QSpinBox;
     maxClientsSpin_->setRange(0, 9999);
     maxClientsSpin_->setValue(0);
-    maxClientsSpin_->setSpecialValueText("unlimited");
-    form->addRow("Max clients:", maxClientsSpin_);
+    auto* maxRow = new QWidget;
+    auto* maxLayout = new QHBoxLayout(maxRow);
+    maxLayout->setContentsMargins(0, 0, 0, 0);
+    maxLayout->setSpacing(8);
+    maxLayout->addWidget(maxClientsSpin_);
+    maxLayout->addWidget(hintLabel("0 = unlimited"));
+    maxLayout->addStretch(1);
+    form->addRow("Max clients:", maxRow);
 
     portSpin_ = new QSpinBox;
     portSpin_->setRange(0, 65535);
@@ -217,20 +277,14 @@ QWidget* MainWindow::buildShareTab() {
     portSpin_->setSpecialValueText("auto");
     form->addRow("Port:", portSpin_);
 
-    lanCheck_ = new QCheckBox("Share on this LAN only (don't expose to the internet)");
+    lanCheck_ = new QCheckBox("Share on this LAN only");
     form->addRow("", lanCheck_);
 
-    writeCheck_ = new QCheckBox("Allow clients to upload, edit, and delete files");
+    writeCheck_ = new QCheckBox("Allow clients to upload and delete files");
     form->addRow("Access:", writeCheck_);
 
-    secureHashCheck_ = new QCheckBox("Secure hash mode (share the long code; skip Cloudflare/Firebase)");
+    secureHashCheck_ = new QCheckBox("Secure hash code (long code; stronger secret than 6 chars)");
     form->addRow("Security:", secureHashCheck_);
-
-    auto* pwNote = new QLabel("Share just the 6-character code (or the offline blob) — there is no "
-                             "separate password. Cloudflare only stores an opaque encrypted record "
-                             "and never sees the IP, port, or secret.");
-    pwNote->setWordWrap(true);
-    form->addRow("", pwNote);
 
     shareButton_ = new QPushButton("Host");
     shareButton_->setObjectName("primaryButton");
@@ -240,40 +294,45 @@ QWidget* MainWindow::buildShareTab() {
     auto* tokenRow = new QWidget;
     auto* tl = new QHBoxLayout(tokenRow);
     tl->setContentsMargins(0, 0, 0, 0);
-    tokenEdit_ = new QLineEdit;
-    tokenEdit_->setReadOnly(true);
-    tokenEdit_->setPlaceholderText("6-char room code or offline blob appears here");
-    copyButton_ = new QPushButton("Copy");
+    tl->setSpacing(8);
+    tokenEdit_ = codeEdit("6-char room code, secure hash code, or offline blob appears here", true);
+    copyButton_ = new QPushButton("Copy all");
     copyButton_->setEnabled(false);
     connect(copyButton_, &QPushButton::clicked, this, &MainWindow::copyToken);
     tl->addWidget(tokenEdit_);
     tl->addWidget(copyButton_);
     form->addRow("Connect code:", tokenRow);
 
-    offlineEdit_ = new QLineEdit;
-    offlineEdit_->setReadOnly(true);
-    offlineEdit_->setPlaceholderText("offline fallback blob appears here");
-    form->addRow("Offline fallback:", offlineEdit_);
+    offlineLabel_ = new QLabel("Offline fallback:");
+    offlineEdit_ = codeEdit("offline fallback blob appears here", true);
+    offlineLabel_->hide();
+    offlineEdit_->hide();
+    form->addRow(offlineLabel_, offlineEdit_);
 
     shareStatus_ = new QLabel("Not hosting.");
     shareStatus_->setObjectName("statusLabel");
     form->addRow("Status:", shareStatus_);
 
-    w->setLayout(form);
     return w;
 }
 
 QWidget* MainWindow::buildConnectTab() {
     auto* w = new QWidget;
-    auto* form = new QFormLayout;
+    w->setObjectName("tabPage");
+    auto* form = new QFormLayout(w);
+    form->setContentsMargins(18, 18, 18, 18);
+    form->setHorizontalSpacing(12);
+    form->setVerticalSpacing(12);
+    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
 
-    tokenInput_ = new QLineEdit;
-    tokenInput_->setPlaceholderText("paste the 6-char room code or long offline Base91 blob");
+    tokenInput_ = codeEdit("paste the 6-char room code, secure hash code, share link, or offline offer code");
     form->addRow("Connect code:", tokenInput_);
 
     auto* mbRow = new QWidget;
     auto* ml = new QHBoxLayout(mbRow);
     ml->setContentsMargins(0, 0, 0, 0);
+    ml->setSpacing(8);
     mountBaseEdit_ = new QLineEdit(QDir::homePath() + "/FolderBuddies");
     auto* browse = new QPushButton("Browse…");
     connect(browse, &QPushButton::clicked, this, &MainWindow::browseMountBase);
@@ -286,7 +345,7 @@ QWidget* MainWindow::buildConnectTab() {
     connsSpin_->setValue(fb::kDefaultConns);
     form->addRow("Connections:", connsSpin_);
 
-    connectButton_ = new QPushButton("Connect && mount");
+    connectButton_ = new QPushButton("Connect");
     connectButton_->setObjectName("primaryButton");
     connect(connectButton_, &QPushButton::clicked, this, &MainWindow::toggleConnect);
     form->addRow("", connectButton_);
@@ -300,7 +359,6 @@ QWidget* MainWindow::buildConnectTab() {
     connectStatus_->setObjectName("statusLabel");
     form->addRow("Status:", connectStatus_);
 
-    w->setLayout(form);
     return w;
 }
 
@@ -325,6 +383,8 @@ void MainWindow::setShareRunning(bool running) {
     copyButton_->setEnabled(running);
     if (!running) {
         offlineEdit_->clear();
+        offlineEdit_->hide();
+        offlineLabel_->hide();
     }
 }
 
@@ -342,6 +402,8 @@ void MainWindow::toggleShare() {
         activeTicket_ = fb::HostedShareTicket{};
         tokenEdit_->clear();
         offlineEdit_->clear();
+        offlineEdit_->hide();
+        offlineLabel_->hide();
         shareStatus_->setText("Not hosting.");
         setShareRunning(false);
         return;
@@ -378,8 +440,11 @@ void MainWindow::toggleShare() {
             shareStatus_->setText("Native TCP sharing active; WebRTC compatibility failed: " + QString::fromStdString(werr));
         }
     }
-    tokenEdit_->setText(QString::fromStdString(ticket.connectCode));
-    offlineEdit_->setText(QString::fromStdString(ticket.offlineBlob));
+    tokenEdit_->setPlainText(QString::fromStdString(ticket.connectCode));
+    const bool showOfflineFallback = ticket.cloudPublished && ticket.offlineBlob != ticket.connectCode;
+    offlineEdit_->setPlainText(QString::fromStdString(ticket.offlineBlob));
+    offlineEdit_->setVisible(showOfflineFallback);
+    offlineLabel_->setVisible(showOfflineFallback);
     shareStatus_->setText(QString("Sharing on port %1 — %2 — %3 — 0 client(s)")
                               .arg(server_->boundPort)
                               .arg(QString::fromStdString(ticket.reach))
@@ -397,14 +462,16 @@ void MainWindow::onClientsChanged() {
 }
 
 void MainWindow::copyToken() {
-    QString text = "Connect code:\n" + tokenEdit_->text() +
-                   "\n\nOffline fallback:\n" + offlineEdit_->text();
+    QString text = "Connect code:\n" + tokenEdit_->toPlainText();
+    if (offlineEdit_->isVisible() && !offlineEdit_->toPlainText().isEmpty()) {
+        text += "\n\nOffline fallback:\n" + offlineEdit_->toPlainText();
+    }
     QApplication::clipboard()->setText(text);
 }
 
 
 void MainWindow::setConnected(bool connected) {
-    connectButton_->setText(connected ? "Disconnect" : "Connect && mount");
+    connectButton_->setText(connected ? "Disconnect" : "Connect");
     tokenInput_->setEnabled(!connected);
     mountBaseEdit_->setEnabled(!connected);
     connsSpin_->setEnabled(!connected);
@@ -423,7 +490,7 @@ void MainWindow::toggleConnect() {
         return;
     }
 
-    const std::string entered = tokenInput_->text().trimmed().toStdString();
+    const std::string entered = tokenInput_->toPlainText().trimmed().toStdString();
     fb::Token tok;
     std::string decodeErr;
     bool mounted = false;

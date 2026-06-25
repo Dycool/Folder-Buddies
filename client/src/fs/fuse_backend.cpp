@@ -119,14 +119,35 @@ std::string bundled_installer() {
     return {};
 }
 
+std::string shell_quote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
+    out += "'";
+    return out;
+}
+
+std::string applescript_string(const std::string& s) {
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '\\' || c == '"') out += '\\';
+        out += c;
+    }
+    out += "\"";
+    return out;
+}
+
 } // namespace
 
 // Install a .pkg (optionally one that lives inside a mounted .dmg) with admin
 // rights via osascript. Returns the shell exit code (0 == success).
 int install_pkg_elevated(const std::string& pkg) {
-    std::string script = "do shell script \"installer -pkg '" + pkg +
-                         "' -target /\" with administrator privileges";
-    return std::system(("osascript -e \"" + script + "\" >/dev/null 2>&1").c_str());
+    std::string cmd = "installer -pkg " + shell_quote(pkg) + " -target /";
+    std::string script = "do shell script " + applescript_string(cmd) +
+                         " with administrator privileges";
+    return std::system(("osascript -e " + shell_quote(script) + " >/dev/null 2>&1").c_str());
 }
 
 bool ensure_fuse_backend(std::string& err) {
@@ -143,16 +164,17 @@ bool ensure_fuse_backend(std::string& err) {
     if (fs::path(installer).extension() == ".dmg") {
         // Mount the .dmg, run the .pkg inside it, then detach.
         std::string mountPoint = "/Volumes/FolderBuddies-FUSE";
-        std::system(("hdiutil detach '" + mountPoint + "' >/dev/null 2>&1").c_str());
-        if (std::system(("hdiutil attach -nobrowse -noverify -mountpoint '" + mountPoint +
-                         "' '" + installer + "' >/dev/null 2>&1")
+        std::system(("hdiutil detach " + shell_quote(mountPoint) + " >/dev/null 2>&1").c_str());
+        if (std::system(("hdiutil attach -nobrowse -noverify -mountpoint " +
+                         shell_quote(mountPoint) + " " + shell_quote(installer) +
+                         " >/dev/null 2>&1")
                             .c_str()) == 0) {
             std::error_code ec;
             for (auto& e : fs::recursive_directory_iterator(mountPoint, ec)) {
                 if (ec) break;
                 if (e.path().extension() == ".pkg") { rc = install_pkg_elevated(e.path().string()); break; }
             }
-            std::system(("hdiutil detach '" + mountPoint + "' >/dev/null 2>&1").c_str());
+            std::system(("hdiutil detach " + shell_quote(mountPoint) + " >/dev/null 2>&1").c_str());
         }
     } else {
         rc = install_pkg_elevated(installer);

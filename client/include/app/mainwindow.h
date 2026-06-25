@@ -13,6 +13,7 @@
 #include <memory>
 
 class QLineEdit;
+class QPlainTextEdit;
 class QSpinBox;
 class QCheckBox;
 class QPushButton;
@@ -49,14 +50,15 @@ private:
     QCheckBox* writeCheck_;
     QCheckBox* secureHashCheck_;
     QPushButton* shareButton_;
-    QLineEdit* tokenEdit_;
-    QLineEdit* offlineEdit_;
+    QPlainTextEdit* tokenEdit_;
+    QLabel* offlineLabel_;
+    QPlainTextEdit* offlineEdit_;
     QPushButton* copyButton_;
     QLabel* shareStatus_;
     fb::HostedShareTicket activeTicket_;
 
     // Connect (client) side
-    QLineEdit* tokenInput_;
+    QPlainTextEdit* tokenInput_;
     QLineEdit* mountBaseEdit_;
     QSpinBox* connsSpin_;
     QPushButton* connectButton_;

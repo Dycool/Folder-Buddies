@@ -42,8 +42,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config wget ca-certificates \
-            qt6-base-dev qt6-base-dev-tools libfuse3-dev libminiupnpc-dev \
-            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev fuse3 imagemagick libsodium-dev python3-pil
+            qt6-base-dev qt6-base-dev-tools qt6-qpa-plugins qt6-translations-l10n \
+            libfuse3-3 libfuse3-dev libminiupnpc-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev fuse3 imagemagick libsodium-dev python3-pil \
+            xdg-desktop-portal
 
       - name: Generate app icons
         run: |
@@ -73,21 +75,33 @@ jobs:
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
           QMAKE: qmake6
-          OUTPUT: folderbuddies-linux.AppImage
+          LDAI_OUTPUT: folderbuddies-linux.AppImage
+          NO_STRIP: 1
         run: |
           DESTDIR=AppDir cmake --install build --prefix /usr
+          mkdir -p AppDir/usr/lib AppDir/usr/share/doc/libfuse3-3
+          fuse3_lib="$(ldconfig -p | awk '/libfuse3\.so\.3 / { print $NF; exit }')"
+          if [ -n "$fuse3_lib" ] && [ -f "$fuse3_lib" ]; then
+            cp -L "$fuse3_lib" AppDir/usr/lib/libfuse3.so.3
+          fi
+          for fuse3_copyright in /usr/share/doc/libfuse3-3/copyright /usr/share/doc/libfuse3-3t64/copyright; do
+            if [ -f "$fuse3_copyright" ]; then
+              cp "$fuse3_copyright" AppDir/usr/share/doc/libfuse3-3/copyright
+              break
+            fi
+          done
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
           if [ -f client/src/icons/icon.png ]; then
-            cp client/src/icons/icon.png folderbuddies.png
-            convert folderbuddies.png -resize 256x256 folderbuddies-256.png
-            cp folderbuddies-256.png folderbuddies.png
+            convert client/src/icons/icon.png -resize 256x256 AppDir/usr/share/icons/hicolor/256x256/apps/folderbuddies.png
           else
-            convert -size 256x256 xc:'#2b6cb0' folderbuddies.png
+            convert -size 256x256 xc:'#2b6cb0' AppDir/usr/share/icons/hicolor/256x256/apps/folderbuddies.png
           fi
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy*.AppImage
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
-            -d client/src/folderbuddies.desktop -i folderbuddies.png \
+            --exclude-library libfuse3.so.3 \
+            -d client/src/folderbuddies.desktop \
             --plugin qt --output appimage
 
       - uses: actions/upload-artifact@v4
@@ -161,7 +175,44 @@ jobs:
           ctest --test-dir build --output-on-failure -C "$BUILD_TYPE"
 
       - name: Bundle Qt
-        run: macdeployqt build/folderbuddies.app -always-overwrite
+        run: |
+          deploy_args=(build/folderbuddies.app -always-overwrite -no-codesign)
+
+          # Homebrew's Qt 6 packages are split across qt/qtbase and plugin
+          # dependencies. macdeployqt needs explicit search roots for those
+          # transitive dylibs, and FUSE-T is installed by a cask rather than a
+          # formula prefix.
+          fuse_libdir="$(pkg-config --variable=libdir fuse-t 2>/dev/null || true)"
+          if [ -d "$fuse_libdir" ]; then
+            deploy_args+=("-libpath=$fuse_libdir")
+          fi
+
+          formulas=(
+            qt@6 qt qtbase qtsvg qtdeclarative qtshadertools qt3d qt5compat
+            qtcanvaspainter qtcharts qtconnectivity qtdatavis3d qtquicktimeline
+            qtquick3d qtgraphs qtgrpc qtwebsockets qthttpserver qtimageformats
+            qtlanguageserver qtserialport qtpositioning qtlocation qtlottie
+            qtmultimedia qtnetworkauth qtquick3dphysics qtquickeffectmaker
+            qtremoteobjects qtscxml qtsensors qtserialbus qtspeech qttasktree
+            qttools qttranslations qtvirtualkeyboard qtwebchannel qtwebengine
+            qtwebview brotli webp zstd libpng jpeg-turbo libtiff jasper libmng
+            md4c dbus graphite2 libsodium miniupnpc
+          )
+          for formula in "${formulas[@]}"; do
+            if prefix="$(brew --prefix "$formula" 2>/dev/null)" && [ -d "$prefix/lib" ]; then
+              deploy_args+=("-libpath=$prefix/lib")
+            fi
+          done
+
+          for libdir in /opt/homebrew/lib /usr/local/lib \
+                        /Library/Frameworks/fuse_t.framework/Versions/A \
+                        /Library/Frameworks/fuse-t.framework/Versions/A; do
+            if [ -d "$libdir" ]; then
+              deploy_args+=("-libpath=$libdir")
+            fi
+          done
+
+          macdeployqt "${deploy_args[@]}"
 
       - name: Codesign
         if: env.MACOS_CODESIGN_IDENTITY != ''
