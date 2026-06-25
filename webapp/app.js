@@ -613,12 +613,22 @@ import { argon2id } from "./vendor/noble/argon2.js";
         execution: "execute",
         appearance: "interaction-only",
         callback: (token) => {
+          els.turnstileMount.classList.remove("is-interactive");
           if (state.turnstileResolver) {
             state.turnstileResolver.resolve(token || "");
             state.turnstileResolver = null;
           }
         },
+        "before-interactive-callback": () => {
+          // Safari (ITP/Private Relay) often forces an interactive challenge.
+          // Bring the otherwise-hidden widget on-screen so it can be solved.
+          els.turnstileMount.classList.add("is-interactive");
+        },
+        "after-interactive-callback": () => {
+          els.turnstileMount.classList.remove("is-interactive");
+        },
         "error-callback": () => {
+          els.turnstileMount.classList.remove("is-interactive");
           if (state.turnstileResolver) {
             state.turnstileResolver.reject(new Error("Browser check failed"));
             state.turnstileResolver = null;
@@ -634,6 +644,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       setTimeout(() => {
         if (state.turnstileResolver) {
           state.turnstileResolver = null;
+          els.turnstileMount.classList.remove("is-interactive");
           reject(new Error("Browser check timed out"));
         }
       }, 15000);

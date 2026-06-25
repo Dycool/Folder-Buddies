@@ -320,6 +320,34 @@ progress { width: 100%; height: 8px; }
   top: auto;
 }
 
+/* When Turnstile escalates to an interactive challenge (common on Safari),
+   pull the widget back on-screen as a centered modal so the user can solve it. */
+.turnstile-mount.is-interactive {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: auto;
+  height: auto;
+  overflow: visible;
+  z-index: 1000;
+  padding: 16px;
+  background: var(--panel, #fff);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.turnstile-mount.is-interactive::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  left: -50vw;
+  top: -50vh;
+  width: 200vw;
+  height: 200vh;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: -1;
+}
+
 @media (max-width: 600px) {
   .row { grid-template-columns: 1fr; gap: 6px; }
   .row > label { justify-self: start; }
