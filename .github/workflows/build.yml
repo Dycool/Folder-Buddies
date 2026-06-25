@@ -54,24 +54,6 @@ jobs:
           grep -q 'set(CMAKE_CXX_STANDARD 23)' client/CMakeLists.txt
           grep -q 'set(CMAKE_CXX_STANDARD 23)' databases/cloudflare/CMakeLists.txt
 
-      - name: Generate app icons
-        if: matrix.name != 'windows'
-        shell: bash
-        run: |
-          if [ -f client/src/icons/icon.png ]; then
-            if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then
-              if command -v brew >/dev/null 2>&1; then
-                brew install imagemagick
-              else
-                sudo apt-get update
-                sudo apt-get install -y --no-install-recommends imagemagick
-              fi
-            fi
-            chmod +x client/src/icons/make-icons.sh
-            ./client/src/icons/make-icons.sh client/src/icons/icon.png || true
-            cp client/src/icons/icon.png client/icon.png
-          fi
-
       # ---------------- Linux: native FUSE + AppImage ----------------
       - name: Install Linux dependencies
         if: matrix.name == 'linux'
@@ -81,6 +63,16 @@ jobs:
             build-essential cmake ninja-build pkg-config wget ca-certificates \
             qt6-base-dev qt6-base-dev-tools libfuse3-dev libminiupnpc-dev \
             libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev fuse3 imagemagick libsodium-dev
+
+      - name: Generate app icons (Linux)
+        if: matrix.name == 'linux'
+        shell: bash
+        run: |
+          if [ -f client/src/icons/icon.png ]; then
+            chmod +x client/src/icons/make-icons.sh
+            ./client/src/icons/make-icons.sh client/src/icons/icon.png || true
+            cp client/src/icons/icon.png client/icon.png
+          fi
 
       - name: Configure Linux
         if: matrix.name == 'linux'
@@ -125,10 +117,20 @@ jobs:
         if: matrix.name == 'macos'
         run: |
           brew update
-          brew install cmake ninja pkg-config qt@6 miniupnpc
+          brew install cmake ninja pkg-config qt@6 miniupnpc imagemagick
           brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t || brew install --cask macfuse || true
           echo "$(brew --prefix qt@6)/bin" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Generate app icons (macOS)
+        if: matrix.name == 'macos'
+        shell: bash
+        run: |
+          if [ -f client/src/icons/icon.png ]; then
+            chmod +x client/src/icons/make-icons.sh
+            ./client/src/icons/make-icons.sh client/src/icons/icon.png || true
+            cp client/src/icons/icon.png client/icon.png
+          fi
 
       - name: Import macOS signing certificate
         if: matrix.name == 'macos' && env.MACOS_CERTIFICATE_P12 != '' && env.MACOS_CERTIFICATE_PASSWORD != ''
@@ -244,12 +246,26 @@ jobs:
           Copy-Item build/folderbuddies.exe folderbuddies-windows.exe
 
       # ---------------- Upload ----------------
-      - name: Upload artifact
+      - name: Upload Linux artifact
+        if: matrix.name == 'linux'
         uses: actions/upload-artifact@v4
         with:
-          name: folderbuddies-${{ matrix.name }}
-          path: |
-            folderbuddies-linux.AppImage
-            folderbuddies-macos.zip
-            folderbuddies-windows.exe
+          name: folderbuddies-linux
+          path: folderbuddies-linux.AppImage
+          if-no-files-found: error
+
+      - name: Upload macOS artifact
+        if: matrix.name == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: folderbuddies-macos
+          path: folderbuddies-macos.zip
+          if-no-files-found: error
+
+      - name: Upload Windows artifact
+        if: matrix.name == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: folderbuddies-windows
+          path: folderbuddies-windows.exe
           if-no-files-found: error
