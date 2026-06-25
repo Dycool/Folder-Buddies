@@ -1,232 +1,142 @@
+<p align="center">
+  <img src="client/src/icons/icon.png" alt="Icon" width="128" height="128">
+</p>
+
 # Folder Buddies
 
-Folder Buddies is a zero-knowledge, cross-platform P2P virtual filesystem. One
-machine hosts a folder; another machine mounts it as a real disk/volume/path.
-The data path stays direct P2P TCP and every filesystem byte after the handshake
-is sealed with ChaCha20-Poly1305.
+**Zero-knowledge, cross-platform P2P virtual filesystem — host a folder on one machine, mount it as a real volume on another.**
 
-Performance and privacy are the priorities: Cloudflare Workers are used only as
-blind signaling, never as a plaintext store. The webapp can optionally fall back
-to Firebase Realtime Database for the same encrypted signaling role if the
-Cloudflare WebSocket path is down.
+🔒 **End-to-end encrypted** — Every filesystem byte after the handshake is sealed with ChaCha20-Poly1305. Cloudflare never sees your data.
 
----
+👥 **No password to type** — Share a 6-character room code or a self-contained offline blob. The client splits, fetches, and unwraps everything locally.
 
-## Zero-knowledge signaling — no password to type
+🌐 **Works everywhere** — Native Linux FUSE, Windows ProjFS, macOS FUSE-T, and a browser-based webapp for quick access.
 
-The host seals the connection metadata the client needs:
+⚡ **Direct P2P TCP** — Cloudflare Workers are used as the primary blind signaling relay, with Firebase as an automatic fallback. The data path stays peer-to-peer.
 
-- IPv4/IPv6 address;
-- port;
-- folder display name;
-- filesystem session secret (the 256-bit data-path bearer key).
+🔄 **Automatic fallback** — If Cloudflare is rate-limited or unreachable, the client transparently falls back to Firebase Realtime Database, then to the self-contained offline blob.
 
-This is sealed once with ChaCha20-Poly1305 under a fresh random 256-bit key, then
-delivered to the client **without the client ever typing a password**. There are
-two share forms, and the client pastes exactly one of them:
+🖥️ **CLI + GUI** — Both interfaces expose the same host/connect flow. There is no password field on either side.
 
-1. **6-character code (Cloudflare).** The code is split into a public 2-char
-   *lookup* half (the Cloudflare KV key) and a secret 4-char half that **never
-   reaches Cloudflare**. The KV value stores the sealed metadata plus the random
-   key *wrapped* under `Argon2id(secret half)`. The client splits the code,
-   fetches by the lookup half, and unwraps locally.
-2. **Offline blob.** A long, self-contained Base91 string that embeds its own
-   random 256-bit key. Used when the Worker is unavailable; needs nothing else.
-
-The client auto-detects: **6 clean Base91 characters → Cloudflare**; **a long
-Base91 string → local offline open**.
-
-Cloudflare only ever stores the lookup half and an opaque encrypted record. It
-never receives the IP, port, folder name, data-path secret, or the secret half of
-the code. Deletes are gated by a random owner token, not a password.
-
-### Security posture (honest)
-
-- **Offline blob and the direct data path** are symmetric, 256-bit, and therefore
-  brute-force **and** quantum resistant (Grover only halves a symmetric key).
-- **The 6-character Cloudflare code** hides ~26 bits behind Argon2id with a
-  per-room salt and per-IP rate limiting. This resists casual attack but is, by
-  the laws of entropy, **not** proof against a determined offline brute-force (or
-  a quantum search) by whoever holds the ciphertext. For maximum strength, share
-  the offline blob instead.
-- No post-quantum KEM is used because the scheme is entirely symmetric; there is
-  no public-key key-exchange to break.
-
-### Cloudflare endpoints
-
-Only these endpoints exist:
-
-- `POST /create`
-- `GET /room?code=<lookup>`
-- `DELETE /room?code=<lookup>` (with an `X-FB-Owner` credential)
-
-Records expire passively through Cloudflare KV `expirationTtl = 30 days`. Each
-method is rate-limited to 5 requests per minute per client IP. The Worker also
-serves `/robots.txt` and `/.well-known/security.txt` and blocks known AI bots.
+> **Pre-compiled Binaries Available!**
+> You can download the desktop client for Windows, macOS, and Linux directly from the **[Releases](https://github.com/anomalyco/Folder-Buddies/releases)** page.
+>
+> The webapp is published via GitHub Pages — no client install needed for browser-to-browser access.
 
 ---
 
-## Mounting backend
+## 🚀 Quick Start
 
-- **Linux:** native kernel FUSE through `libfuse3`.
-- **Windows:** native Microsoft **Projected File System / ProjFS**. On first
-  mount, the app checks whether `Client-ProjFS` is enabled. If not, it asks for
-  UAC elevation and runs:
+**1. 🔑 Host a folder**
+```
+folderbuddies host /path/to/folder [--lan] [--port N] [--max-clients N]
+```
+This prints either a **6-character room code** (Cloudflare) or a **long offline blob**. Share one with the client.
 
-  ```powershell
-  dism /online /enable-feature /featurename:Client-ProjFS /all /norestart
-  ```
+**2. 🔗 Connect using just that code**
+```
+folderbuddies connect "<room-code-or-offline-blob>" [--mount ~/FolderBuddies] [--conns 4]
+```
+No password, no account. The client auto-detects the format and fetches the sealed metadata.
 
-  The Windows projection hydrates file data on demand from the P2P stream.
-- **macOS:** FUSE-T preferred. Release builds should bundle the FUSE-T installer
-  inside the `.app`, then codesign and notarize the final bundle.
+**3. 🌐 Or use the webapp**
+Open the GitHub Pages URL, host a folder from your browser with the File System Access API, and share the link. Other browsers can browse, preview, and download files over WebRTC.
 
 ---
 
-## Building
+## 🔐 How it works
 
-Requirements on every platform: **CMake ≥ 3.21**, a **C++23** compiler, **Qt 6
-Widgets + Network**. UPnP support is auto-enabled if **miniupnpc** is found.
+The host seals connection metadata (IP, port, folder name, 256-bit session secret) with ChaCha20-Poly1305 under a fresh random key. The client never types a password:
 
-### Linux
+| Method | How it works |
+|---|---|
+| **6-char code** | Public 2-char lookup half → Cloudflare KV. Secret 4-char half never leaves the client. The KV value stores metadata wrapped under `Argon2id(secret half)`. |
+| **Offline blob** | Self-contained Base91 string with its own 256-bit key. No server needed. |
 
-```sh
-sudo apt-get install -y cmake ninja-build pkg-config qt6-base-dev \
-    libfuse3-dev libminiupnpc-dev
-cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
+Cloudflare stores only the lookup half and an opaque encrypted record — never the IP, port, folder name, data-path secret, or secret half of the code.
+
+---
+
+## 🖥️ Mounting backends
+
+| Platform | Backend |
+|---|---|
+| **Linux** | Native kernel FUSE via `libfuse3` |
+| **Windows** | Native Projected File System (ProjFS) — auto-enables `Client-ProjFS` via UAC on first mount |
+| **macOS** | FUSE-T preferred. Release builds bundle the installer inside the `.app` |
+
+---
+
+## 🔨 Building
+
+Requirements: **CMake ≥ 3.21**, a **C++23** compiler, **Qt 6 Widgets + Network**. UPnP is auto-enabled if `miniupnpc` is found.
+
+**Linux**
+```
+sudo apt-get install -y cmake ninja-build pkg-config qt6-base-dev libfuse3-dev libminiupnpc-dev
+cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/folderbuddies
 ```
 
-### Windows
-
-Use Visual Studio 2022 with the Windows SDK and Qt 6. The app links against the
-native Windows SDK `ProjectedFSLib` library.
-
-```powershell
-cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release `
+**Windows**
+```
+cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release `
   -DFB_SIGNALING_URL="https://folderbuddies-signaling.<your-subdomain>.workers.dev"
 cmake --build build
 ```
 
-### macOS
-
-```sh
+**macOS**
+```
 brew install cmake ninja qt6 miniupnpc
-# Install FUSE-T for development, and pass -DFUSET_PKG for release packaging.
-cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release \
+cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release \
   -DFUSET_PKG=/path/to/FUSE-T.pkg \
   -DFB_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 cmake --build build
 ```
+Notarize after build with `xcrun notarytool submit && xcrun stapler staple`.
 
-Notarization is done after build with Apple tooling, for example `xcrun notarytool submit` followed by `xcrun stapler staple`.
-
-### Cloudflare Worker
-
-The Worker files live in [`cloudflare/`](cloudflare/). Deploy them with Wrangler,
-create a KV namespace bound as `ROOMS`, then rebuild the app with:
-
-```sh
-cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release \
+**Cloudflare Worker**
+```
+cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release \
   -DFB_SIGNALING_URL="https://folderbuddies-signaling.<your-subdomain>.workers.dev"
 cmake --build build
 ```
-
-The privacy-sensitive crypto is in the C++23 app. The deployable Cloudflare
-Worker has a tiny JavaScript module because Cloudflare exposes HTTP/KV bindings
-through the Worker runtime; it stores only opaque strings and performs HMAC
-verification.
-
-### Public repo / CI secret safety
-
-This repo is designed to stay public. Do not commit Cloudflare account IDs, API tokens, or KV namespace IDs. Keep `cloudflare/wrangler.toml` with placeholders and configure the real values as GitHub repository secrets:
-
-- `CLOUDFLARE_API_TOKEN`
-- `CLOUDFLARE_ACCOUNT_ID`
-- `CF_KV_ROOMS_ID`
-- `CF_KV_ROOMS_PREVIEW_ID`
-
-The Cloudflare workflow creates a temporary ignored `cloudflare/wrangler.ci.toml` at runtime. The `Public Repo Safety` workflow fails CI if obvious secret files or real Cloudflare IDs are accidentally committed.
+The Worker files live in `databases/cloudflare/`. Deploy with Wrangler and create a KV namespace bound as `ROOMS`.
 
 ---
 
-## CLI
+## 📚 Documentation
 
-```sh
-# Host a folder. Prints either a 6-char room code or a self-contained offline blob.
-folderbuddies host /path/to/folder [--lan] [--port N] [--max-clients N]
+Detailed guides are in the `docs/` folder:
 
-# Connect using just the room code or offline blob — no password.
-folderbuddies connect "<room-code-or-offline-blob>" [--mount ~/FolderBuddies] [--conns 4]
-```
-
-The GUI exposes the same flow: the Host tab gives a connect code and an offline
-fallback; the Connect tab accepts either the 6-character room code or the long
-fallback blob. There is no password field on either side.
-
-## CI / GitHub Actions
-
-The patched workflows live in `.github/workflows/`:
-
-- `build.yml` builds Linux, Windows, and macOS with C++23.
-- `build-release.yml` creates a draft release from version tags like `v1.2.3`.
-- `cloudflare-worker.yml` validates the Worker and can deploy it with Wrangler.
-
-Optional repository configuration:
-
-- `FB_SIGNALING_URL` repository variable: hardcodes your Worker endpoint into release builds.
-- `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` secrets: enable Worker deployment.
-- macOS signing/notarization secrets:
-  - `MACOS_CERTIFICATE_P12`
-  - `MACOS_CERTIFICATE_PASSWORD`
-  - `MACOS_CODESIGN_IDENTITY`
-  - `APPLE_ID`
-  - `APPLE_APP_SPECIFIC_PASSWORD`
-  - `APPLE_TEAM_ID`
-
-If the macOS secrets are absent, CI still builds an unsigned `.app` zip. If they are present, the workflow signs, submits with `notarytool`, staples, and then packages the notarized app.
-
-## Webapp / GitHub Pages client
-
-The repository now includes a static browser app in `web/`. It is designed for GitHub Pages and talks to the same Cloudflare Worker for zero-knowledge rendezvous.
-
-Webapp capabilities:
-
-- host a browser-selected folder with the File System Access API;
-- optionally allow uploads, text edits, and deletes from browser clients;
-- generate a private share link containing a 6-character room code;
-- automatically fall back from Cloudflare WebSocket signaling to Firebase
-  Realtime Database signaling when Firebase public config is present;
-- fall back to a manual giant WebRTC offer/answer only when automatic signaling
-  cannot be used;
-- connect from another browser and browse a dedicated remote file explorer;
-- preview common browser-supported files and download unsupported formats on click;
-- stream selected files over WebRTC DataChannel;
-- avoid copying the host folder into cache. Directory entries are listed on demand and file bytes are read with `File.stream()` only when downloaded.
-
-The browser app cannot create a real OS mount point. Use the native app for Linux FUSE, Windows ProjFS, and macOS FUSE-T.
-
-To publish the webapp:
-
-1. Set the public repository variable `FB_SIGNALING_URL` to your Worker URL.
-2. Optional automatic fallback: set public Firebase variables
-   `FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`, `FIREBASE_DATABASE_URL`,
-   `FIREBASE_PROJECT_ID`, and `FIREBASE_APP_ID`. See `docs/firebase-fallback.md` and `docs/firebase-production-rules.md` for the exact Firebase setup and production rules.
-3. Enable GitHub Pages with **GitHub Actions** as the source.
-4. Run or push to trigger `.github/workflows/webapp.yml`.
-
-No GitHub Pages secret is needed for these public browser config values.
-Cloudflare account IDs, API tokens, KV namespace IDs, and other real deployment
-credentials must stay in GitHub Secrets only.
+* **[Building from Source](docs/building.md)** — Prerequisites, platform-specific build commands, CMake options, and running tests.
+* **[How It Works](docs/how-it-works.md)** — Architecture, security model, wire protocol, mount backends, Cloudflare Worker, and caching.
 
 
-## Compatibility modes
+---
 
-Folder Buddies now has an optional WebRTC compatibility transport for native↔browser interoperability. Native↔native still prefers direct TCP; WebRTC is only used when a browser is involved or when native TCP cannot be used. Build with libdatachannel to enable it. See `docs/webrtc-compatibility.md`.
+## 🔗 References
 
+| Component | Source |
+|---|---|
+| **Desktop clients** | [Qt 6 Widgets](https://doc.qt.io/qt-6/qtwidgets-index.html) / TCP sockets |
+| **Signaling** | [Cloudflare Workers](https://workers.cloudflare.com/) + KV |
+| **Cryptography** | [ChaCha20-Poly1305](https://datatracker.ietf.org/doc/html/rfc8439) / [Argon2id](https://datatracker.ietf.org/doc/html/rfc9106) |
+| **Filesystem (Linux)** | [libfuse3](https://github.com/libfuse/libfuse) / kernel FUSE |
+| **Filesystem (Windows)** | [ProjFS](https://learn.microsoft.com/en-us/windows/win32/projfs/projected-file-system) |
+| **Filesystem (macOS)** | [FUSE-T](https://github.com/macos-fuse-t/fuse-t) |
+| **Webapp** | WebRTC / File System Access API |
+| **Protocol** | Custom P2P TCP with per-session ChaCha20-Poly1305 sealing |
 
+---
 
-## Production hardening
+## 🐛 Reporting Issues
 
-For public deployments, see `docs/cloudflare-production-hardening.md` and `docs/firebase-production-rules.md`.
+Found a bug or have a feature request? Open an issue **[here](https://github.com/dycool/Folder-Buddies/issues)** with as much detail as possible (OS, reproduction steps, relevant logs).
+
+---
+
+## 📄 License
+
+See the repository license for details.

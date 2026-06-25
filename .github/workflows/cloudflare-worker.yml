@@ -4,12 +4,12 @@ on:
   push:
     branches: [main]
     paths:
-      - 'cloudflare/**'
+      - 'databases/cloudflare/**'
       - '.github/workflows/cloudflare-worker.yml'
       - '.github/workflows/security.yml'
   pull_request:
     paths:
-      - 'cloudflare/**'
+      - 'databases/cloudflare/**'
       - '.github/workflows/cloudflare-worker.yml'
       - '.github/workflows/security.yml'
   workflow_dispatch:
@@ -51,26 +51,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f cloudflare/wrangler.toml
-          grep -q 'REPLACE_WITH_YOUR_KV_NAMESPACE_ID' cloudflare/wrangler.toml
-          grep -q 'REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID' cloudflare/wrangler.toml
-          if grep -Eq '^[[:space:]]*account_id[[:space:]]*=' cloudflare/wrangler.toml; then
-            echo 'Do not commit account_id to cloudflare/wrangler.toml. Use the CLOUDFLARE_ACCOUNT_ID secret.' >&2
+          test -f databases/cloudflare/wrangler.toml
+          grep -q 'REPLACE_WITH_YOUR_KV_NAMESPACE_ID' databases/cloudflare/wrangler.toml
+          grep -q 'REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID' databases/cloudflare/wrangler.toml
+          if grep -Eq '^[[:space:]]*account_id[[:space:]]*=' databases/cloudflare/wrangler.toml; then
+            echo 'Do not commit account_id to databases/cloudflare/wrangler.toml. Use the CLOUDFLARE_ACCOUNT_ID secret.' >&2
             exit 1
           fi
-          if grep -Eq '^[[:space:]]*(api_token|token)[[:space:]]*=' cloudflare/wrangler.toml; then
-            echo 'Do not commit API tokens to cloudflare/wrangler.toml. Use the CLOUDFLARE_API_TOKEN secret.' >&2
+          if grep -Eq '^[[:space:]]*(api_token|token)[[:space:]]*=' databases/cloudflare/wrangler.toml; then
+            echo 'Do not commit API tokens to databases/cloudflare/wrangler.toml. Use the CLOUDFLARE_API_TOKEN secret.' >&2
             exit 1
           fi
 
       - name: Validate deployable Worker syntax
-        run: node --check cloudflare/worker.mjs
+        run: node --check databases/cloudflare/worker.mjs
 
       - name: Build C++23 Worker validation core
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cmake ninja-build g++
-          cmake -S cloudflare -B build/cloudflare-core -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=23
+          cmake -S databases/cloudflare -B build/cloudflare-core -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=23
           cmake --build build/cloudflare-core --parallel
 
       - name: Create temporary Wrangler config from secrets
@@ -87,10 +87,10 @@ jobs:
           import os
           from pathlib import Path
 
-          src = Path('cloudflare/wrangler.toml').read_text()
+          src = Path('databases/cloudflare/wrangler.toml').read_text()
           src = src.replace('REPLACE_WITH_YOUR_KV_NAMESPACE_ID', os.environ['CF_KV_ROOMS_ID'])
           src = src.replace('REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID', os.environ['CF_KV_ROOMS_PREVIEW_ID'])
-          Path('cloudflare/wrangler.ci.toml').write_text(src)
+          Path('databases/cloudflare/wrangler.ci.toml').write_text(src)
           PY
 
       - name: Wrangler dry-run with secret KV namespace IDs
@@ -102,7 +102,7 @@ jobs:
             env.CF_KV_ROOMS_ID != '' &&
             env.CF_KV_ROOMS_PREVIEW_ID != ''
           }}
-        run: npx --yes wrangler@4 deploy --dry-run --config cloudflare/wrangler.ci.toml
+        run: npx --yes wrangler@4 deploy --dry-run --config databases/cloudflare/wrangler.ci.toml
 
       - name: Skip Wrangler dry-run when secrets are unavailable
         if: >-
@@ -157,10 +157,10 @@ jobs:
           import os
           from pathlib import Path
 
-          src = Path('cloudflare/wrangler.toml').read_text()
+          src = Path('databases/cloudflare/wrangler.toml').read_text()
           src = src.replace('REPLACE_WITH_YOUR_KV_NAMESPACE_ID', os.environ['CF_KV_ROOMS_ID'])
           src = src.replace('REPLACE_WITH_YOUR_PREVIEW_KV_NAMESPACE_ID', os.environ['CF_KV_ROOMS_PREVIEW_ID'])
-          Path('cloudflare/wrangler.ci.toml').write_text(src)
+          Path('databases/cloudflare/wrangler.ci.toml').write_text(src)
           PY
 
       - name: Deploy with Wrangler
@@ -168,7 +168,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: cloudflare
+          workingDirectory: databases/cloudflare
           wranglerVersion: '4'
           command: deploy --config wrangler.ci.toml
 
@@ -177,4 +177,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf '%s' "$TURNSTILE_SECRET_KEY" | npx --yes wrangler@4 secret put TURNSTILE_SECRET_KEY --config cloudflare/wrangler.ci.toml
+          printf '%s' "$TURNSTILE_SECRET_KEY" | npx --yes wrangler@4 secret put TURNSTILE_SECRET_KEY --config databases/cloudflare/wrangler.ci.toml

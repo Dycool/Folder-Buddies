@@ -13,8 +13,8 @@ as permanently public.
 - `.env` files
 - private keys, certificates, provisioning profiles, or local assistant/editor state
 
-The checked-in `cloudflare/wrangler.toml` intentionally contains placeholders.
-GitHub Actions creates `cloudflare/wrangler.ci.toml` at runtime from encrypted
+The checked-in `databases/cloudflare/wrangler.toml` intentionally contains placeholders.
+GitHub Actions creates `databases/cloudflare/wrangler.ci.toml` at runtime from encrypted
 repository secrets. That generated file is ignored and must never be committed.
 
 ## Required GitHub Secrets
@@ -33,7 +33,7 @@ For app builds, `FB_SIGNALING_URL` and `TURNSTILE_SITE_KEY` may be repository va
 ## CI safety
 
 `.github/workflows/security.yml` fails the build if common secret files are
-committed or if `cloudflare/wrangler.toml` is changed to contain real Cloudflare
+committed or if `databases/cloudflare/wrangler.toml` is changed to contain real Cloudflare
 IDs/tokens.
 
 The Cloudflare deployment job is manual by default and uses the
