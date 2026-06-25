@@ -1424,6 +1424,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   async function startHost() {
+    if (isMobile()) throw new Error("Hosting is not available on mobile browsers");
     if (!state.rootHandle) await pickFolder();
     setShareStatus("Starting…");
     els.shareToggle.disabled = true;
@@ -1983,7 +1984,17 @@ import { argon2id } from "./vendor/noble/argon2.js";
     window.addEventListener("beforeunload", disconnectAll);
   }
 
+  function isMobile() {
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+      || (navigator.maxTouchPoints > 1 && window.innerWidth < 800);
+  }
+
   function init() {
+    if (isMobile()) {
+      document.querySelector('[data-tab="share"]').hidden = true;
+      document.querySelector('[data-page="share"]').hidden = true;
+      selectTab("connect");
+    }
     applyHash();
     initEvents();
     setInterval(refreshStats, STATS_INTERVAL_MS);
