@@ -33,7 +33,7 @@ constexpr const char* kHardcodedWorkerUrl = FB_SIGNALING_URL;
 
 constexpr char kPayloadMagic[5] = {'F', 'B', 'Z', 'K', '1'};
 constexpr char kOfflineMagic[5] = {'F', 'B', 'O', 'F', '1'};
-constexpr uint32_t kPayloadVersion = 1;
+constexpr uint32_t kPayloadVersion = 2;
 
 // Argon2id parameters. Must match the webapp (@noble/hashes) exactly so both
 // sides derive the same wrap key from the secret half of the code.
@@ -59,6 +59,8 @@ std::vector<uint8_t> serialize_token_payload(const Token& tok) {
     w.str(tok.ip);
     w.pod(tok.port);
     w.str(tok.folder);
+    uint8_t writes = tok.allowWrites ? 1 : 0;
+    w.pod(writes);
     w.bytes(tok.secret.data(), static_cast<uint32_t>(tok.secret.size()));
     return w.b;
 }
@@ -69,10 +71,18 @@ bool deserialize_token_payload(const std::vector<uint8_t>& plain, Token& out) {
     uint32_t version = 0;
     if (!r.raw(magic, sizeof(magic)) || std::memcmp(magic, kPayloadMagic, sizeof(magic)) != 0)
         return false;
-    if (!r.pod(version) || version != kPayloadVersion) return false;
+    if (!r.pod(version) || (version != 1 && version != kPayloadVersion)) return false;
     if (!r.str(out.ip)) return false;
     if (!r.pod(out.port)) return false;
     if (!r.str(out.folder)) return false;
+    if (version >= 2) {
+        uint8_t writes = 0;
+        if (!r.pod(writes)) return false;
+        out.allowWrites = writes != 0;
+    } else {
+        // v1 tokens predate the explicit permission bit and were historically read/write.
+        out.allowWrites = true;
+    }
     if (!r.bytes(out.secret)) return false;
     return !out.ip.empty() && out.port != 0 && !out.secret.empty();
 }
@@ -384,9 +394,11 @@ int main() {
     tok.port = 50321;
     tok.folder = "cool folder";
     tok.secret = random_bytes(kSecretBytes);
+    tok.allowWrites = true;
 
     auto same = [&](const Token& a, const Token& b) {
-        return a.ip == b.ip && a.port == b.port && a.folder == b.folder && a.secret == b.secret;
+        return a.ip == b.ip && a.port == b.port && a.folder == b.folder &&
+               a.secret == b.secret && a.allowWrites == b.allowWrites;
     };
 
     std::string err;

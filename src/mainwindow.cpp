@@ -33,8 +33,8 @@ static QString humanRate(double bytesPerSec) {
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Folder Buddies");
     auto* tabs = new QTabWidget(this);
-    tabs->addTab(buildShareTab(), "Share a folder");
-    tabs->addTab(buildConnectTab(), "Connect to a share");
+    tabs->addTab(buildShareTab(), "Host");
+    tabs->addTab(buildConnectTab(), "Connect");
     setCentralWidget(tabs);
 
     statsLabel_ = new QLabel("Idle", this);
@@ -87,13 +87,16 @@ QWidget* MainWindow::buildShareTab() {
     lanCheck_ = new QCheckBox("Share on this LAN only (don't expose to the internet)");
     form->addRow("", lanCheck_);
 
+    writeCheck_ = new QCheckBox("Allow clients to upload, edit, and delete files");
+    form->addRow("Access:", writeCheck_);
+
     auto* pwNote = new QLabel("Share just the 6-character code (or the offline blob) — there is no "
                              "separate password. Cloudflare only stores an opaque encrypted record "
                              "and never sees the IP, port, or secret.");
     pwNote->setWordWrap(true);
     form->addRow("", pwNote);
 
-    shareButton_ = new QPushButton("Start sharing");
+    shareButton_ = new QPushButton("Host");
     connect(shareButton_, &QPushButton::clicked, this, &MainWindow::toggleShare);
     form->addRow("", shareButton_);
 
@@ -115,7 +118,7 @@ QWidget* MainWindow::buildShareTab() {
     offlineEdit_->setPlaceholderText("offline fallback blob appears here");
     form->addRow("Offline fallback:", offlineEdit_);
 
-    shareStatus_ = new QLabel("Not sharing.");
+    shareStatus_ = new QLabel("Not hosting.");
     form->addRow("Status:", shareStatus_);
 
     w->setLayout(form);
@@ -162,7 +165,7 @@ QWidget* MainWindow::buildConnectTab() {
 }
 
 void MainWindow::browseFolder() {
-    QString dir = QFileDialog::getExistingDirectory(this, "Choose folder to share");
+    QString dir = QFileDialog::getExistingDirectory(this, "Choose folder to host");
     if (!dir.isEmpty()) folderEdit_->setText(dir);
 }
 
@@ -172,11 +175,12 @@ void MainWindow::browseMountBase() {
 }
 
 void MainWindow::setShareRunning(bool running) {
-    shareButton_->setText(running ? "Stop sharing" : "Start sharing");
+    shareButton_->setText(running ? "Stop hosting" : "Host");
     folderEdit_->setEnabled(!running);
     maxClientsSpin_->setEnabled(!running);
     portSpin_->setEnabled(!running);
     lanCheck_->setEnabled(!running);
+    writeCheck_->setEnabled(!running);
     copyButton_->setEnabled(running);
     if (!running) {
         offlineEdit_->clear();
@@ -195,14 +199,14 @@ void MainWindow::toggleShare() {
         activeTicket_ = fb::HostedShareTicket{};
         tokenEdit_->clear();
         offlineEdit_->clear();
-        shareStatus_->setText("Not sharing.");
+        shareStatus_->setText("Not hosting.");
         setShareRunning(false);
         return;
     }
 
     QString folder = folderEdit_->text();
     if (folder.isEmpty()) {
-        QMessageBox::warning(this, "Folder Buddies", "Choose a folder to share.");
+        QMessageBox::warning(this, "Folder Buddies", "Choose a folder to host.");
         return;
     }
 
@@ -213,7 +217,8 @@ void MainWindow::toggleShare() {
     std::string err;
     fb::HostedShareTicket ticket;
     if (!fb::start_hosting(*server_, upnp_, folder.toStdString(), portSpin_->value(),
-                           maxClientsSpin_->value(), lanCheck_->isChecked(), ticket, err)) {
+                           maxClientsSpin_->value(), lanCheck_->isChecked(),
+                           writeCheck_->isChecked(), ticket, err)) {
         QMessageBox::critical(this, "Folder Buddies", QString::fromStdString(err));
         upnp_.unmap();
         server_->stop();
@@ -227,7 +232,8 @@ void MainWindow::toggleShare() {
     shareStatus_->setText(QString("Sharing on port %1 — %2 — %3 — 0 client(s)")
                               .arg(server_->boundPort)
                               .arg(QString::fromStdString(ticket.reach))
-                              .arg(QString::fromStdString(ticket.cloudStatus)));
+                              .arg(QString::fromStdString(ticket.cloudStatus)) +
+                          (writeCheck_->isChecked() ? " — read/write" : " — read-only"));
     setShareRunning(true);
 }
 

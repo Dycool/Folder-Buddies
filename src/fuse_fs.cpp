@@ -384,7 +384,7 @@ std::string dedupe_path(const std::string& base, const std::string& name) {
 } // namespace
 
 bool Mount::start(Client* client, const std::string& mountBase, const std::string& volname,
-                  std::string& err) {
+                  bool allowWrites, std::string& err) {
     if (!ensure_fuse_backend(err)) return false;
 
     std::string name = sanitize(volname);
@@ -413,6 +413,10 @@ bool Mount::start(Client* client, const std::string& mountBase, const std::strin
     fuse_opt_add_arg(&args, "folderbuddies");
     fuse_opt_add_arg(&args, "-o");
     fuse_opt_add_arg(&args, "max_read=1048576");
+    if (!allowWrites) {
+        fuse_opt_add_arg(&args, "-o");
+        fuse_opt_add_arg(&args, "ro");
+    }
 #if defined(__APPLE__)
     fuse_opt_add_arg(&args, "-o");
     std::string vn = "volname=" + label;

@@ -107,7 +107,8 @@ int cli_host(const Args& a) {
 
     HostedShareTicket ticket;
     std::string e;
-    if (!start_hosting(server, upnp, a.positional, port, maxClients, a.has("--lan"), ticket, e)) {
+    if (!start_hosting(server, upnp, a.positional, port, maxClients, a.has("--lan"),
+                       a.has("--write"), ticket, e)) {
         err() << "host failed: " << QString::fromStdString(e) << "\n";
         err().flush();
         return 1;
@@ -117,6 +118,7 @@ int cli_host(const Args& a) {
           << server.boundPort << "\n"
           << "  " << QString::fromStdString(ticket.reach) << "\n"
           << "  signaling: " << QString::fromStdString(ticket.cloudStatus) << "\n"
+          << "  access: " << (a.has("--write") ? "read/write" : "read-only") << "\n"
           << "  encryption: ChaCha20-Poly1305 (always on)\n\n";
     if (ticket.cloudPublished) {
         out() << "Room code (exactly 6 Base91 chars):\n  "

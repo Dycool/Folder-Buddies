@@ -19,9 +19,12 @@
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 namespace fb {
@@ -34,15 +37,30 @@ std::wstring widen(const std::string& s) {
     return w;
 }
 
-std::string narrow(PCWSTR s) {
-    if (!s) return "/";
+std::string narrow_raw(PCWSTR s) {
+    if (!s) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, s, -1, nullptr, 0, nullptr, nullptr);
     std::string out(n ? n - 1 : 0, '\0');
     if (n) WideCharToMultiByte(CP_UTF8, 0, s, -1, out.data(), n, nullptr, nullptr);
     for (char& c : out)
         if (c == '\\') c = '/';
-    if (out.empty() || out.front() != '/') out.insert(out.begin(), '/');
     return out;
+}
+
+std::string make_rooted(std::string out) {
+    if (out.empty()) return "/";
+    if (out.front() != '/') out.insert(out.begin(), '/');
+    return out;
+}
+
+std::string narrow(PCWSTR s) {
+    return make_rooted(narrow_raw(s));
+}
+
+std::string narrow_optional(PCWSTR s) {
+    std::string out = narrow_raw(s);
+    if (out.empty()) return {};
+    return make_rooted(std::move(out));
 }
 
 std::string sanitize(const std::string& name) {
@@ -97,6 +115,8 @@ struct DirEntry {
 struct ProjfsState {
     Client* client = nullptr;
     PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT ctx = nullptr;
+    bool allowWrites = false;
+    std::filesystem::path root;
     std::mutex enumMtx;
     std::unordered_map<std::string, std::vector<DirEntry>> enumerations;
 };
@@ -110,6 +130,136 @@ HRESULT status_to_hresult(int st) {
     case EISDIR: return HRESULT_FROM_WIN32(ERROR_CANNOT_MAKE);
     default: return HRESULT_FROM_WIN32(ERROR_GEN_FAILURE);
     }
+}
+
+constexpr PRJ_NOTIFY_TYPES kWriteNotifyMask = static_cast<PRJ_NOTIFY_TYPES>(
+    PRJ_NOTIFY_FILE_OPENED |
+    PRJ_NOTIFY_NEW_FILE_CREATED |
+    PRJ_NOTIFY_FILE_OVERWRITTEN |
+    PRJ_NOTIFY_PRE_DELETE |
+    PRJ_NOTIFY_PRE_RENAME |
+    PRJ_NOTIFY_PRE_SET_HARDLINK |
+    PRJ_NOTIFY_FILE_RENAMED |
+    PRJ_NOTIFY_HARDLINK_CREATED |
+    PRJ_NOTIFY_FILE_HANDLE_CLOSED_FILE_MODIFIED |
+    PRJ_NOTIFY_FILE_HANDLE_CLOSED_FILE_DELETED |
+    PRJ_NOTIFY_FILE_PRE_CONVERT_TO_FULL);
+
+PRJ_FILE_BASIC_INFO apply_readonly(const PRJ_FILE_BASIC_INFO& in, bool allowWrites) {
+    PRJ_FILE_BASIC_INFO out = in;
+    if (!allowWrites && !out.IsDirectory) out.FileAttributes |= FILE_ATTRIBUTE_READONLY;
+    return out;
+}
+
+std::filesystem::path local_path(ProjfsState* st, const std::string& rel) {
+    std::string p = rel;
+    while (!p.empty() && (p.front() == '/' || p.front() == '\\')) p.erase(p.begin());
+    std::filesystem::path out = st->root;
+    if (!p.empty()) out /= std::filesystem::u8path(p);
+    return out;
+}
+
+int remote_path_only(ProjfsState* st, uint16_t op, const std::string& path) {
+    Writer w;
+    w.str(path);
+    std::vector<uint8_t> resp;
+    return st->client->request(op, w.b, resp);
+}
+
+int remote_mkdir(ProjfsState* st, const std::string& path) {
+    Writer w;
+    w.str(path);
+    uint32_t mode = 0755;
+    w.pod(mode);
+    std::vector<uint8_t> resp;
+    int rc = st->client->request(OP_MKDIR, w.b, resp);
+    return rc == EEXIST ? 0 : rc;
+}
+
+int remote_rename(ProjfsState* st, const std::string& from, const std::string& to) {
+    Writer w;
+    w.str(from);
+    w.str(to);
+    std::vector<uint8_t> resp;
+    return st->client->request(OP_RENAME, w.b, resp);
+}
+
+int remote_truncate(ProjfsState* st, const std::string& path, uint64_t size) {
+    Writer w;
+    w.str(path);
+    w.pod(size);
+    std::vector<uint8_t> resp;
+    return st->client->request(OP_TRUNCATE, w.b, resp);
+}
+
+int remote_open_for_write(ProjfsState* st, const std::string& path, uint64_t& fh) {
+    Writer w;
+    w.str(path);
+    int32_t flags = FB_O_WRONLY | FB_O_CREAT | FB_O_TRUNC;
+    uint32_t mode = 0644;
+    w.pod(flags);
+    w.pod(mode);
+    std::vector<uint8_t> resp;
+    int rc = st->client->request(OP_CREATE, w.b, resp);
+    if (rc) return rc;
+    Reader r(resp.data(), resp.size());
+    return r.pod(fh) ? 0 : EIO;
+}
+
+void remote_release(ProjfsState* st, uint64_t fh) {
+    Writer w;
+    w.pod(fh);
+    std::vector<uint8_t> ignored;
+    st->client->request(OP_RELEASE, w.b, ignored);
+}
+
+int remote_create_empty_file(ProjfsState* st, const std::string& path) {
+    uint64_t fh = 0;
+    int rc = remote_open_for_write(st, path, fh);
+    if (rc) return rc;
+    remote_release(st, fh);
+    return remote_truncate(st, path, 0);
+}
+
+int remote_write(ProjfsState* st, uint64_t fh, uint64_t offset, const char* data, uint32_t n) {
+    Writer w;
+    w.pod(fh);
+    w.pod(offset);
+    w.raw(data, n);
+    std::vector<uint8_t> resp;
+    int rc = st->client->request(OP_WRITE, w.b, resp);
+    if (rc) return rc;
+    Reader r(resp.data(), resp.size());
+    uint32_t written = 0;
+    if (!r.pod(written)) return EIO;
+    return written == n ? 0 : EIO;
+}
+
+int sync_local_file_to_remote(ProjfsState* st, const std::string& relPath) {
+    std::filesystem::path lp = local_path(st, relPath);
+    std::error_code ec;
+    if (std::filesystem::is_directory(lp, ec)) return remote_mkdir(st, relPath);
+    if (!std::filesystem::exists(lp, ec)) return ENOENT;
+
+    uint64_t fh = 0;
+    int rc = remote_open_for_write(st, relPath, fh);
+    if (rc) return rc;
+
+    std::ifstream in(lp, std::ios::binary);
+    if (!in) { remote_release(st, fh); return EIO; }
+    std::vector<char> buf(kMaxIO);
+    uint64_t offset = 0;
+    while (in) {
+        in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+        std::streamsize got = in.gcount();
+        if (got <= 0) break;
+        rc = remote_write(st, fh, offset, buf.data(), static_cast<uint32_t>(got));
+        if (rc) { remote_release(st, fh); return rc; }
+        offset += static_cast<uint64_t>(got);
+        st->client->bytesWritten += static_cast<uint64_t>(got);
+    }
+    remote_release(st, fh);
+    return remote_truncate(st, relPath, offset);
 }
 
 HRESULT query_attr(ProjfsState* st, const std::string& path, WireAttr& attr) {
@@ -138,7 +288,7 @@ std::vector<DirEntry> query_dir(ProjfsState* st, const std::string& path) {
         std::string name;
         WireAttr a;
         if (!r.str(name) || !r.pod(a)) break;
-        entries.push_back({widen(name), to_basic_info(a)});
+        entries.push_back({widen(name), apply_readonly(to_basic_info(a), st->allowWrites)});
     }
     std::sort(entries.begin(), entries.end(), [](const DirEntry& a, const DirEntry& b) {
         return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
@@ -194,7 +344,7 @@ HRESULT CALLBACK placeholder_cb(const PRJ_CALLBACK_DATA* data) {
     HRESULT hr = query_attr(st, narrow(data->FilePathName), a);
     if (FAILED(hr)) return hr;
     PRJ_PLACEHOLDER_INFO info{};
-    info.FileBasicInfo = to_basic_info(a);
+    info.FileBasicInfo = apply_readonly(to_basic_info(a), st->allowWrites);
     return PrjWritePlaceholderInfo(st->ctx, data->FilePathName, &info, sizeof(info));
 }
 
@@ -248,6 +398,87 @@ HRESULT CALLBACK file_data_cb(const PRJ_CALLBACK_DATA* data, UINT64 byteOffset, 
     return S_OK;
 }
 
+HRESULT CALLBACK notification_cb(const PRJ_CALLBACK_DATA* data, BOOLEAN isDirectory,
+                                 PRJ_NOTIFICATION notification, PCWSTR destinationFileName,
+                                 PRJ_NOTIFICATION_PARAMETERS* operationParameters) {
+    auto* st = static_cast<ProjfsState*>(data->InstanceContext);
+    const bool dir = isDirectory == TRUE;
+    const std::string path = narrow_optional(data->FilePathName);
+    const std::string dest = narrow_optional(destinationFileName);
+
+    auto deny_write = [&]() -> HRESULT {
+        return st->allowWrites ? S_OK : HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+    };
+    auto post_mask = [&]() {
+        if (!operationParameters) return;
+        operationParameters->PostCreate.NotificationMask = kWriteNotifyMask;
+    };
+    auto rename_mask = [&]() {
+        if (!operationParameters) return;
+        operationParameters->FileRenamed.NotificationMask = kWriteNotifyMask;
+    };
+
+    switch (notification) {
+    case PRJ_NOTIFICATION_FILE_OPENED:
+        post_mask();
+        return S_OK;
+
+    case PRJ_NOTIFICATION_NEW_FILE_CREATED:
+        post_mask();
+        if (!st->allowWrites) return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+        if (dir) return status_to_hresult(remote_mkdir(st, path));
+        // Create/truncate now so zero-byte files appear remotely even if no
+        // modified-close notification follows. Final contents are uploaded on close.
+        return status_to_hresult(remote_create_empty_file(st, path));
+
+    case PRJ_NOTIFICATION_FILE_OVERWRITTEN:
+        post_mask();
+        if (!st->allowWrites) return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+        return dir ? S_OK : status_to_hresult(remote_create_empty_file(st, path));
+
+    case PRJ_NOTIFICATION_PRE_DELETE:
+        if (FAILED(deny_write())) return deny_write();
+        return status_to_hresult(remote_path_only(st, dir ? OP_RMDIR : OP_UNLINK, path));
+
+    case PRJ_NOTIFICATION_PRE_RENAME:
+        if (FAILED(deny_write())) return deny_write();
+        if (path == "/") return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+        if (dest.empty()) return status_to_hresult(remote_path_only(st, dir ? OP_RMDIR : OP_UNLINK, path));
+        // Empty source means an item is moving in from outside the virtualization
+        // root. It cannot be renamed remotely yet because no remote source exists.
+        if (path.empty() || path == "/") return S_OK;
+        return status_to_hresult(remote_rename(st, path, dest));
+
+    case PRJ_NOTIFICATION_FILE_RENAMED:
+        rename_mask();
+        if (!st->allowWrites) return S_OK;
+        // If an item moved in from outside the root, upload/create it now.
+        if ((path.empty() || path == "/") && !dest.empty()) return status_to_hresult(sync_local_file_to_remote(st, dest));
+        return S_OK;
+
+    case PRJ_NOTIFICATION_PRE_SET_HARDLINK:
+        // Hard links do not map safely to the remote cross-platform protocol.
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+
+    case PRJ_NOTIFICATION_HARDLINK_CREATED:
+        return S_OK;
+
+    case PRJ_NOTIFICATION_FILE_PRE_CONVERT_TO_FULL:
+        return deny_write();
+
+    case PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_MODIFIED:
+        if (!st->allowWrites) return S_OK;
+        if (dir) return S_OK;
+        return status_to_hresult(sync_local_file_to_remote(st, path));
+
+    case PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_DELETED:
+        return S_OK; // PRE_DELETE already propagated and can veto failures.
+
+    default:
+        return S_OK;
+    }
+}
+
 PRJ_CALLBACKS callbacks() {
     PRJ_CALLBACKS cb{};
     cb.StartDirectoryEnumerationCallback = start_enum_cb;
@@ -255,13 +486,14 @@ PRJ_CALLBACKS callbacks() {
     cb.GetDirectoryEnumerationCallback = get_enum_cb;
     cb.GetPlaceholderInfoCallback = placeholder_cb;
     cb.GetFileDataCallback = file_data_cb;
+    cb.NotificationCallback = notification_cb;
     return cb;
 }
 
 } // namespace
 
 bool Mount::start(Client* client, const std::string& mountBase, const std::string& volname,
-                  std::string& err) {
+                  bool allowWrites, std::string& err) {
     if (!ensure_fuse_backend(err)) return false;
 
     std::string base = mountBase.empty() ? (std::string(std::getenv("USERPROFILE") ? std::getenv("USERPROFILE") : "C:\\") + "\\FolderBuddies") : mountBase;
@@ -273,6 +505,8 @@ bool Mount::start(Client* client, const std::string& mountBase, const std::strin
 
     auto* state = new ProjfsState;
     state->client = client;
+    state->allowWrites = allowWrites;
+    state->root = std::filesystem::path(mp_);
     PRJ_CALLBACKS cb = callbacks();
     HRESULT hr = PrjMarkDirectoryAsPlaceholder(widen(mp_).c_str(), nullptr, nullptr, nullptr);
     if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) {
@@ -280,7 +514,13 @@ bool Mount::start(Client* client, const std::string& mountBase, const std::strin
         err = "PrjMarkDirectoryAsPlaceholder failed";
         return false;
     }
-    hr = PrjStartVirtualizing(widen(mp_).c_str(), &cb, state, nullptr, &state->ctx);
+    PRJ_NOTIFICATION_MAPPING mapping{};
+    mapping.NotificationRoot = L"";
+    mapping.NotificationBitMask = kWriteNotifyMask;
+    PRJ_STARTVIRTUALIZING_OPTIONS opts{};
+    opts.NotificationMappings = &mapping;
+    opts.NotificationMappingsCount = 1;
+    hr = PrjStartVirtualizing(widen(mp_).c_str(), &cb, state, &opts, &state->ctx);
     if (FAILED(hr)) {
         delete state;
         err = "PrjStartVirtualizing failed";

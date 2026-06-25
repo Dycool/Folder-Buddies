@@ -17,7 +17,7 @@ namespace fb {
 // Cloudflare room code or, if the Worker is unavailable/quota-exhausted, a long
 // self-contained offline Base91 blob. Neither requires a separate password.
 bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int port,
-                   int maxClients, bool lanOnly, HostedShareTicket& ticket,
+                   int maxClients, bool lanOnly, bool allowWrites, HostedShareTicket& ticket,
                    std::string& err);
 
 // Resolve a user-entered connect code. Exactly 6 clean Base91 chars trigger the

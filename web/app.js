@@ -12,6 +12,10 @@ import { argon2id } from "./vendor/noble/argon2.js";
   const ICE_TIMEOUT_MS = 8000;
   const STATS_INTERVAL_MS = 500;
   const DEFAULT_ICE = [{ urls: "stun:stun.l.google.com:19302" }];
+  const TEXT_PREVIEW_MAX = 4 * 1024 * 1024;
+  const WEB_OFFLINE_OFFER_PREFIX = "FBW2O:";
+  const WEB_OFFLINE_ANSWER_PREFIX = "FBW2A:";
+  const FIREBASE_SDK_VERSION = "10.12.5";
 
   const $ = (id) => document.getElementById(id);
   const els = {
@@ -20,21 +24,36 @@ import { argon2id } from "./vendor/noble/argon2.js";
     folderInput: $("folderInput"),
     browseFolder: $("browseFolder"),
     maxClients: $("maxClients"),
+    allowWrites: $("allowWrites"),
     shareToggle: $("shareToggle"),
     connectCode: $("connectCode"),
     copyAll: $("copyAll"),
     shareStatus: $("shareStatus"),
+    offlineAnswerRow: $("offlineAnswerRow"),
+    offlineAnswerInput: $("offlineAnswerInput"),
+    applyOfflineAnswer: $("applyOfflineAnswer"),
     connectInput: $("connectInput"),
+    offlineAnswerOutRow: $("offlineAnswerOutRow"),
+    offlineAnswerOut: $("offlineAnswerOut"),
+    copyOfflineAnswer: $("copyOfflineAnswer"),
     connectToggle: $("connectToggle"),
     connectStatus: $("connectStatus"),
     explorer: $("explorer"),
     currentPath: $("currentPath"),
     upButton: $("upButton"),
+    uploadButton: $("uploadButton"),
+    uploadInput: $("uploadInput"),
+    dropzone: $("dropzone"),
     fileRows: $("fileRows"),
     transfers: $("transfers"),
     statsLabel: $("statsLabel"),
     toast: $("toast"),
     turnstileMount: $("turnstileMount"),
+    previewPanel: $("previewPanel"),
+    previewTitle: $("previewTitle"),
+    previewBody: $("previewBody"),
+    closePreview: $("closePreview"),
+    savePreview: $("savePreview"),
   };
 
   const state = {
@@ -43,14 +62,21 @@ import { argon2id } from "./vendor/noble/argon2.js";
     lookup: "",        // public half (relay room)
     rootBase: null,    // HKDF base key derived from the secret half
     maxClients: 0,
+    allowWrites: false,
+    clientCanWrite: false,
+    directFilePath: "",
+    directFileConsumed: false,
     hostWs: null,
     clientWs: null,
     hostPeers: new Map(),
+    manualHost: null,
+    manualClient: false,
     clientPeer: null,
     dataChannel: null,
     currentPath: "/",
     pending: new Map(),
     downloads: new Map(),
+    uploads: new Map(),
     nextReqId: 1,
     turnstileWidgetId: null,
     turnstileResolver: null,
@@ -63,6 +89,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   const te = new TextEncoder();
   const td = new TextDecoder();
+  let firebaseSdkPromise = null;
 
   function setShareStatus(text) { els.shareStatus.textContent = text; }
   function setConnectStatus(text) { els.connectStatus.textContent = text; }
@@ -90,6 +117,21 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function iceServers() {
     return Array.isArray(config().iceServers) ? config().iceServers : DEFAULT_ICE;
+  }
+
+  function firebaseConfig() {
+    const raw = config().firebase || config().firebaseSignaling || {};
+    return raw && typeof raw === "object" ? raw : {};
+  }
+
+  function firebaseEnabled() {
+    const f = firebaseConfig();
+    return !!(f.apiKey && f.databaseURL && f.projectId);
+  }
+
+  function firebaseRoomPath(lookup) {
+    const safe = btoa(lookup).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    return `webRooms/${safe}`;
   }
 
   function looksLikeRoom(text) {
@@ -180,6 +222,29 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return new Uint8Array(out);
   }
 
+
+  function encodeWebOffline(prefix, obj) {
+    return prefix + base91Encode(te.encode(JSON.stringify(obj)));
+  }
+
+  function decodeWebOffline(prefix, text) {
+    const cleaned = clean(text);
+    if (!cleaned.startsWith(prefix)) throw new Error("Invalid offline web code");
+    try {
+      return JSON.parse(td.decode(base91Decode(cleaned.slice(prefix.length))));
+    } catch (e) {
+      throw new Error(`Invalid offline web code: ${e.message}`);
+    }
+  }
+
+  function isWebOfflineOffer(text) {
+    return clean(text).startsWith(WEB_OFFLINE_OFFER_PREFIX);
+  }
+
+  function isWebOfflineAnswer(text) {
+    return clean(text).startsWith(WEB_OFFLINE_ANSWER_PREFIX);
+  }
+
   async function encryptJson(aad, obj) {
     const salt = randomBytes(16);
     const iv = randomBytes(12);
@@ -200,13 +265,23 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return JSON.parse(td.decode(plain));
   }
 
-  function shareLink(code) {
-    return `${location.origin}${location.pathname}#r=${code}`;
+  function shareLink(code, path = "") {
+    const params = new URLSearchParams();
+    params.set("r", code);
+    if (path) params.set("f", normalizePath(path));
+    return `${location.origin}${location.pathname}#${params.toString()}`;
   }
 
   function parseJoinInput(raw) {
     const text = clean(raw);
-    const fromHash = (frag) => new URLSearchParams(frag).get("r") || "";
+    const fromHash = (frag) => {
+      const params = new URLSearchParams(frag);
+      const file = params.get("f") || "";
+      const direct = file ? normalizePath(file) : "";
+      state.directFilePath = direct && direct !== "/" ? direct : "";
+      state.directFileConsumed = false;
+      return params.get("r") || "";
+    };
     try {
       const url = new URL(text);
       const r = fromHash(url.hash.slice(1));
@@ -216,14 +291,21 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const r = fromHash(text.split("#").pop());
       if (r) return r;
     }
+    state.directFilePath = "";
+    state.directFileConsumed = false;
     return text;
   }
 
   function applyHash() {
     if (!location.hash) return;
-    const room = new URLSearchParams(location.hash.slice(1)).get("r") || "";
+    const params = new URLSearchParams(location.hash.slice(1));
+    const room = params.get("r") || "";
+    const file = params.get("f") || "";
     if (looksLikeRoom(room)) {
       els.connectInput.value = room;
+      const direct = file ? normalizePath(file) : "";
+      state.directFilePath = direct && direct !== "/" ? direct : "";
+      state.directFileConsumed = false;
       selectTab("connect");
     }
   }
@@ -292,12 +374,27 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function openSignal(role, lookup, onMessage, token = "") {
     return new Promise((resolve, reject) => {
+      let settled = false;
       const ws = new WebSocket(signalUrl(lookup, role, token));
-      const timer = setTimeout(() => reject(new Error("Signaling timed out")), 12000);
-      ws.onopen = () => { clearTimeout(timer); resolve(ws); };
-      ws.onerror = () => { clearTimeout(timer); reject(new Error("Signaling failed")); };
+      ws.provider = "cloudflare";
+      const fail = (message) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { ws.close(); } catch { /* ignore */ }
+        reject(new Error(message));
+      };
+      const timer = setTimeout(() => fail("Cloudflare signaling timed out"), 12000);
+      ws.onopen = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(ws);
+      };
+      ws.onerror = () => fail("Cloudflare signaling failed");
       ws.onclose = () => {
-        if (role === "host" && state.hostWs === ws) setShareStatus("Not sharing.");
+        if (!settled) fail("Cloudflare signaling closed before it was ready");
+        if (role === "host" && state.hostWs === ws) setShareStatus("Not hosting.");
         if (role === "client" && state.clientWs === ws) setConnectStatus("Disconnected.");
       };
       ws.onmessage = (event) => {
@@ -307,8 +404,176 @@ import { argon2id } from "./vendor/noble/argon2.js";
     });
   }
 
+  function makeSignalRelay(provider, sendFn, closeFn) {
+    const messageListeners = new Set();
+    const closeListeners = new Set();
+    const relay = {
+      provider,
+      readyState: 1,
+      onmessage: null,
+      onclose: null,
+      send(data) {
+        if (relay.readyState !== 1) throw new Error(`${provider} signaling is closed`);
+        return sendFn(data);
+      },
+      close() {
+        if (relay.readyState === 3) return;
+        relay.readyState = 3;
+        try { closeFn?.(); } catch { /* ignore cleanup errors */ }
+        relay._emitClose();
+      },
+      addEventListener(type, fn) {
+        if (type === "message") messageListeners.add(fn);
+        if (type === "close") closeListeners.add(fn);
+      },
+      removeEventListener(type, fn) {
+        if (type === "message") messageListeners.delete(fn);
+        if (type === "close") closeListeners.delete(fn);
+      },
+      _emit(obj) {
+        if (relay.readyState === 3) return;
+        const ev = { data: JSON.stringify(obj) };
+        try { relay.onmessage?.(ev); } catch { /* listener owns its errors */ }
+        for (const fn of [...messageListeners]) {
+          try { fn(ev); } catch { /* listener owns its errors */ }
+        }
+      },
+      _emitClose() {
+        const ev = {};
+        try { relay.onclose?.(ev); } catch { /* listener owns its errors */ }
+        for (const fn of [...closeListeners]) {
+          try { fn(ev); } catch { /* listener owns its errors */ }
+        }
+      },
+    };
+    return relay;
+  }
+
+  async function firebaseSdk() {
+    if (!firebaseSdkPromise) {
+      firebaseSdkPromise = Promise.all([
+        import(`https://www.gstatic.com/firebasejs/${FIREBASE_SDK_VERSION}/firebase-app.js`),
+        import(`https://www.gstatic.com/firebasejs/${FIREBASE_SDK_VERSION}/firebase-database.js`),
+      ]).then(([appMod, dbMod]) => {
+        const cfg = firebaseConfig();
+        const appName = "folder-buddies-fallback";
+        const app = appMod.getApps().find((a) => a.name === appName) || appMod.initializeApp(cfg, appName);
+        const db = dbMod.getDatabase(app);
+        return { ...dbMod, db };
+      });
+    }
+    return firebaseSdkPromise;
+  }
+
+  function parseRelaySignal(data) {
+    let msg;
+    try { msg = JSON.parse(data); } catch { throw new Error("Bad signaling message"); }
+    if (msg?.kind !== "signal" || typeof msg.peerId !== "string" || typeof msg.ciphertext !== "string") {
+      throw new Error("Bad signaling message");
+    }
+    return msg;
+  }
+
+  async function pushFirebaseSignal(sdk, path, value) {
+    await sdk.set(sdk.push(sdk.ref(sdk.db, path)), { ...value, at: sdk.serverTimestamp() });
+  }
+
+  async function openFirebaseHostSignal() {
+    if (!firebaseEnabled()) throw new Error("Firebase fallback is not configured");
+    const sdk = await firebaseSdk();
+
+    for (let attempt = 0; attempt < 12; ++attempt) {
+      const code = randomRoom();
+      const lookup = lookupOf(code);
+      const path = firebaseRoomPath(lookup);
+      const roomRef = sdk.ref(sdk.db, path);
+
+      const claim = await sdk.runTransaction(roomRef, (current) => {
+        if (current !== null) return;
+        return { v: 1, host: { createdAt: Date.now() } };
+      }, { applyLocally: false });
+      if (!claim.committed) continue;
+
+      const unsubs = [];
+      let closed = false;
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        for (const un of unsubs.splice(0)) {
+          try { un(); } catch { /* ignore */ }
+        }
+        sdk.remove(roomRef).catch(() => {});
+      };
+      sdk.onDisconnect(roomRef).remove().catch(() => {});
+
+      const relay = makeSignalRelay("firebase", async (data) => {
+        const msg = parseRelaySignal(data);
+        await pushFirebaseSignal(sdk, `${path}/signalsToClient/${msg.peerId}`, { ciphertext: msg.ciphertext });
+      }, cleanup);
+
+      unsubs.push(sdk.onChildAdded(sdk.ref(sdk.db, `${path}/clients`), (snap) => {
+        const peerId = snap.key;
+        if (peerId) relay._emit({ kind: "client-joined", peerId });
+      }));
+      unsubs.push(sdk.onChildAdded(sdk.ref(sdk.db, `${path}/signalsToHost`), (snap) => {
+        const v = snap.val() || {};
+        if (typeof v.peerId === "string" && typeof v.ciphertext === "string") {
+          relay._emit({ kind: "signal", peerId: v.peerId, ciphertext: v.ciphertext });
+        }
+        sdk.remove(snap.ref).catch(() => {});
+      }));
+      setTimeout(() => relay._emit({ kind: "ready", role: "host", room: lookup }), 0);
+      return { code, lookup, ws: relay, provider: "firebase" };
+    }
+    throw new Error("Firebase fallback could not find a free room code");
+  }
+
+  async function openFirebaseClientSignal(lookup) {
+    if (!firebaseEnabled()) throw new Error("Firebase fallback is not configured");
+    const sdk = await firebaseSdk();
+    const path = firebaseRoomPath(lookup);
+    const roomRef = sdk.ref(sdk.db, path);
+    const snap = await sdk.get(roomRef);
+    if (!snap.exists()) throw new Error("no fallback room found for that code");
+
+    const peerId = crypto.randomUUID();
+    const clientRef = sdk.ref(sdk.db, `${path}/clients/${peerId}`);
+    const unsubs = [];
+    let closed = false;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      for (const un of unsubs.splice(0)) {
+        try { un(); } catch { /* ignore */ }
+      }
+      sdk.remove(clientRef).catch(() => {});
+    };
+
+    const relay = makeSignalRelay("firebase", async (data) => {
+      const msg = parseRelaySignal(data);
+      await pushFirebaseSignal(sdk, `${path}/signalsToHost`, { peerId: msg.peerId, ciphertext: msg.ciphertext });
+    }, cleanup);
+
+    unsubs.push(sdk.onChildAdded(sdk.ref(sdk.db, `${path}/signalsToClient/${peerId}`), (snap2) => {
+      const v = snap2.val() || {};
+      if (typeof v.ciphertext === "string") relay._emit({ kind: "signal", peerId, ciphertext: v.ciphertext });
+      sdk.remove(snap2.ref).catch(() => {});
+    }));
+    unsubs.push(sdk.onValue(roomRef, (roomSnap) => {
+      if (!roomSnap.exists()) {
+        relay._emit({ kind: "host-left" });
+        relay.close();
+      }
+    }));
+
+    await sdk.set(clientRef, { joinedAt: sdk.serverTimestamp() });
+    sdk.onDisconnect(clientRef).remove().catch(() => {});
+    setTimeout(() => relay._emit({ kind: "ready", role: "client", room: lookup, peerId }), 0);
+    return relay;
+  }
+
   // Connect as host, regenerating the code if the relay room is already taken.
-  async function openHostSignal() {
+  async function openCloudflareHostSignal() {
     for (let attempt = 0; attempt < 12; ++attempt) {
       const code = randomRoom();
       const lookup = lookupOf(code);
@@ -325,16 +590,34 @@ import { argon2id } from "./vendor/noble/argon2.js";
         ws.addEventListener("message", onReady);
         ws.addEventListener("close", onClose);
       });
-      if (claimed) return { code, lookup, ws };
+      if (claimed) return { code, lookup, ws, provider: "cloudflare" };
       try { ws.close(); } catch { /* already closing */ }
     }
     throw new Error("Could not find a free room code");
   }
 
+  async function openHostSignal() {
+    let cloudError = "";
+    try {
+      return await openCloudflareHostSignal();
+    } catch (e) {
+      cloudError = e?.message || String(e);
+    }
+
+    try {
+      const out = await openFirebaseHostSignal();
+      toast(`Cloudflare failed; using Firebase fallback. ${cloudError}`);
+      return out;
+    } catch (e) {
+      const firebaseError = e?.message || String(e);
+      throw new Error(`Cloudflare failed (${cloudError}); Firebase fallback failed (${firebaseError})`);
+    }
+  }
+
   async function sendEncryptedSignal(ws, peerId, payload) {
     const aad = `web-signal:${state.lookup}:${peerId}`;
     const ciphertext = await encryptJson(aad, payload);
-    ws.send(JSON.stringify({ kind: "signal", peerId, ciphertext }));
+    await ws.send(JSON.stringify({ kind: "signal", peerId, ciphertext }));
   }
 
   function decryptSignal(peerId, ciphertext) {
@@ -366,8 +649,13 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function setupHostChannel(peerId, dc) {
     dc.binaryType = "arraybuffer";
+    dc.onopen = () => renderShareStatus();
+    dc.onclose = () => renderShareStatus();
     dc.onmessage = (event) => {
-      if (typeof event.data !== "string") return;
+      if (typeof event.data !== "string") {
+        handleHostBinary(dc, event.data);
+        return;
+      }
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
       handleHostRequest(peerId, dc, msg).catch((e) => safeSendJson(dc, { t: "error", id: msg?.id || 0, message: e.message }));
@@ -380,7 +668,16 @@ import { argon2id } from "./vendor/noble/argon2.js";
     dc.onopen = () => {
       setConnectStatus("Connected.");
       els.explorer.hidden = false;
-      listRemote("/").catch((e) => toast(e.message));
+      if (state.directFilePath && !state.directFileConsumed) {
+        state.directFileConsumed = true;
+        const filePath = state.directFilePath;
+        listRemote(parentPath(filePath)).then(() => {
+          toast("Direct file link opened");
+          return downloadRemote({ name: basename(filePath), path: filePath, kind: "file" });
+        }).catch((e) => toast(e.message));
+      } else {
+        listRemote("/").catch((e) => toast(e.message));
+      }
     };
     dc.onclose = () => setConnectStatus("Disconnected.");
     dc.onerror = () => toast("Connection error");
@@ -398,16 +695,20 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return state.nextReqId++ >>> 0;
   }
 
-  function requestJson(dc, obj, timeoutMs = 20000) {
-    const id = obj.id || nextId();
-    obj.id = id;
-    const p = new Promise((resolve, reject) => {
+  function expectResponse(id, timeoutMs = 20000) {
+    return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         state.pending.delete(id);
         reject(new Error("Request timed out"));
       }, timeoutMs);
       state.pending.set(id, { resolve, reject, timer });
     });
+  }
+
+  function requestJson(dc, obj, timeoutMs = 20000) {
+    const id = obj.id || nextId();
+    obj.id = id;
+    const p = expectResponse(id, timeoutMs);
     safeSendJson(dc, obj);
     return p;
   }
@@ -422,10 +723,25 @@ import { argon2id } from "./vendor/noble/argon2.js";
         state.pending.delete(msg.id);
         pending.reject(new Error(msg.message || "Remote error"));
       }
+      const download = state.downloads.get(msg.id);
+      if (download?.reject) {
+        state.downloads.delete(msg.id);
+        download.reject(new Error(msg.message || "Remote error"));
+      }
       toast(msg.message || "Remote error");
       return;
     }
     if (msg.t === "listResult") {
+      state.clientCanWrite = !!msg.write;
+      const pending = state.pending.get(msg.id);
+      if (pending) {
+        clearTimeout(pending.timer);
+        state.pending.delete(msg.id);
+        pending.resolve(msg);
+      }
+      return;
+    }
+    if (msg.t === "ok" || msg.t === "uploadReady") {
       const pending = state.pending.get(msg.id);
       if (pending) {
         clearTimeout(pending.timer);
@@ -470,20 +786,29 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const d = state.downloads.get(id);
     if (!d) return;
     state.downloads.delete(id);
-    if (d.writer) {
-      await d.writeQueue;
-      await d.writer.close();
-    } else {
-      const blob = new Blob(d.chunks, { type: "application/octet-stream" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = d.name;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    try {
+      if (d.writer) {
+        await d.writeQueue;
+        await d.writer.close();
+      } else {
+        const blob = new Blob(d.chunks, { type: d.mime || "application/octet-stream" });
+        if (d.mode === "blob") {
+          d.resolve?.(blob);
+        } else {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = d.name;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 10000);
+        }
+      }
+      d.label.textContent = `${d.name} — done`;
+      d.progress.value = d.progress.max;
+    } catch (e) {
+      d.reject?.(e);
+      throw e;
     }
-    d.label.textContent = `${d.name} — done`;
-    d.progress.value = d.progress.max;
   }
 
   async function handleHostRequest(peerId, dc, msg) {
@@ -504,7 +829,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
         entries.push(entry);
       }
       entries.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "directory" ? -1 : 1));
-      safeSendJson(dc, { t: "listResult", id: msg.id, path, entries });
+      safeSendJson(dc, { t: "listResult", id: msg.id, path, entries, write: !!state.allowWrites });
       return;
     }
     if (msg.t === "download") {
@@ -516,7 +841,53 @@ import { argon2id } from "./vendor/noble/argon2.js";
       safeSendJson(dc, { t: "fileEnd", id: msg.id });
       return;
     }
+    if (msg.t === "uploadStart") {
+      await assertHostWritable();
+      const path = normalizePath(msg.path || "/");
+      if (path === "/") throw new Error("Bad upload path");
+      const parent = await directoryHandleFor(parentPath(path));
+      const name = safeEntryName(basename(path));
+      const fileHandle = await parent.getFileHandle(name, { create: true });
+      const writer = await fileHandle.createWritable();
+      state.uploads.set(msg.id, { writer, writeQueue: Promise.resolve(), received: 0, size: Number(msg.size || 0), name });
+      safeSendJson(dc, { t: "uploadReady", id: msg.id });
+      return;
+    }
+    if (msg.t === "uploadEnd") {
+      await assertHostWritable();
+      const upload = state.uploads.get(msg.id);
+      if (!upload) throw new Error("Upload not found");
+      await upload.writeQueue;
+      await upload.writer.close();
+      state.uploads.delete(msg.id);
+      safeSendJson(dc, { t: "ok", id: msg.id });
+      return;
+    }
+    if (msg.t === "delete") {
+      await assertHostWritable();
+      const path = normalizePath(msg.path || "/");
+      if (path === "/") throw new Error("Cannot delete the shared folder root");
+      const parent = await directoryHandleFor(parentPath(path));
+      await parent.removeEntry(basename(path), { recursive: true });
+      safeSendJson(dc, { t: "ok", id: msg.id });
+      return;
+    }
     throw new Error("Unknown request");
+  }
+
+  function handleHostBinary(dc, buf) {
+    const view = new DataView(buf);
+    if (view.byteLength < 8 || view.getUint32(0, false) !== BIN_MAGIC) return;
+    const id = view.getUint32(4, false);
+    const upload = state.uploads.get(id);
+    if (!upload) return;
+    const chunk = new Uint8Array(buf, 8);
+    upload.received += chunk.byteLength;
+    upload.writeQueue = upload.writeQueue.then(() => upload.writer.write(chunk));
+    upload.writeQueue.catch((e) => {
+      state.uploads.delete(id);
+      safeSendJson(dc, { t: "error", id, message: `Upload failed: ${e.message}` });
+    });
   }
 
   async function streamFile(dc, id, file) {
@@ -563,7 +934,33 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   function joinPath(base, name) {
-    return normalizePath(`${base.replace(/\/$/, "")}/${name}`);
+    return normalizePath(`${base.replace(/\/$/, "")}/${safeEntryName(name)}`);
+  }
+
+  function parentPath(path) {
+    const parts = normalizePath(path).split("/").filter(Boolean);
+    parts.pop();
+    return "/" + parts.join("/");
+  }
+
+  function basename(path) {
+    return normalizePath(path).split("/").filter(Boolean).pop() || "";
+  }
+
+  function safeEntryName(name) {
+    const cleaned = String(name || "").replace(/[\/\0]/g, "").trim();
+    return cleaned || "unnamed";
+  }
+
+  async function assertHostWritable() {
+    if (!state.allowWrites) throw new Error("The host has writes disabled");
+    if (!state.rootHandle) throw new Error("No folder selected");
+    if (state.rootHandle.queryPermission && state.rootHandle.requestPermission) {
+      const opts = { mode: "readwrite" };
+      let status = await state.rootHandle.queryPermission(opts);
+      if (status !== "granted") status = await state.rootHandle.requestPermission(opts);
+      if (status !== "granted") throw new Error("Write permission was not granted by the host browser");
+    }
   }
 
   async function handleForPath(path) {
@@ -597,6 +994,39 @@ import { argon2id } from "./vendor/noble/argon2.js";
     await pc.setLocalDescription(offer);
     await waitForIceComplete(pc);
     await sendEncryptedSignal(state.hostWs, peerId, { type: "offer", sdp: pc.localDescription });
+  }
+
+
+  async function createManualHostOffer() {
+    const peerId = "manual";
+    const pc = makePeer("Offline web client");
+    const dc = pc.createDataChannel("folderbuddies-files", { ordered: true });
+    setupHostChannel(peerId, dc);
+    state.hostPeers.set(peerId, { pc, dc });
+    state.manualHost = { peerId, pc, dc };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitForIceComplete(pc, Math.max(ICE_TIMEOUT_MS, 12000));
+    return encodeWebOffline(WEB_OFFLINE_OFFER_PREFIX, {
+      v: 1,
+      type: "web-offline-offer",
+      code: state.code,
+      lookup: state.lookup,
+      write: !!state.allowWrites,
+      sdp: pc.localDescription,
+    });
+  }
+
+  async function applyManualAnswer(text) {
+    const answer = decodeWebOffline(WEB_OFFLINE_ANSWER_PREFIX, text);
+    if (answer.v !== 1 || answer.type !== "web-offline-answer") throw new Error("Invalid offline answer");
+    if (answer.code !== state.code) throw new Error("This answer belongs to a different offline offer");
+    const peerId = answer.peerId || "manual";
+    const peer = state.hostPeers.get(peerId);
+    if (!peer) throw new Error("No waiting offline peer found");
+    await peer.pc.setRemoteDescription(answer.sdp);
+    renderShareStatus();
+    toast("Offline answer applied");
   }
 
   async function handleHostSignal(msg) {
@@ -661,24 +1091,37 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   function renderShareStatus() {
-    if (!state.hostWs) { setShareStatus("Not sharing."); return; }
-    setShareStatus(`Sharing — ${state.hostPeers.size} client(s)`);
+    if (!state.hostWs && !state.manualHost) { setShareStatus("Not hosting."); return; }
+    if (state.manualHost) {
+      const dc = state.manualHost.dc;
+      setShareStatus(dc?.readyState === "open" ? "Sharing offline — 1 client connected" : "Offline offer ready — paste the client's answer");
+      return;
+    }
+    setShareStatus(`${state.hostWs?.provider === "firebase" ? "Hosting through Firebase fallback" : "Hosting"} — ${state.hostPeers.size} client(s)`);
   }
 
   function setShareRunning(running) {
-    els.shareToggle.textContent = running ? "Stop sharing" : "Start sharing";
+    els.shareToggle.textContent = running ? "Stop hosting" : "Host";
     els.folderInput.disabled = running;
     els.browseFolder.disabled = running;
     els.maxClients.disabled = running;
+    if (els.allowWrites) els.allowWrites.disabled = running;
     els.copyAll.disabled = !running;
+    if (els.offlineAnswerRow) els.offlineAnswerRow.hidden = !(running && state.manualHost);
     if (!running) {
       els.connectCode.value = "";
+      if (els.offlineAnswerInput) els.offlineAnswerInput.value = "";
+      if (els.offlineAnswerRow) els.offlineAnswerRow.hidden = true;
     }
+  }
+
+  function wantsWriteAccess() {
+    return !!els.allowWrites?.checked;
   }
 
   async function pickFolder() {
     if (!window.showDirectoryPicker) throw new Error("Folder hosting needs Chromium or Edge");
-    state.rootHandle = await window.showDirectoryPicker({ mode: "read" });
+    state.rootHandle = await window.showDirectoryPicker({ mode: wantsWriteAccess() ? "readwrite" : "read" });
     els.folderInput.value = state.rootHandle.name;
   }
 
@@ -688,6 +1131,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
     els.shareToggle.disabled = true;
     const maxClients = Number(els.maxClients.value);
     state.maxClients = Number.isFinite(maxClients) && maxClients > 0 ? Math.floor(maxClients) : 0;
+    state.allowWrites = wantsWriteAccess();
+    if (state.allowWrites) await assertHostWritable();
 
     try {
       const { code, lookup, ws } = await openHostSignal();
@@ -699,35 +1144,53 @@ import { argon2id } from "./vendor/noble/argon2.js";
         try { handleHostSignal(JSON.parse(event.data)).catch((e) => toast(e.message)); }
         catch { /* ignore */ }
       };
+      els.connectCode.value = state.code;
+      toast(state.hostWs?.provider === "firebase" ? "Hosting through Firebase fallback." : "Hosting.");
     } catch (e) {
-      state.code = "";
-      state.lookup = "";
-      state.rootBase = null;
-      throw e;
+      const cloudError = e.message;
+      state.code = randomRoom();
+      state.lookup = lookupOf(state.code);
+      state.rootBase = await deriveRootBase(state.code);
+      state.hostWs = null;
+      const offerCode = await createManualHostOffer();
+      els.connectCode.value = offerCode;
+      toast(`Cloudflare failed; using offline web code. ${cloudError}`);
     } finally {
       els.shareToggle.disabled = false;
     }
 
-    els.connectCode.value = state.code;
     setShareRunning(true);
     renderShareStatus();
-    toast("Sharing.");
   }
 
   async function stopHost() {
     if (state.hostWs) state.hostWs.close();
     for (const p of state.hostPeers.values()) p.pc.close();
     state.hostWs = null;
+    state.manualHost = null;
     state.hostPeers.clear();
+    for (const upload of state.uploads.values()) {
+      try { upload.writer.close(); } catch { /* ignore */ }
+    }
+    state.uploads.clear();
+    state.allowWrites = false;
     state.code = "";
     state.lookup = "";
     state.rootBase = null;
     setShareRunning(false);
-    setShareStatus("Not sharing.");
-    toast("Stopped sharing");
+    setShareStatus("Not hosting.");
+    toast("Stopped hosting");
   }
 
   function copyShareDetails() {
+    if (state.manualHost || isWebOfflineOffer(els.connectCode.value)) {
+      return [
+        "Offline web offer code:",
+        els.connectCode.value,
+        "",
+        "The client must paste this into Connect, then send you the generated answer code.",
+      ].join("\n");
+    }
     return ["Connect code:", els.connectCode.value, "", "Share link:", shareLink(els.connectCode.value)].join("\n");
   }
 
@@ -737,28 +1200,75 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   async function connect() {
-    const code = parseJoinInput(els.connectInput.value);
-    if (!looksLikeRoom(code)) throw new Error("Paste the 6-character room code or share link");
+    const raw = clean(els.connectInput.value);
+    if (isWebOfflineOffer(raw)) return connectManualOffer(raw);
+
+    const code = parseJoinInput(raw);
+    if (isWebOfflineOffer(code)) return connectManualOffer(code);
+    if (!looksLikeRoom(code)) throw new Error("The browser client accepts 6-character web room codes/share links, or FBW2O offline web offer codes. Long IP/port blobs are for the native app.");
 
     setConnectStatus("Connecting…");
     state.code = code;
     state.lookup = lookupOf(code);
     state.rootBase = await deriveRootBase(code);
-    const token = await turnstileToken();
-    state.clientWs = await openSignal("client", state.lookup, (msg) => handleClientSignal(msg).catch((e) => toast(e.message)), token);
+    let cloudError = "";
+    try {
+      const token = await turnstileToken();
+      state.clientWs = await openSignal("client", state.lookup, (msg) => handleClientSignal(msg).catch((e) => toast(e.message)), token);
+    } catch (e) {
+      cloudError = e?.message || String(e);
+      try {
+        state.clientWs = await openFirebaseClientSignal(state.lookup);
+        state.clientWs.onmessage = (event) => {
+          try { handleClientSignal(JSON.parse(event.data)).catch((err) => toast(err.message)); }
+          catch { /* ignore */ }
+        };
+        toast(`Cloudflare failed; using Firebase fallback. ${cloudError}`);
+      } catch (fb) {
+        throw new Error(`Cloudflare failed (${cloudError}); Firebase fallback failed (${fb?.message || String(fb)})`);
+      }
+    }
     setConnected(true);
+  }
+
+  async function connectManualOffer(text) {
+    const offer = decodeWebOffline(WEB_OFFLINE_OFFER_PREFIX, text);
+    if (offer.v !== 1 || offer.type !== "web-offline-offer" || !looksLikeRoom(offer.code)) throw new Error("Invalid offline web offer");
+    setConnectStatus("Creating offline answer…");
+    state.manualClient = true;
+    state.code = offer.code;
+    state.lookup = offer.lookup || lookupOf(offer.code);
+    state.rootBase = await deriveRootBase(state.code);
+    await acceptOffer("manual", offer.sdp, async (answer) => {
+      const answerCode = encodeWebOffline(WEB_OFFLINE_ANSWER_PREFIX, {
+        v: 1,
+        type: "web-offline-answer",
+        code: state.code,
+        peerId: "manual",
+        sdp: answer,
+      });
+      if (els.offlineAnswerOut) els.offlineAnswerOut.value = answerCode;
+      if (els.offlineAnswerOutRow) els.offlineAnswerOutRow.hidden = false;
+    });
+    setConnected(true);
+    setConnectStatus("Offline answer ready — send it back to the host, then wait for connection…");
   }
 
   function disconnectClient() {
     if (state.clientWs) state.clientWs.close();
     if (state.clientPeer?.pc) state.clientPeer.pc.close();
     state.clientWs = null;
+    state.manualClient = false;
     state.clientPeer = null;
     state.dataChannel = null;
+    state.clientCanWrite = false;
     setConnected(false);
     els.explorer.hidden = true;
     els.fileRows.textContent = "";
     els.transfers.textContent = "";
+    if (els.previewPanel) els.previewPanel.hidden = true;
+    if (els.offlineAnswerOutRow) els.offlineAnswerOutRow.hidden = true;
+    if (els.offlineAnswerOut) els.offlineAnswerOut.value = "";
     setConnectStatus("Not connected.");
   }
 
@@ -773,6 +1283,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const res = await requestJson(state.dataChannel, { t: "list", path: p });
     state.currentPath = res.path || p;
     els.currentPath.textContent = state.currentPath;
+    renderWriteUi();
     renderRows(res.entries || []);
   }
 
@@ -794,19 +1305,72 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const name = document.createElement("td");
       name.className = "name";
       name.textContent = e.kind === "directory" ? `📁 ${e.name}` : `📄 ${e.name}`;
-      if (e.kind === "directory") name.onclick = () => listRemote(e.path).catch((err) => toast(err.message));
+      name.title = e.kind === "directory" ? "Open folder" : "Open preview, or download if unsupported";
+      name.onclick = () => previewRemote(e).catch((err) => toast(err.message));
       const size = document.createElement("td");
       size.textContent = e.kind === "file" ? formatSize(e.size || 0) : "—";
       const action = document.createElement("td");
+      action.className = "actions";
       if (e.kind === "file") {
         const btn = document.createElement("button");
         btn.textContent = "Download";
         btn.onclick = () => downloadRemote(e).catch((err) => toast(err.message));
         action.appendChild(btn);
+
+        const share = document.createElement("button");
+        share.textContent = "Share link";
+        share.onclick = () => copy(shareLink(state.code, e.path)).then(() => toast("File link copied")).catch((err) => toast(err.message));
+        action.appendChild(share);
+      }
+      if (state.clientCanWrite) {
+        const del = document.createElement("button");
+        del.textContent = "Delete";
+        del.className = "danger";
+        del.onclick = () => deleteRemote(e).catch((err) => toast(err.message));
+        action.appendChild(del);
       }
       tr.append(name, size, action);
       els.fileRows.appendChild(tr);
     }
+  }
+
+  function mimeForName(name) {
+    const ext = (name.split(".").pop() || "").toLowerCase();
+    const map = {
+      txt: "text/plain", log: "text/plain", md: "text/markdown", csv: "text/csv",
+      json: "application/json", xml: "application/xml", yaml: "text/yaml", yml: "text/yaml",
+      js: "text/javascript", mjs: "text/javascript", cjs: "text/javascript", ts: "text/typescript",
+      css: "text/css", html: "text/html", htm: "text/html", py: "text/x-python", cpp: "text/x-c++src",
+      c: "text/x-csrc", h: "text/x-chdr", hpp: "text/x-c++hdr", java: "text/x-java-source",
+      rs: "text/rust", go: "text/x-go", sh: "text/x-shellscript", ps1: "text/x-powershell",
+      pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+      webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml", mp3: "audio/mpeg", wav: "audio/wav",
+      ogg: "audio/ogg", flac: "audio/flac", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime"
+    };
+    return map[ext] || "application/octet-stream";
+  }
+
+  function isTextPreview(name, mime) {
+    const ext = (name.split(".").pop() || "").toLowerCase();
+    return mime.startsWith("text/") || ["json", "xml", "yaml", "yml", "js", "mjs", "cjs", "ts", "css", "html", "htm", "py", "cpp", "c", "h", "hpp", "java", "rs", "go", "sh", "ps1", "toml", "ini", "env"].includes(ext);
+  }
+
+  function canPreview(name, mime) {
+    return isTextPreview(name, mime) || mime.startsWith("image/") || mime.startsWith("audio/") || mime.startsWith("video/") || mime === "application/pdf";
+  }
+
+  function makeTransfer(entry, verb) {
+    const id = nextId();
+    const transfer = document.createElement("div");
+    transfer.className = "transfer";
+    const label = document.createElement("div");
+    label.textContent = `${entry.name} — ${verb}`;
+    const progress = document.createElement("progress");
+    progress.max = entry.size || 1;
+    progress.value = 0;
+    transfer.append(label, progress);
+    els.transfers.prepend(transfer);
+    return { id, label, progress };
   }
 
   async function downloadRemote(entry) {
@@ -814,23 +1378,177 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
     let writer = null;
     if (window.showSaveFilePicker) {
-      const saveHandle = await window.showSaveFilePicker({ suggestedName: entry.name });
-      writer = await saveHandle.createWritable();
+      try {
+        const saveHandle = await window.showSaveFilePicker({ suggestedName: entry.name });
+        writer = await saveHandle.createWritable();
+      } catch (e) {
+        if (e?.name === "AbortError") throw e;
+        writer = null; // direct links may not have user activation; fall back to browser download
+      }
     }
 
+    const { id, label, progress } = makeTransfer(entry, "starting");
+    state.downloads.set(id, { name: entry.name, size: entry.size || 0, received: 0, chunks: [], writer, writeQueue: Promise.resolve(), label, progress, mime: mimeForName(entry.name), mode: "download" });
+    safeSendJson(state.dataChannel, { t: "download", id, path: entry.path });
+  }
+
+  function fetchRemoteBlob(entry) {
+    if (!state.dataChannel || state.dataChannel.readyState !== "open") return Promise.reject(new Error("Not connected"));
+    const { id, label, progress } = makeTransfer(entry, "opening");
+    const mime = mimeForName(entry.name);
+    const promise = new Promise((resolve, reject) => {
+      state.downloads.set(id, { name: entry.name, size: entry.size || 0, received: 0, chunks: [], writer: null, writeQueue: Promise.resolve(), label, progress, mime, mode: "blob", resolve, reject });
+    });
+    safeSendJson(state.dataChannel, { t: "download", id, path: entry.path });
+    return promise;
+  }
+
+  async function previewRemote(entry) {
+    if (entry.kind === "directory") return listRemote(entry.path);
+    const mime = mimeForName(entry.name);
+    if (!canPreview(entry.name, mime)) {
+      toast("No browser preview for this file type; downloading instead");
+      return downloadRemote(entry);
+    }
+    if (isTextPreview(entry.name, mime) && Number(entry.size || 0) > TEXT_PREVIEW_MAX) {
+      toast("Text file is too large for the built-in editor; downloading instead");
+      return downloadRemote(entry);
+    }
+    const blob = await fetchRemoteBlob(entry);
+    await renderPreview(entry, blob, mime);
+  }
+
+  async function renderPreview(entry, blob, mime) {
+    els.previewBody.textContent = "";
+    els.previewTitle.textContent = entry.path;
+    els.savePreview.hidden = true;
+    els.savePreview.onclick = null;
+    let objectUrl = null;
+
+    const cleanupUrl = () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = null;
+    };
+    els.closePreview.onclick = () => {
+      cleanupUrl();
+      els.previewPanel.hidden = true;
+      els.previewBody.textContent = "";
+    };
+
+    if (isTextPreview(entry.name, mime)) {
+      const textarea = document.createElement("textarea");
+      textarea.className = "text-editor";
+      textarea.spellcheck = false;
+      textarea.value = await blob.text();
+      els.previewBody.appendChild(textarea);
+      if (state.clientCanWrite) {
+        els.savePreview.hidden = false;
+        els.savePreview.onclick = async () => {
+          const file = new File([textarea.value], entry.name, { type: mime || "text/plain" });
+          await uploadRemoteFile(file, entry.path);
+          await listRemote(parentPath(entry.path));
+          toast("Saved");
+        };
+      }
+    } else if (mime.startsWith("image/")) {
+      objectUrl = URL.createObjectURL(blob);
+      const img = document.createElement("img");
+      img.className = "preview-media";
+      img.alt = entry.name;
+      img.src = objectUrl;
+      els.previewBody.appendChild(img);
+    } else if (mime.startsWith("audio/")) {
+      objectUrl = URL.createObjectURL(blob);
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.src = objectUrl;
+      els.previewBody.appendChild(audio);
+    } else if (mime.startsWith("video/")) {
+      objectUrl = URL.createObjectURL(blob);
+      const video = document.createElement("video");
+      video.className = "preview-media";
+      video.controls = true;
+      video.src = objectUrl;
+      els.previewBody.appendChild(video);
+    } else if (mime === "application/pdf") {
+      objectUrl = URL.createObjectURL(blob);
+      const frame = document.createElement("iframe");
+      frame.className = "preview-frame";
+      frame.src = objectUrl;
+      els.previewBody.appendChild(frame);
+    } else {
+      els.previewPanel.hidden = true;
+      return downloadRemote(entry);
+    }
+    els.previewPanel.hidden = false;
+  }
+
+  async function uploadFiles(files) {
+    if (!state.clientCanWrite) throw new Error("The host has writes disabled");
+    const list = [...files].filter((f) => f && f.size !== undefined);
+    for (const file of list) await uploadRemoteFile(file);
+    if (list.length) await listRemote(state.currentPath);
+  }
+
+  async function uploadRemoteFile(file, targetPath = "") {
+    if (!state.dataChannel || state.dataChannel.readyState !== "open") throw new Error("Not connected");
+    const name = safeEntryName(file.name);
+    const path = targetPath ? normalizePath(targetPath) : joinPath(state.currentPath, name);
     const id = nextId();
+
     const transfer = document.createElement("div");
     transfer.className = "transfer";
     const label = document.createElement("div");
-    label.textContent = `${entry.name} — starting`;
+    label.textContent = `${name} — uploading`;
     const progress = document.createElement("progress");
-    progress.max = entry.size || 1;
+    progress.max = file.size || 1;
     progress.value = 0;
     transfer.append(label, progress);
     els.transfers.prepend(transfer);
 
-    state.downloads.set(id, { name: entry.name, size: entry.size || 0, received: 0, chunks: [], writer, writeQueue: Promise.resolve(), label, progress });
-    safeSendJson(state.dataChannel, { t: "download", id, path: entry.path });
+    const ready = expectResponse(id, 30000);
+    safeSendJson(state.dataChannel, { t: "uploadStart", id, path, size: file.size, mtime: file.lastModified });
+    await ready;
+
+    const reader = file.stream().getReader();
+    let sent = 0;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        for (let off = 0; off < value.byteLength; off += CHUNK_SIZE) {
+          const chunk = value.slice(off, Math.min(off + CHUNK_SIZE, value.byteLength));
+          await sendBinaryChunk(state.dataChannel, id, chunk);
+          sent += chunk.byteLength;
+          progress.value = sent;
+          label.textContent = `${name} — ${formatSize(sent)} / ${formatSize(file.size || sent)}`;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const done = expectResponse(id, Math.max(30000, Math.ceil((file.size || 0) / 1024)));
+    safeSendJson(state.dataChannel, { t: "uploadEnd", id });
+    await done;
+    label.textContent = `${name} — uploaded`;
+    progress.value = progress.max;
+  }
+
+  async function deleteRemote(entry) {
+    if (!state.clientCanWrite) throw new Error("The host has writes disabled");
+    if (!confirm(`Delete ${entry.name}?`)) return;
+    await requestJson(state.dataChannel, { t: "delete", path: entry.path }, 30000);
+    await listRemote(entry.kind === "directory" ? state.currentPath : parentPath(entry.path));
+    toast("Deleted");
+  }
+
+  function renderWriteUi() {
+    if (els.uploadButton) els.uploadButton.disabled = !state.clientCanWrite;
+    if (els.dropzone) {
+      els.dropzone.hidden = !state.clientCanWrite;
+      els.dropzone.textContent = state.clientCanWrite ? "Drop files here to upload to this folder" : "";
+    }
   }
 
   function formatSize(bytes) {
@@ -881,14 +1599,22 @@ import { argon2id } from "./vendor/noble/argon2.js";
     els.browseFolder.onclick = () => pickFolder().catch((e) => toast(e.message));
 
     els.shareToggle.onclick = () => {
-      if (state.hostWs) stopHost().catch((e) => toast(e.message));
+      if (state.hostWs || state.manualHost) stopHost().catch((e) => toast(e.message));
       else startHost().catch((e) => { els.shareToggle.disabled = false; toast(e.message); });
     };
 
     els.copyAll.onclick = () => copy(copyShareDetails()).then(() => toast("Copied")).catch((e) => toast(e.message));
 
+    if (els.applyOfflineAnswer) {
+      els.applyOfflineAnswer.onclick = () => applyManualAnswer(els.offlineAnswerInput.value).catch((e) => toast(e.message));
+    }
+
+    if (els.copyOfflineAnswer) {
+      els.copyOfflineAnswer.onclick = () => copy(els.offlineAnswerOut.value).then(() => toast("Answer copied")).catch((e) => toast(e.message));
+    }
+
     els.connectToggle.onclick = () => {
-      if (state.clientWs || state.dataChannel) disconnectClient();
+      if (state.clientWs || state.dataChannel || state.clientPeer || state.manualClient) disconnectClient();
       else connect().catch((e) => toast(e.message));
     };
 
@@ -897,6 +1623,31 @@ import { argon2id } from "./vendor/noble/argon2.js";
       parts.pop();
       listRemote("/" + parts.join("/")).catch((e) => toast(e.message));
     };
+
+    if (els.uploadButton && els.uploadInput) {
+      els.uploadButton.onclick = () => els.uploadInput.click();
+      els.uploadInput.onchange = () => {
+        uploadFiles(els.uploadInput.files).catch((e) => toast(e.message));
+        els.uploadInput.value = "";
+      };
+    }
+
+    if (els.dropzone) {
+      els.dropzone.ondragover = (e) => {
+        if (!state.clientCanWrite) return;
+        e.preventDefault();
+        els.dropzone.classList.add("dragover");
+      };
+      els.dropzone.ondragleave = () => els.dropzone.classList.remove("dragover");
+      els.dropzone.ondrop = (e) => {
+        if (!state.clientCanWrite) return;
+        e.preventDefault();
+        els.dropzone.classList.remove("dragover");
+        uploadFiles(e.dataTransfer.files).catch((err) => toast(err.message));
+      };
+    }
+
+    if (els.closePreview) els.closePreview.onclick = () => { els.previewPanel.hidden = true; els.previewBody.textContent = ""; };
 
     window.addEventListener("beforeunload", disconnectAll);
   }

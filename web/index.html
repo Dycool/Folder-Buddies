@@ -4,8 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Folder Buddies</title>
-  <link rel="icon" href="icon.png" type="image/png">
-  <link rel="apple-touch-icon" href="icon.png">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="favicon.png" type="image/png" sizes="512x512">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -20,8 +21,8 @@
     </div>
 
     <div class="tabbar" role="tablist">
-      <button class="tab active" data-tab="share" role="tab" aria-selected="true">Share a folder</button>
-      <button class="tab" data-tab="connect" role="tab" aria-selected="false">Connect to a share</button>
+      <button class="tab active" data-tab="share" role="tab" aria-selected="true">Host</button>
+      <button class="tab" data-tab="connect" role="tab" aria-selected="false">Connect</button>
     </div>
 
     <section class="tabpage" data-page="share" role="tabpanel">
@@ -29,7 +30,7 @@
         <div class="row">
           <label for="folderInput">Folder:</label>
           <div class="field">
-            <input id="folderInput" type="text" readonly placeholder="Choose a folder to share">
+            <input id="folderInput" type="text" readonly placeholder="Choose a folder to host">
             <button id="browseFolder" type="button">Browse…</button>
           </div>
         </div>
@@ -43,6 +44,14 @@
         </div>
 
         <div class="row">
+          <label for="allowWrites">Access:</label>
+          <label class="checkline">
+            <input id="allowWrites" type="checkbox">
+            Allow clients to upload and delete files
+          </label>
+        </div>
+
+        <div class="row">
           <span></span>
           <p class="note">Share just the 6-character code (or the link) — there is no separate
           password. Cloudflare only relays an opaque encrypted handshake and never sees the
@@ -51,20 +60,28 @@
 
         <div class="row">
           <span></span>
-          <button id="shareToggle" type="button" class="primary">Start sharing</button>
+          <button id="shareToggle" type="button" class="primary">Host</button>
         </div>
 
         <div class="row">
           <label for="connectCode">Connect code:</label>
           <div class="field">
-            <input id="connectCode" type="text" readonly placeholder="6-char room code appears here">
+            <textarea id="connectCode" readonly placeholder="6-char room code or offline offer appears here" rows="3"></textarea>
             <button id="copyAll" type="button" disabled>Copy all</button>
+          </div>
+        </div>
+
+        <div id="offlineAnswerRow" class="row" hidden>
+          <label for="offlineAnswerInput">Client answer:</label>
+          <div class="field">
+            <textarea id="offlineAnswerInput" placeholder="paste the client's offline answer code here" rows="3"></textarea>
+            <button id="applyOfflineAnswer" type="button">Apply</button>
           </div>
         </div>
 
         <div class="row">
           <label>Status:</label>
-          <span id="shareStatus" class="statusvalue">Not sharing.</span>
+          <span id="shareStatus" class="statusvalue">Not hosting.</span>
         </div>
       </form>
     </section>
@@ -73,7 +90,15 @@
       <form onsubmit="return false">
         <div class="row">
           <label for="connectInput">Connect code:</label>
-          <input id="connectInput" type="text" autocomplete="off" placeholder="paste the 6-char room code or share link">
+          <textarea id="connectInput" autocomplete="off" placeholder="paste the 6-char room code, share link, or offline offer code" rows="3"></textarea>
+        </div>
+
+        <div id="offlineAnswerOutRow" class="row" hidden>
+          <label for="offlineAnswerOut">Answer code:</label>
+          <div class="field">
+            <textarea id="offlineAnswerOut" readonly placeholder="send this back to the host" rows="3"></textarea>
+            <button id="copyOfflineAnswer" type="button">Copy answer</button>
+          </div>
         </div>
 
         <div class="row">
@@ -90,13 +115,28 @@
       <section id="explorer" class="explorer" hidden aria-label="Remote files">
         <div class="explorerbar">
           <code id="currentPath">/</code>
-          <button id="upButton" type="button">Up</button>
+          <div class="exploreractions">
+            <input id="uploadInput" type="file" multiple hidden>
+            <button id="uploadButton" type="button" disabled>Upload</button>
+            <button id="upButton" type="button">Up</button>
+          </div>
         </div>
+        <div id="dropzone" class="dropzone" hidden></div>
         <table>
           <thead><tr><th>Name</th><th>Size</th><th></th></tr></thead>
           <tbody id="fileRows"></tbody>
         </table>
         <div id="transfers"></div>
+        <section id="previewPanel" class="preview" hidden aria-label="File preview">
+          <div class="previewbar">
+            <strong id="previewTitle"></strong>
+            <div class="previewactions">
+              <button id="savePreview" type="button" hidden>Save</button>
+              <button id="closePreview" type="button">Close</button>
+            </div>
+          </div>
+          <div id="previewBody" class="previewbody"></div>
+        </section>
       </section>
     </section>
 

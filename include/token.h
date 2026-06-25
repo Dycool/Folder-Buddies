@@ -19,6 +19,7 @@ struct Token {
     uint16_t port = 0;
     std::vector<uint8_t> secret;     // auto-generated password / bearer credential
     std::string folder;              // human-readable folder name (shown verbatim)
+    bool allowWrites = false;        // whether clients may modify the shared folder
 };
 
 // Data-path session secret length (256-bit bearer secret).

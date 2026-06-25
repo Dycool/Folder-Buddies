@@ -29,6 +29,7 @@ public:
     std::vector<uint8_t> secret;       // auto-generated password (set by start)
     uint16_t boundPort = 0;
     std::string shareName;             // folder basename, baked into the token
+    bool allowWrites = false;          // host-controlled permission gate
 
     std::atomic<uint64_t> bytesOut{0};
     std::atomic<uint64_t> bytesIn{0};

@@ -6,7 +6,9 @@ The data path stays direct P2P TCP and every filesystem byte after the handshake
 is sealed with ChaCha20-Poly1305.
 
 Performance and privacy are the priorities: Cloudflare Workers are used only as
-blind signaling, never as a relay and never as plaintext storage.
+blind signaling, never as a plaintext store. The webapp can optionally fall back
+to Firebase Realtime Database for the same encrypted signaling role if the
+Cloudflare WebSocket path is down.
 
 ---
 
@@ -159,8 +161,8 @@ folderbuddies host /path/to/folder [--lan] [--port N] [--max-clients N]
 folderbuddies connect "<room-code-or-offline-blob>" [--mount ~/FolderBuddies] [--conns 4]
 ```
 
-The GUI exposes the same flow: the share tab gives a connect code and an offline
-fallback; the connect tab accepts either the 6-character room code or the long
+The GUI exposes the same flow: the Host tab gives a connect code and an offline
+fallback; the Connect tab accepts either the 6-character room code or the long
 fallback blob. There is no password field on either side.
 
 ## CI / GitHub Actions
@@ -192,8 +194,14 @@ The repository now includes a static browser app in `web/`. It is designed for G
 Webapp capabilities:
 
 - host a browser-selected folder with the File System Access API;
-- generate a private share link containing either a 6-character room code or a huge encrypted offline fallback offer;
+- optionally allow uploads, text edits, and deletes from browser clients;
+- generate a private share link containing a 6-character room code;
+- automatically fall back from Cloudflare WebSocket signaling to Firebase
+  Realtime Database signaling when Firebase public config is present;
+- fall back to a manual giant WebRTC offer/answer only when automatic signaling
+  cannot be used;
 - connect from another browser and browse a dedicated remote file explorer;
+- preview common browser-supported files and download unsupported formats on click;
 - stream selected files over WebRTC DataChannel;
 - avoid copying the host folder into cache. Directory entries are listed on demand and file bytes are read with `File.stream()` only when downloaded.
 
@@ -202,7 +210,12 @@ The browser app cannot create a real OS mount point. Use the native app for Linu
 To publish the webapp:
 
 1. Set the public repository variable `FB_SIGNALING_URL` to your Worker URL.
-2. Enable GitHub Pages with **GitHub Actions** as the source.
-3. Run or push to trigger `.github/workflows/webapp.yml`.
+2. Optional automatic fallback: set public Firebase variables
+   `FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`, `FIREBASE_DATABASE_URL`,
+   `FIREBASE_PROJECT_ID`, and `FIREBASE_APP_ID`. See `docs/firebase-fallback.md` for the exact Firebase setup and rules.
+3. Enable GitHub Pages with **GitHub Actions** as the source.
+4. Run or push to trigger `.github/workflows/webapp.yml`.
 
-No GitHub Pages secret is needed. The Worker URL is public by design; Cloudflare account IDs, API tokens, and KV namespace IDs must stay in GitHub Secrets only.
+No GitHub Pages secret is needed for these public browser config values.
+Cloudflare account IDs, API tokens, KV namespace IDs, and other real deployment
+credentials must stay in GitHub Secrets only.

@@ -19,7 +19,7 @@ class Client;
 class Mount {
 public:
     bool start(Client* client, const std::string& mountBase, const std::string& volname,
-               std::string& err);
+               bool allowWrites, std::string& err);
     void stop();
 #ifdef _WIN32
     bool active() const { return backend_ != nullptr; }

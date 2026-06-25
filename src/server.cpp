@@ -9,6 +9,10 @@
 #include <cstring>
 #include <filesystem>
 
+#ifndef EROFS
+#  define EROFS EACCES
+#endif
+
 namespace fs = std::filesystem;
 
 namespace fb {
@@ -267,6 +271,11 @@ void Server::handleConn(socket_t s) {
         Reader r(payload.data(), payload.size());
         Writer w;
         int16_t status = 0;
+        auto denyIfReadOnly = [&]() -> bool {
+            if (allowWrites) return false;
+            status = EROFS;
+            return true;
+        };
 
         switch (h.op) {
         case OP_GETATTR: {
@@ -304,6 +313,11 @@ void Server::handleConn(socket_t s) {
             r.str(path);
             r.pod(pflags);
             r.pod(mode);
+            bool opensForWrite = h.op == OP_CREATE ||
+                                  ((pflags & FB_O_ACCMODE) == FB_O_WRONLY) ||
+                                  ((pflags & FB_O_ACCMODE) == FB_O_RDWR) ||
+                                  (pflags & (FB_O_CREAT | FB_O_TRUNC | FB_O_APPEND));
+            if (opensForWrite && denyIfReadOnly()) break;
             if (!resolve(path, abs)) { status = EACCES; break; }
             auto fh = std::make_shared<FileHandle>();
             if (!fh->open(abs, from_portable_flags(pflags), mode)) {
@@ -344,6 +358,7 @@ void Server::handleConn(socket_t s) {
             break;
         }
         case OP_WRITE: {
+            if (denyIfReadOnly()) break;
             uint64_t fhid, off;
             r.pod(fhid);
             r.pod(off);
@@ -384,6 +399,7 @@ void Server::handleConn(socket_t s) {
         case OP_FLUSH:
             break; // nothing buffered server-side
         case OP_MKDIR: {
+            if (denyIfReadOnly()) break;
             std::string path, abs;
             uint32_t mode;
             r.str(path);
@@ -395,6 +411,7 @@ void Server::handleConn(socket_t s) {
         }
         case OP_UNLINK:
         case OP_RMDIR: {
+            if (denyIfReadOnly()) break;
             std::string path, abs;
             r.str(path);
             if (!resolve(path, abs)) { status = EACCES; break; }
@@ -403,6 +420,7 @@ void Server::handleConn(socket_t s) {
             break;
         }
         case OP_RENAME: {
+            if (denyIfReadOnly()) break;
             std::string from, to, afrom, ato;
             r.str(from);
             r.str(to);
@@ -413,6 +431,7 @@ void Server::handleConn(socket_t s) {
             break;
         }
         case OP_TRUNCATE: {
+            if (denyIfReadOnly()) break;
             std::string path, abs;
             uint64_t size;
             r.str(path);
@@ -449,6 +468,7 @@ void Server::handleConn(socket_t s) {
             break;
         }
         case OP_CHMOD: {
+            if (denyIfReadOnly()) break;
             std::string path, abs;
             uint32_t mode;
             r.str(path);
@@ -460,6 +480,7 @@ void Server::handleConn(socket_t s) {
             break;
         }
         case OP_UTIMENS: {
+            if (denyIfReadOnly()) break;
             std::string path, abs;
             int64_t atime, mtime;
             r.str(path);

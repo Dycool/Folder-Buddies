@@ -5,8 +5,9 @@
 namespace fb {
 
 bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int port,
-                   int maxClients, bool lanOnly, HostedShareTicket& ticket,
+                   int maxClients, bool lanOnly, bool allowWrites, HostedShareTicket& ticket,
                    std::string& err) {
+    server.allowWrites = allowWrites;
     if (!server.start(folder, port, maxClients, err)) return false;
 
     std::string ip;
@@ -39,6 +40,7 @@ bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int po
     tok.port = sharePort;
     tok.secret = server.secret;
     tok.folder = server.shareName;
+    tok.allowWrites = allowWrites;
 
     std::string e;
     if (!seal_for_offline(tok, ticket.offlineBlob, e) || ticket.offlineBlob.empty()) {
@@ -90,7 +92,7 @@ bool resolve_share_code(const std::string& codeOrBlob, Token& tok, std::string& 
 bool start_mounting(Client& client, Mount& mount, const Token& tok, const std::string& mountBase,
                     int nconns, std::string& mountpoint, std::string& err) {
     if (!client.connect(tok, nconns, err)) return false;
-    if (!mount.start(&client, mountBase, tok.folder, err)) {
+    if (!mount.start(&client, mountBase, tok.folder, tok.allowWrites, err)) {
         client.disconnect();
         return false;
     }
