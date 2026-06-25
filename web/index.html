@@ -52,6 +52,14 @@
         </div>
 
         <div class="row">
+          <label for="secureHash">Security:</label>
+          <label class="checkline">
+            <input id="secureHash" type="checkbox">
+            Secure hash code (long code; stronger secret than 6 chars)
+          </label>
+        </div>
+
+        <div class="row">
           <span></span>
           <p class="note">Share just the 6-character code (or the link) — there is no separate
           password. Cloudflare only relays an opaque encrypted handshake and never sees the
@@ -66,7 +74,7 @@
         <div class="row">
           <label for="connectCode">Connect code:</label>
           <div class="field">
-            <textarea id="connectCode" readonly placeholder="6-char room code or offline offer appears here" rows="3"></textarea>
+            <textarea id="connectCode" readonly placeholder="6-char room code, secure hash code, or offline offer appears here" rows="3"></textarea>
             <button id="copyAll" type="button" disabled>Copy all</button>
           </div>
         </div>
@@ -90,7 +98,7 @@
       <form onsubmit="return false">
         <div class="row">
           <label for="connectInput">Connect code:</label>
-          <textarea id="connectInput" autocomplete="off" placeholder="paste the 6-char room code, share link, or offline offer code" rows="3"></textarea>
+          <textarea id="connectInput" autocomplete="off" placeholder="paste the 6-char room code, secure hash code, share link, or offline offer code" rows="3"></textarea>
         </div>
 
         <div id="offlineAnswerOutRow" class="row" hidden>

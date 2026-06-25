@@ -37,6 +37,7 @@ jobs:
     env:
       BUILD_TYPE: Release
       FB_SIGNALING_URL: ${{ vars.FB_SIGNALING_URL }}
+      FIREBASE_DATABASE_URL: ${{ vars.FIREBASE_DATABASE_URL }}
       MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
       MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
@@ -87,6 +88,9 @@ jobs:
           args=(-G Ninja -B build -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCMAKE_CXX_STANDARD=23)
           if [ -n "${FB_SIGNALING_URL:-}" ]; then
             args+=(-DFB_SIGNALING_URL="$FB_SIGNALING_URL")
+          fi
+          if [ -n "${FIREBASE_DATABASE_URL:-}" ]; then
+            args+=(-DFB_FIREBASE_DATABASE_URL="$FIREBASE_DATABASE_URL")
           fi
           cmake "${args[@]}"
 
@@ -146,6 +150,9 @@ jobs:
           args=(-G Ninja -B build -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCMAKE_CXX_STANDARD=23)
           if [ -n "${FB_SIGNALING_URL:-}" ]; then
             args+=(-DFB_SIGNALING_URL="$FB_SIGNALING_URL")
+          fi
+          if [ -n "${FIREBASE_DATABASE_URL:-}" ]; then
+            args+=(-DFB_FIREBASE_DATABASE_URL="$FIREBASE_DATABASE_URL")
           fi
           # Do not fail CI if the release-only FUSE-T installer package is absent.
           if [ -n "${FUSET_PKG:-}" ] && [ -f "$FUSET_PKG" ]; then
@@ -232,6 +239,7 @@ jobs:
             '-DVCPKG_TARGET_TRIPLET=x64-windows-static'
           )
           if ($env:FB_SIGNALING_URL) { $args += "-DFB_SIGNALING_URL=$env:FB_SIGNALING_URL" }
+          if ($env:FIREBASE_DATABASE_URL) { $args += "-DFB_FIREBASE_DATABASE_URL=$env:FIREBASE_DATABASE_URL" }
           cmake @args
 
       - name: Build and test Windows

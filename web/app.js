@@ -15,6 +15,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   const TEXT_PREVIEW_MAX = 4 * 1024 * 1024;
   const WEB_OFFLINE_OFFER_PREFIX = "FBW2O:";
   const WEB_OFFLINE_ANSWER_PREFIX = "FBW2A:";
+  const WEB_SECURE_CODE_PREFIX = "FBS2:";
   const FIREBASE_SDK_VERSION = "10.12.5";
 
   const $ = (id) => document.getElementById(id);
@@ -25,6 +26,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     browseFolder: $("browseFolder"),
     maxClients: $("maxClients"),
     allowWrites: $("allowWrites"),
+    secureHash: $("secureHash"),
     shareToggle: $("shareToggle"),
     connectCode: $("connectCode"),
     copyAll: $("copyAll"),
@@ -60,7 +62,9 @@ import { argon2id } from "./vendor/noble/argon2.js";
     rootHandle: null,
     code: "",          // full 6-char code
     lookup: "",        // public half (relay room)
-    rootBase: null,    // HKDF base key derived from the secret half
+    secureSecret: "",  // optional high-entropy web secret for secure-hash mode
+    connectToken: "",  // what the host shows/copies to clients
+    rootBase: null,    // HKDF base key derived from the secret half or secureSecret
     maxClients: 0,
     allowWrites: false,
     clientCanWrite: false,
@@ -69,6 +73,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     hostWs: null,
     clientWs: null,
     hostPeers: new Map(),
+    plainSignalPeers: new Set(),
     manualHost: null,
     manualClient: false,
     clientPeer: null,
@@ -138,6 +143,10 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return text.length === ROOM_LEN && [...text].every((c) => BASE91.includes(c));
   }
 
+  function isSecureWebCode(text) {
+    return clean(text).startsWith(WEB_SECURE_CODE_PREFIX);
+  }
+
   function lookupOf(code) { return code.slice(0, LOOKUP_LEN); }
   function keyPartOf(code) { return code.slice(LOOKUP_LEN); }
 
@@ -149,6 +158,10 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function randomRoom() {
     return [...randomBytes(ROOM_LEN)].map((b) => BASE91[b % BASE91.length]).join("");
+  }
+
+  function randomSecureSecret() {
+    return base91Encode(randomBytes(32));
   }
 
   function concatBytes(...parts) {
@@ -166,9 +179,10 @@ import { argon2id } from "./vendor/noble/argon2.js";
   // Derive an HKDF base key from the secret half of the code via Argon2id. The
   // salt is fixed per public half so host and client agree without exchanging it.
   // The secret half never reaches Cloudflare, so the relayed signaling stays blind.
-  async function deriveRootBase(code) {
+  async function deriveRootBase(code, secureSecret = "") {
+    const secret = secureSecret || keyPartOf(code);
     const saltSeed = await sha256Bytes(te.encode("FolderBuddies-web-salt-v1\0" + lookupOf(code)));
-    const root = argon2id(te.encode(keyPartOf(code)), saltSeed.slice(0, 16), ARGON);
+    const root = argon2id(te.encode(secret), saltSeed.slice(0, 16), ARGON);
     return crypto.subtle.importKey("raw", root, "HKDF", false, ["deriveKey"]);
   }
 
@@ -237,6 +251,39 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
   }
 
+  function encodeSecureWebCode(code, secret) {
+    return WEB_SECURE_CODE_PREFIX + base91Encode(te.encode(JSON.stringify({
+      v: 1,
+      type: "web-secure-code",
+      code,
+      secret,
+    })));
+  }
+
+  function decodeSecureWebCode(text) {
+    const cleaned = clean(text);
+    if (!cleaned.startsWith(WEB_SECURE_CODE_PREFIX)) throw new Error("Invalid secure web code");
+    try {
+      const obj = JSON.parse(td.decode(base91Decode(cleaned.slice(WEB_SECURE_CODE_PREFIX.length))));
+      if (obj?.v !== 1 || obj?.type !== "web-secure-code" || !looksLikeRoom(obj.code) || typeof obj.secret !== "string" || obj.secret.length < 20) {
+        throw new Error("malformed secure web code");
+      }
+      return obj;
+    } catch (e) {
+      throw new Error(`Invalid secure web code: ${e.message}`);
+    }
+  }
+
+  function resolveConnectToken(raw) {
+    const codeOrToken = parseJoinInput(raw);
+    if (isSecureWebCode(codeOrToken)) {
+      const s = decodeSecureWebCode(codeOrToken);
+      return { code: s.code, lookup: lookupOf(s.code), secureSecret: s.secret, token: codeOrToken };
+    }
+    if (looksLikeRoom(codeOrToken)) return { code: codeOrToken, lookup: lookupOf(codeOrToken), secureSecret: "", token: codeOrToken };
+    return { code: codeOrToken, lookup: "", secureSecret: "", token: codeOrToken };
+  }
+
   function isWebOfflineOffer(text) {
     return clean(text).startsWith(WEB_OFFLINE_OFFER_PREFIX);
   }
@@ -301,7 +348,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const params = new URLSearchParams(location.hash.slice(1));
     const room = params.get("r") || "";
     const file = params.get("f") || "";
-    if (looksLikeRoom(room)) {
+    if (looksLikeRoom(room) || isSecureWebCode(room)) {
       els.connectInput.value = room;
       const direct = file ? normalizePath(file) : "";
       state.directFilePath = direct && direct !== "/" ? direct : "";
@@ -478,12 +525,13 @@ import { argon2id } from "./vendor/noble/argon2.js";
     await sdk.set(sdk.push(sdk.ref(sdk.db, path)), { ...value, at: sdk.serverTimestamp() });
   }
 
-  async function openFirebaseHostSignal() {
+  async function openFirebaseHostSignal(preferredCode = "") {
     if (!firebaseEnabled()) throw new Error("Firebase fallback is not configured");
     const sdk = await firebaseSdk();
 
-    for (let attempt = 0; attempt < 12; ++attempt) {
-      const code = randomRoom();
+    const attempts = preferredCode ? 1 : 12;
+    for (let attempt = 0; attempt < attempts; ++attempt) {
+      const code = preferredCode || randomRoom();
       const lookup = lookupOf(code);
       const path = firebaseRoomPath(lookup);
       const roomRef = sdk.ref(sdk.db, path);
@@ -573,9 +621,10 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   // Connect as host, regenerating the code if the relay room is already taken.
-  async function openCloudflareHostSignal() {
-    for (let attempt = 0; attempt < 12; ++attempt) {
-      const code = randomRoom();
+  async function openCloudflareHostSignal(preferredCode = "") {
+    const attempts = preferredCode ? 1 : 12;
+    for (let attempt = 0; attempt < attempts; ++attempt) {
+      const code = preferredCode || randomRoom();
       const lookup = lookupOf(code);
       const token = await turnstileToken();
       const ws = await openSignal("host", lookup, (msg) => handleHostSignal(msg).catch((err) => toast(err.message)), token);
@@ -596,16 +645,16 @@ import { argon2id } from "./vendor/noble/argon2.js";
     throw new Error("Could not find a free room code");
   }
 
-  async function openHostSignal() {
+  async function openHostSignal(preferredCode = "") {
     let cloudError = "";
     try {
-      return await openCloudflareHostSignal();
+      return await openCloudflareHostSignal(preferredCode);
     } catch (e) {
       cloudError = e?.message || String(e);
     }
 
     try {
-      const out = await openFirebaseHostSignal();
+      const out = await openFirebaseHostSignal(preferredCode);
       toast(`Cloudflare failed; using Firebase fallback. ${cloudError}`);
       return out;
     } catch (e) {
@@ -614,13 +663,50 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
   }
 
+
+  function base64UrlEncodeBytes(bytes) {
+    let bin = "";
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
+
+  function base64UrlDecodeBytes(text) {
+    let s = String(text || "").replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; ++i) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function encodePlainSignal(payload) {
+    return "plain:" + base64UrlEncodeBytes(te.encode(JSON.stringify(payload)));
+  }
+
+  function decodePlainSignal(ciphertext) {
+    if (typeof ciphertext !== "string" || !ciphertext.startsWith("plain:")) return null;
+    const obj = JSON.parse(td.decode(base64UrlDecodeBytes(ciphertext.slice(6))));
+    obj.__plain = true;
+    return obj;
+  }
+
+  async function sendPlainSignal(ws, peerId, payload) {
+    await ws.send(JSON.stringify({ kind: "signal", peerId, ciphertext: encodePlainSignal(payload) }));
+  }
+
   async function sendEncryptedSignal(ws, peerId, payload) {
+    if (state.plainSignalPeers.has(peerId)) return sendPlainSignal(ws, peerId, payload);
     const aad = `web-signal:${state.lookup}:${peerId}`;
     const ciphertext = await encryptJson(aad, payload);
     await ws.send(JSON.stringify({ kind: "signal", peerId, ciphertext }));
   }
 
   function decryptSignal(peerId, ciphertext) {
+    const plain = decodePlainSignal(ciphertext);
+    if (plain) {
+      state.plainSignalPeers.add(peerId);
+      return plain;
+    }
     const aad = `web-signal:${state.lookup}:${peerId}`;
     return decryptJson(aad, ciphertext);
   }
@@ -985,7 +1071,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return handle;
   }
 
-  async function createHostPeer(peerId) {
+  async function createHostPeer(peerId, plainSignal = false) {
+    if (plainSignal) state.plainSignalPeers.add(peerId);
     const pc = makePeer(`Peer ${peerId}`);
     const dc = pc.createDataChannel("folderbuddies-files", { ordered: true });
     setupHostChannel(peerId, dc);
@@ -1013,6 +1100,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       code: state.code,
       lookup: state.lookup,
       write: !!state.allowWrites,
+      secret: state.secureSecret || "",
       sdp: pc.localDescription,
     });
   }
@@ -1039,7 +1127,14 @@ import { argon2id } from "./vendor/noble/argon2.js";
         toast("Max clients reached; ignoring a new connection");
         return;
       }
-      createHostPeer(msg.peerId).then(renderShareStatus).catch((e) => toast(e.message));
+      // Native compatibility clients announce themselves with a plain compat-hello
+      // first. Wait briefly so we can answer with plain SDP; browser clients get
+      // the normal encrypted signaling path after the grace period.
+      setTimeout(() => {
+        if (!state.hostPeers.has(msg.peerId)) {
+          createHostPeer(msg.peerId, state.plainSignalPeers.has(msg.peerId)).then(renderShareStatus).catch((e) => toast(e.message));
+        }
+      }, 350);
       return;
     }
     if (msg.kind === "client-left") {
@@ -1051,9 +1146,15 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
     if (msg.kind === "signal") {
       const signal = await decryptSignal(msg.peerId, msg.ciphertext);
-      if (signal.type !== "answer") return;
+      if (signal.type === "compat-hello") {
+        state.plainSignalPeers.add(msg.peerId);
+        if (!state.hostPeers.has(msg.peerId)) createHostPeer(msg.peerId, true).then(renderShareStatus).catch((e) => toast(e.message));
+        return;
+      }
       const peer = state.hostPeers.get(msg.peerId);
-      if (peer) await peer.pc.setRemoteDescription(signal.sdp);
+      if (!peer) return;
+      if (signal.type === "answer") await peer.pc.setRemoteDescription(signal.sdp);
+      else if (signal.type === "candidate" && signal.candidate) await peer.pc.addIceCandidate(signal.candidate);
     }
   }
 
@@ -1073,8 +1174,11 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const signal = await decryptSignal(peerId, msg.ciphertext);
       if (signal.type === "offer") {
         await acceptOffer(peerId, signal.sdp, async (answer) => {
-          await sendEncryptedSignal(state.clientWs, peerId, { type: "answer", sdp: answer });
+          if (signal.__plain) await sendPlainSignal(state.clientWs, peerId, { type: "answer", sdp: answer });
+          else await sendEncryptedSignal(state.clientWs, peerId, { type: "answer", sdp: answer });
         });
+      } else if (signal.type === "candidate" && signal.candidate && state.clientPeer?.pc) {
+        await state.clientPeer.pc.addIceCandidate(signal.candidate);
       }
     }
   }
@@ -1106,6 +1210,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     els.browseFolder.disabled = running;
     els.maxClients.disabled = running;
     if (els.allowWrites) els.allowWrites.disabled = running;
+    if (els.secureHash) els.secureHash.disabled = running;
     els.copyAll.disabled = !running;
     if (els.offlineAnswerRow) els.offlineAnswerRow.hidden = !(running && state.manualHost);
     if (!running) {
@@ -1117,6 +1222,10 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function wantsWriteAccess() {
     return !!els.allowWrites?.checked;
+  }
+
+  function wantsSecureHash() {
+    return !!els.secureHash?.checked;
   }
 
   async function pickFolder() {
@@ -1135,26 +1244,33 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (state.allowWrites) await assertHostWritable();
 
     try {
-      const { code, lookup, ws } = await openHostSignal();
+      const secure = wantsSecureHash();
+      const preferredCode = secure ? randomRoom() : "";
+      const secureSecret = secure ? randomSecureSecret() : "";
+      const { code, lookup, ws } = await openHostSignal(preferredCode);
       state.code = code;
       state.lookup = lookup;
-      state.rootBase = await deriveRootBase(code);
+      state.secureSecret = secureSecret;
+      state.connectToken = secure ? encodeSecureWebCode(code, secureSecret) : code;
+      state.rootBase = await deriveRootBase(code, secureSecret);
       state.hostWs = ws;
       ws.onmessage = (event) => {
         try { handleHostSignal(JSON.parse(event.data)).catch((e) => toast(e.message)); }
         catch { /* ignore */ }
       };
-      els.connectCode.value = state.code;
+      els.connectCode.value = state.connectToken;
       toast(state.hostWs?.provider === "firebase" ? "Hosting through Firebase fallback." : "Hosting.");
     } catch (e) {
       const cloudError = e.message;
       state.code = randomRoom();
       state.lookup = lookupOf(state.code);
-      state.rootBase = await deriveRootBase(state.code);
+      state.secureSecret = wantsSecureHash() ? randomSecureSecret() : "";
+      state.connectToken = state.secureSecret ? encodeSecureWebCode(state.code, state.secureSecret) : state.code;
+      state.rootBase = await deriveRootBase(state.code, state.secureSecret);
       state.hostWs = null;
       const offerCode = await createManualHostOffer();
       els.connectCode.value = offerCode;
-      toast(`Cloudflare failed; using offline web code. ${cloudError}`);
+      toast(`Cloudflare/Firebase failed; using offline web code. ${cloudError}`);
     } finally {
       els.shareToggle.disabled = false;
     }
@@ -1169,6 +1285,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     state.hostWs = null;
     state.manualHost = null;
     state.hostPeers.clear();
+    state.plainSignalPeers.clear();
     for (const upload of state.uploads.values()) {
       try { upload.writer.close(); } catch { /* ignore */ }
     }
@@ -1176,6 +1293,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
     state.allowWrites = false;
     state.code = "";
     state.lookup = "";
+    state.secureSecret = "";
+    state.connectToken = "";
     state.rootBase = null;
     setShareRunning(false);
     setShareStatus("Not hosting.");
@@ -1203,14 +1322,16 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const raw = clean(els.connectInput.value);
     if (isWebOfflineOffer(raw)) return connectManualOffer(raw);
 
-    const code = parseJoinInput(raw);
-    if (isWebOfflineOffer(code)) return connectManualOffer(code);
-    if (!looksLikeRoom(code)) throw new Error("The browser client accepts 6-character web room codes/share links, or FBW2O offline web offer codes. Long IP/port blobs are for the native app.");
+    const resolved = resolveConnectToken(raw);
+    if (isWebOfflineOffer(resolved.token)) return connectManualOffer(resolved.token);
+    if (!looksLikeRoom(resolved.code)) throw new Error("The browser client accepts 6-character web room codes/share links, secure web codes, or FBW2O offline web offer codes. Native IP/port blobs are for the native app.");
 
     setConnectStatus("Connecting…");
-    state.code = code;
-    state.lookup = lookupOf(code);
-    state.rootBase = await deriveRootBase(code);
+    state.code = resolved.code;
+    state.lookup = resolved.lookup;
+    state.secureSecret = resolved.secureSecret || "";
+    state.connectToken = resolved.token;
+    state.rootBase = await deriveRootBase(state.code, state.secureSecret);
     let cloudError = "";
     try {
       const token = await turnstileToken();
@@ -1238,7 +1359,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
     state.manualClient = true;
     state.code = offer.code;
     state.lookup = offer.lookup || lookupOf(offer.code);
-    state.rootBase = await deriveRootBase(state.code);
+    state.secureSecret = typeof offer.secret === "string" ? offer.secret : "";
+    state.rootBase = await deriveRootBase(state.code, state.secureSecret);
     await acceptOffer("manual", offer.sdp, async (answer) => {
       const answerCode = encodeWebOffline(WEB_OFFLINE_ANSWER_PREFIX, {
         v: 1,

@@ -14,11 +14,11 @@ struct fuse;
 
 namespace fb {
 
-class Client;
+class RemoteFs;
 
 class Mount {
 public:
-    bool start(Client* client, const std::string& mountBase, const std::string& volname,
+    bool start(RemoteFs* client, const std::string& mountBase, const std::string& volname,
                bool allowWrites, std::string& err);
     void stop();
 #ifdef _WIN32

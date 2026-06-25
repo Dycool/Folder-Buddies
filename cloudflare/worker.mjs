@@ -14,9 +14,13 @@ const ROOM_RE = new RegExp(`^[${BASE91.replace(/[\\^$.*+?()[\]{}|\-]/g, "\\$&")}
 const ROOM_TTL_SECONDS = 30 * 24 * 60 * 60;
 const RATE_LIMIT_TTL_SECONDS = 60;
 const RATE_LIMIT_MAX = 5;
+const RATE_LIMIT_ROOM_MAX = 30;
 const MAX_FIELD_BYTES = 8 * 1024;
+const MAX_CREATE_BODY_BYTES = 64 * 1024;
 const MAX_SIGNAL_BYTES = 96 * 1024;
 const MAX_TURNSTILE_TOKEN_BYTES = 4096;
+const MAX_CLIENTS_PER_ROOM = 8;
+const MAX_WS_MESSAGES_PER_SOCKET = 250;
 
 const SECURITY_CONTACT = "https://github.com/Dycool/Folder-Buddies/security/advisories/new";
 const SECURITY_POLICY = "https://github.com/Dycool/Folder-Buddies/blob/main/SECURITY.md";
@@ -29,6 +33,21 @@ const CORS = {
   "access-control-allow-headers": "content-type, x-fb-owner",
   "access-control-max-age": "86400",
 };
+
+function allowedOrigins(env) {
+  return String(env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function allowedOrigin(request, env) {
+  const origin = request.headers.get("Origin");
+  if (!origin) return true; // native clients and curl have no Origin header.
+  const allowed = allowedOrigins(env);
+  if (!allowed.length) return true; // allow all until configured.
+  return allowed.includes(origin);
+}
 
 function json(body, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
@@ -102,11 +121,17 @@ function validRoom(room) {
   return typeof room === "string" && ROOM_RE.test(room);
 }
 
-async function rateLimit(env, request, method) {
-  const key = `rl:${method}:${clientKey(request)}`;
+async function kvRateLimit(env, key, max) {
   const current = parseInt((await env.ROOMS.get(key)) || "0", 10);
-  if (current >= RATE_LIMIT_MAX) return false;
+  if (current >= max) return false;
   await env.ROOMS.put(key, String(current + 1), { expirationTtl: RATE_LIMIT_TTL_SECONDS });
+  return true;
+}
+
+async function rateLimit(env, request, method, room = "") {
+  const ip = clientKey(request);
+  if (!(await kvRateLimit(env, `rl:ip:${method}:${ip}`, RATE_LIMIT_MAX))) return false;
+  if (room && !(await kvRateLimit(env, `rl:room:${method}:${room}`, RATE_LIMIT_ROOM_MAX))) return false;
   return true;
 }
 
@@ -160,6 +185,8 @@ async function verifyTurnstile(request, env, token) {
 }
 
 async function create(request, env) {
+  const contentLength = Number(request.headers.get("content-length") || "0");
+  if (contentLength > MAX_CREATE_BODY_BYTES) return json({ error: "body_too_large" }, 413);
   let body;
   try { body = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
   const lookup = body?.lookup;
@@ -168,8 +195,8 @@ async function create(request, env) {
   const payload = body?.payload;
   const owner = body?.owner;
   const ttl = Math.min(Math.max(Number(body?.ttl || ROOM_TTL_SECONDS), 60), ROOM_TTL_SECONDS);
-  if (!(await rateLimit(env, request, "POST"))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
   if (!validRoom(lookup)) return json({ error: "bad_lookup" }, 400);
+  if (!(await rateLimit(env, request, "POST", lookup))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
   if (!validField(salt) || !validField(wrapped) || !validField(payload) || !validField(owner)) {
     return json({ error: "bad_record" }, 400);
   }
@@ -186,14 +213,14 @@ async function create(request, env) {
 }
 
 async function getRoom(request, env, room) {
-  if (!(await rateLimit(env, request, "GET"))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
+  if (!(await rateLimit(env, request, "GET", room))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
   const stored = await readRoom(env, room);
   if (!stored) return json({ error: "not_found" }, 404);
   return json({ salt: stored.salt, wrapped: stored.wrapped, payload: stored.payload });
 }
 
 async function deleteRoom(request, env, room) {
-  if (!(await rateLimit(env, request, "DELETE"))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
+  if (!(await rateLimit(env, request, "DELETE", room))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
   const stored = await readRoom(env, room);
   if (!stored) return json({ ok: true }, 404);
   if (!timingSafeEqual(request.headers.get("X-FB-Owner") || "", stored.owner)) {
@@ -204,7 +231,7 @@ async function deleteRoom(request, env, room) {
 }
 
 async function webSocketRoom(request, env, room) {
-  if (!(await rateLimit(env, request, "GET"))) {
+  if (!(await rateLimit(env, request, "GET", room))) {
     return json({ error: "rate_limited", waitSeconds: 60 }, 429);
   }
   const url = new URL(request.url);
@@ -224,6 +251,7 @@ export default {
       return text(securityTxt());
     }
     if (isAiBot(request)) return json({ error: "ai_bots_not_allowed" }, 403);
+    if (!allowedOrigin(request, env)) return json({ error: "bad_origin" }, 403);
     if (request.method === "POST" && url.pathname === "/create") return create(request, env);
     if ((request.method === "GET" || request.method === "DELETE") && url.pathname === "/room") {
       const room = url.searchParams.get("code") || "";
@@ -243,6 +271,7 @@ export class WebSignalingRoom {
     this.env = env;
     this.host = null;
     this.clients = new Map();
+    this.messageCounts = new WeakMap();
   }
 
   async fetch(request) {
@@ -280,6 +309,11 @@ export class WebSignalingRoom {
   }
 
   attachClient(ws, room) {
+    if (this.clients.size >= MAX_CLIENTS_PER_ROOM) {
+      ws.send(JSON.stringify({ kind: "error", error: "room_full" }));
+      ws.close(4429, "room full");
+      return;
+    }
     const peerId = crypto.randomUUID();
     this.clients.set(peerId, ws);
     ws.send(JSON.stringify({ kind: "ready", role: "client", room, peerId }));
@@ -303,8 +337,19 @@ export class WebSignalingRoom {
     if (this.host) safeSend(this.host, { kind: "client-left", peerId });
   }
 
+  bumpMessage(ws) {
+    const next = (this.messageCounts.get(ws) || 0) + 1;
+    this.messageCounts.set(ws, next);
+    if (next > MAX_WS_MESSAGES_PER_SOCKET) {
+      ws.close(4429, "too many messages");
+      return false;
+    }
+    return true;
+  }
+
   onHostMessage(ws, data) {
     if (this.host !== ws) return;
+    if (!this.bumpMessage(ws)) return;
     const msg = parseSignal(data);
     if (!msg) return ws.close(4400, "bad message");
     const client = this.clients.get(msg.peerId);
@@ -313,6 +358,7 @@ export class WebSignalingRoom {
 
   onClientMessage(peerId, ws, data) {
     if (this.clients.get(peerId) !== ws) return;
+    if (!this.bumpMessage(ws)) return;
     const msg = parseSignal(data);
     if (!msg || msg.peerId !== peerId) return ws.close(4400, "bad message");
     if (this.host) safeSend(this.host, { kind: "signal", peerId, ciphertext: msg.ciphertext });

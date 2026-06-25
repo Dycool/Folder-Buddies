@@ -18,3 +18,8 @@ class_name = "WebSignalingRoom"
 [[migrations]]
 tag = "v1-web-rooms"
 new_sqlite_classes = ["WebSignalingRoom"]
+
+# Optional production hardening. Leave empty during local testing.
+# Example: "https://dycool.github.io,https://folderbuddies.example"
+[vars]
+ALLOWED_ORIGINS = ""

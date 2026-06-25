@@ -212,10 +212,21 @@ To publish the webapp:
 1. Set the public repository variable `FB_SIGNALING_URL` to your Worker URL.
 2. Optional automatic fallback: set public Firebase variables
    `FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`, `FIREBASE_DATABASE_URL`,
-   `FIREBASE_PROJECT_ID`, and `FIREBASE_APP_ID`. See `docs/firebase-fallback.md` for the exact Firebase setup and rules.
+   `FIREBASE_PROJECT_ID`, and `FIREBASE_APP_ID`. See `docs/firebase-fallback.md` and `docs/firebase-production-rules.md` for the exact Firebase setup and production rules.
 3. Enable GitHub Pages with **GitHub Actions** as the source.
 4. Run or push to trigger `.github/workflows/webapp.yml`.
 
 No GitHub Pages secret is needed for these public browser config values.
 Cloudflare account IDs, API tokens, KV namespace IDs, and other real deployment
 credentials must stay in GitHub Secrets only.
+
+
+## Compatibility modes
+
+Folder Buddies now has an optional WebRTC compatibility transport for native↔browser interoperability. Native↔native still prefers direct TCP; WebRTC is only used when a browser is involved or when native TCP cannot be used. Build with libdatachannel to enable it. See `docs/webrtc-compatibility.md`.
+
+
+
+## Production hardening
+
+For public deployments, see `docs/cloudflare-production-hardening.md` and `docs/firebase-production-rules.md`.

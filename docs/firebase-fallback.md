@@ -88,6 +88,13 @@ window.FB_WEBAPP_CONFIG.firebase
 
 If the fields are filled, the Firebase fallback is enabled.
 
+
+## Production rules
+
+For production, use the stricter rules in `firebase.rules.json` and see
+`docs/firebase-production-rules.md`. The short testing rules below are only for
+quick setup checks.
+
 ## Development rules
 
 These are the simplest rules that let the fallback work:
@@ -215,3 +222,77 @@ The web client attempts signaling in this order:
 
 If Firebase variables are empty, the app skips Firebase and goes directly from
 Cloudflare to the manual fallback.
+
+## Native app fallback
+
+The native app can also use the same Realtime Database project as an automatic
+fallback for 6-character native room codes. Native fallback records are stored
+under `nativeRooms`, not `webRooms`, because native clients use the direct TCP
+mount protocol while web clients use WebRTC.
+
+Configure the native app with either:
+
+```bash
+export FOLDERBUDDIES_FIREBASE_DATABASE_URL="https://YOUR_DATABASE_NAME.europe-west1.firebasedatabase.app"
+```
+
+or build with:
+
+```bash
+cmake -S . -B build -DFB_FIREBASE_DATABASE_URL="https://YOUR_DATABASE_NAME.europe-west1.firebasedatabase.app"
+```
+
+Native host order:
+
+```text
+1. Cloudflare KV room
+2. Firebase Realtime Database nativeRooms fallback
+3. Long offline secure code
+```
+
+Native connect order for a 6-character code:
+
+```text
+1. Cloudflare lookup
+2. Firebase nativeRooms lookup
+```
+
+If the user pastes the long offline code, no Cloudflare/Firebase lookup is used.
+
+## Rules including native fallback
+
+For testing both web and native fallback, use:
+
+```json
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "webRooms": {
+      ".read": true,
+      ".write": true
+    },
+    "nativeRooms": {
+      ".read": true,
+      ".write": true
+    }
+  }
+}
+```
+
+`nativeRooms` contains only encrypted connection tokens: salt, wrapped key,
+payload, owner, and timestamps. It does not contain file bytes. If the app grows,
+replace these broad testing rules with stricter validation and scheduled cleanup.
+
+## Web/native compatibility note
+
+The room-code and fallback strategy are now aligned, but the data transports are
+still different:
+
+- web hosts/clients use WebRTC RTCDataChannel;
+- native hosts/clients use direct encrypted TCP plus the mounted filesystem protocol.
+
+A native client cannot mount a browser-hosted folder, and a browser client cannot
+browse a native-hosted TCP share without adding a real shared transport layer,
+such as native WebRTC support or an explicit encrypted relay/bridge. The current
+code detects this by code type instead of pretending the transports are compatible.

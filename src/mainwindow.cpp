@@ -50,9 +50,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 MainWindow::~MainWindow() {
     if (mount_.active()) mount_.stop();
     if (client_) client_->disconnect();
+    if (webClient_) webClient_->disconnect();
+    if (webCompatHost_) webCompatHost_->stop();
     if (activeTicket_.cloudPublished) {
         std::string derr;
-        fb::SignalingClient().remove(activeTicket_.lookupId, activeTicket_.ownerToken, derr);
+        fb::remove_published_room(activeTicket_, derr);
     }
     upnp_.unmap();
     if (server_) server_->stop();
@@ -89,6 +91,9 @@ QWidget* MainWindow::buildShareTab() {
 
     writeCheck_ = new QCheckBox("Allow clients to upload, edit, and delete files");
     form->addRow("Access:", writeCheck_);
+
+    secureHashCheck_ = new QCheckBox("Secure hash mode (share the long code; skip Cloudflare/Firebase)");
+    form->addRow("Security:", secureHashCheck_);
 
     auto* pwNote = new QLabel("Share just the 6-character code (or the offline blob) — there is no "
                              "separate password. Cloudflare only stores an opaque encrypted record "
@@ -181,6 +186,7 @@ void MainWindow::setShareRunning(bool running) {
     portSpin_->setEnabled(!running);
     lanCheck_->setEnabled(!running);
     writeCheck_->setEnabled(!running);
+    secureHashCheck_->setEnabled(!running);
     copyButton_->setEnabled(running);
     if (!running) {
         offlineEdit_->clear();
@@ -189,12 +195,14 @@ void MainWindow::setShareRunning(bool running) {
 
 void MainWindow::toggleShare() {
     if (server_ && server_->running()) {
+        if (webCompatHost_) webCompatHost_->stop();
+        webCompatHost_.reset();
         upnp_.unmap();
         server_->stop();
         server_.reset();
         if (activeTicket_.cloudPublished) {
             std::string derr;
-            fb::SignalingClient().remove(activeTicket_.lookupId, activeTicket_.ownerToken, derr);
+            fb::remove_published_room(activeTicket_, derr);
         }
         activeTicket_ = fb::HostedShareTicket{};
         tokenEdit_->clear();
@@ -218,7 +226,7 @@ void MainWindow::toggleShare() {
     fb::HostedShareTicket ticket;
     if (!fb::start_hosting(*server_, upnp_, folder.toStdString(), portSpin_->value(),
                            maxClientsSpin_->value(), lanCheck_->isChecked(),
-                           writeCheck_->isChecked(), ticket, err)) {
+                           writeCheck_->isChecked(), secureHashCheck_->isChecked(), ticket, err)) {
         QMessageBox::critical(this, "Folder Buddies", QString::fromStdString(err));
         upnp_.unmap();
         server_->stop();
@@ -227,6 +235,14 @@ void MainWindow::toggleShare() {
     }
 
     activeTicket_ = ticket;
+    if (ticket.cloudPublished && fb::web_compat_available()) {
+        webCompatHost_ = std::make_unique<fb::WebRtcCompatHost>();
+        std::string werr;
+        if (!webCompatHost_->start(folder.toStdString(), ticket.roomCode, writeCheck_->isChecked(),
+                                   maxClientsSpin_->value(), werr)) {
+            shareStatus_->setText("Native TCP sharing active; WebRTC compatibility failed: " + QString::fromStdString(werr));
+        }
+    }
     tokenEdit_->setText(QString::fromStdString(ticket.connectCode));
     offlineEdit_->setText(QString::fromStdString(ticket.offlineBlob));
     shareStatus_->setText(QString("Sharing on port %1 — %2 — %3 — 0 client(s)")
@@ -261,32 +277,53 @@ void MainWindow::setConnected(bool connected) {
 }
 
 void MainWindow::toggleConnect() {
-    if (client_ && client_->connected()) {
+    if ((client_ && client_->connected()) || (webClient_ && webClient_->connected())) {
         mount_.stop();
-        client_->disconnect();
+        if (client_) client_->disconnect();
+        if (webClient_) webClient_->disconnect();
         client_.reset();
+        webClient_.reset();
         connectStatus_->setText("Not connected.");
         setConnected(false);
         return;
     }
 
+    const std::string entered = tokenInput_->text().trimmed().toStdString();
     fb::Token tok;
     std::string decodeErr;
-    if (!fb::resolve_share_code(tokenInput_->text().trimmed().toStdString(), tok, decodeErr)) {
-        QMessageBox::warning(this, "Folder Buddies", QString::fromStdString(decodeErr));
-        return;
-    }
-
-    client_ = std::make_unique<fb::Client>();
+    bool mounted = false;
     std::string err, mountpoint;
-    if (!fb::start_mounting(*client_, mount_, tok, mountBaseEdit_->text().toStdString(),
-                            connsSpin_->value(), mountpoint, err)) {
-        QMessageBox::critical(this, "Folder Buddies", QString::fromStdString(err));
-        client_.reset();
+
+    if (fb::resolve_share_code(entered, tok, decodeErr)) {
+        client_ = std::make_unique<fb::Client>();
+        if (fb::start_mounting(*client_, mount_, tok, mountBaseEdit_->text().toStdString(),
+                               connsSpin_->value(), mountpoint, err)) {
+            mounted = true;
+            connectStatus_->setText("Mounted as " + QString::fromStdString(mountpoint));
+        } else {
+            client_->disconnect();
+            client_.reset();
+        }
+    }
+
+    if (!mounted && fb::web_compat_available() && fb::looks_like_web_compat_code(entered)) {
+        webClient_ = std::make_unique<fb::WebRtcRemoteClient>();
+        if (webClient_->connect(entered, err)) {
+            std::string name = "Web share";
+            if (mount_.start(webClient_.get(), mountBaseEdit_->text().toStdString(), name, true, err)) {
+                mountpoint = mount_.mountpoint();
+                mounted = true;
+                connectStatus_->setText("Mounted via WebRTC compatibility as " + QString::fromStdString(mountpoint));
+            }
+        }
+        if (!mounted) { webClient_->disconnect(); webClient_.reset(); }
+    }
+
+    if (!mounted) {
+        QMessageBox::critical(this, "Folder Buddies", QString::fromStdString(err.empty() ? decodeErr : err));
         return;
     }
 
-    connectStatus_->setText("Mounted as " + QString::fromStdString(mountpoint));
     setConnected(true);
 }
 
@@ -304,8 +341,11 @@ void MainWindow::refreshStats() {
         lastOut_ = out;
         lastIn_ = in;
     }
-    if (client_ && client_->connected()) {
-        uint64_t rd = client_->bytesRead.load(), wr = client_->bytesWritten.load();
+    fb::RemoteFs* activeRemote = nullptr;
+    if (client_ && client_->connected()) activeRemote = client_.get();
+    else if (webClient_ && webClient_->connected()) activeRemote = webClient_.get();
+    if (activeRemote) {
+        uint64_t rd = activeRemote->bytesRead.load(), wr = activeRemote->bytesWritten.load();
         parts << QString("Mount ↓%1 ↑%2")
                      .arg(humanRate((rd - lastRead_) * 2.0))
                      .arg(humanRate((wr - lastWritten_) * 2.0));

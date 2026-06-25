@@ -6,6 +6,7 @@
 #include "common.h"
 #include "crypto.h"
 #include "token.h"
+#include "remote_fs.h"
 
 #include <QString>
 #include <atomic>
@@ -19,17 +20,15 @@
 
 namespace fb {
 
-class Client {
+class Client : public RemoteFs {
 public:
     bool connect(const Token& tok, int nconns, std::string& err);
     void disconnect();
-    bool connected() const { return connected_.load(); }
+    bool connected() const override { return connected_.load(); }
 
     // Returns 0 on success (resp filled) or a positive errno on failure.
-    int request(uint16_t op, const std::vector<uint8_t>& payload, std::vector<uint8_t>& resp);
+    int request(uint16_t op, const std::vector<uint8_t>& payload, std::vector<uint8_t>& resp) override;
 
-    std::atomic<uint64_t> bytesRead{0};
-    std::atomic<uint64_t> bytesWritten{0};
 
 private:
     struct Pending {

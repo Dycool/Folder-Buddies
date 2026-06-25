@@ -2,7 +2,7 @@
 
 #ifdef _WIN32
 
-#include "client.h"
+#include "remote_fs.h"
 #include "common.h"
 #include "fuse_backend.h"
 #include "osflags.h"
@@ -113,7 +113,7 @@ struct DirEntry {
 };
 
 struct ProjfsState {
-    Client* client = nullptr;
+    RemoteFs* client = nullptr;
     PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT ctx = nullptr;
     bool allowWrites = false;
     std::filesystem::path root;
@@ -492,7 +492,7 @@ PRJ_CALLBACKS callbacks() {
 
 } // namespace
 
-bool Mount::start(Client* client, const std::string& mountBase, const std::string& volname,
+bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::string& volname,
                   bool allowWrites, std::string& err) {
     if (!ensure_fuse_backend(err)) return false;
 

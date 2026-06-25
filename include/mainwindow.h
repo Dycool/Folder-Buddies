@@ -7,6 +7,7 @@
 #include "server.h"
 #include "upnp.h"
 #include "signaling.h"
+#include "web_compat.h"
 
 #include <QMainWindow>
 #include <memory>
@@ -46,6 +47,7 @@ private:
     QSpinBox* portSpin_;
     QCheckBox* lanCheck_;
     QCheckBox* writeCheck_;
+    QCheckBox* secureHashCheck_;
     QPushButton* shareButton_;
     QLineEdit* tokenEdit_;
     QLineEdit* offlineEdit_;
@@ -67,6 +69,8 @@ private:
     std::unique_ptr<fb::Server> server_;
     fb::Upnp upnp_;
     std::unique_ptr<fb::Client> client_;
+    std::unique_ptr<fb::WebRtcRemoteClient> webClient_;
+    std::unique_ptr<fb::WebRtcCompatHost> webCompatHost_;
     fb::Mount mount_;
 
     uint64_t lastOut_ = 0, lastIn_ = 0, lastRead_ = 0, lastWritten_ = 0;

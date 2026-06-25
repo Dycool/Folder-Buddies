@@ -2,7 +2,7 @@
 
 #include "fuse_fs.h"
 
-#include "client.h"
+#include "remote_fs.h"
 #include "common.h"
 #include "fuse_backend.h"
 #include "osflags.h"
@@ -32,7 +32,7 @@ using fb_off_t = off_t;
 namespace fb {
 namespace {
 
-Client* ctx() { return static_cast<Client*>(fuse_get_context()->private_data); }
+RemoteFs* ctx() { return static_cast<RemoteFs*>(fuse_get_context()->private_data); }
 
 void fill_stat(FB_STAT& st, const WireAttr& a) {
     std::memset(&st, 0, sizeof(st));
@@ -383,7 +383,7 @@ std::string dedupe_path(const std::string& base, const std::string& name) {
 
 } // namespace
 
-bool Mount::start(Client* client, const std::string& mountBase, const std::string& volname,
+bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::string& volname,
                   bool allowWrites, std::string& err) {
     if (!ensure_fuse_backend(err)) return false;
 

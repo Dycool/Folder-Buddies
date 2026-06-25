@@ -12,6 +12,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QTimer>
+#include <QDateTime>
 #include <QUrl>
 #include <QUrlQuery>
 
@@ -29,6 +30,12 @@ namespace {
 constexpr const char* kHardcodedWorkerUrl = "";
 #else
 constexpr const char* kHardcodedWorkerUrl = FB_SIGNALING_URL;
+#endif
+
+#ifndef FB_FIREBASE_DATABASE_URL
+constexpr const char* kHardcodedFirebaseUrl = "";
+#else
+constexpr const char* kHardcodedFirebaseUrl = FB_FIREBASE_DATABASE_URL;
 #endif
 
 constexpr char kPayloadMagic[5] = {'F', 'B', 'Z', 'K', '1'};
@@ -177,6 +184,24 @@ bool sync_http(QNetworkRequest req, const QByteArray& method, const QByteArray& 
 
 QNetworkRequest json_request(const std::string& path) {
     QNetworkRequest req(QUrl(QString::fromStdString(SignalingClient::base_url() + path)));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setRawHeader("Accept", "application/json");
+    req.setRawHeader("User-Agent", "FolderBuddies/1");
+    return req;
+}
+
+std::string firebase_safe_key(const std::string& lookupId) {
+    return QByteArray::fromStdString(lookupId)
+        .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals)
+        .toStdString();
+}
+
+std::string firebase_room_path(const std::string& lookupId) {
+    return "/nativeRooms/" + firebase_safe_key(lookupId) + ".json";
+}
+
+QNetworkRequest firebase_request(const std::string& lookupId) {
+    QNetworkRequest req(QUrl(QString::fromStdString(FirebaseSignalingClient::base_url() + firebase_room_path(lookupId))));
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     req.setRawHeader("Accept", "application/json");
     req.setRawHeader("User-Agent", "FolderBuddies/1");
@@ -378,6 +403,97 @@ bool SignalingClient::remove(const std::string& lookupId, const std::string& own
     if (!sync_http(req, "DELETE", {}, status, resp, err)) return false;
     if (status == 200 || status == 204 || status == 404) return true;
     err = "Cloudflare room delete failed (HTTP " + std::to_string(status) + ")";
+    return false;
+}
+
+std::string FirebaseSignalingClient::base_url() {
+    std::string url;
+    if (const char* env = std::getenv("FOLDERBUDDIES_FIREBASE_DATABASE_URL"); env && *env)
+        url = std::string(env);
+    else
+        url = std::string(kHardcodedFirebaseUrl);
+    while (!url.empty() && url.back() == '/') url.pop_back();
+    return url;
+}
+
+bool FirebaseSignalingClient::configured() {
+    std::string u = base_url();
+    return !u.empty() && u.rfind("https://", 0) == 0 &&
+           (u.find("firebasedatabase.app") != std::string::npos ||
+            u.find("firebaseio.com") != std::string::npos);
+}
+
+bool FirebaseSignalingClient::create(const CloudRecord& rec, std::string& err) {
+    if (!configured()) { err = "Firebase fallback URL is not configured"; return false; }
+
+    int status = 0;
+    QByteArray resp;
+    QNetworkRequest req = firebase_request(rec.lookupId);
+
+    // Realtime Database REST has no anonymous compare-and-set. Check first, then PUT.
+    // A race is still possible, but room collisions are retried and rare enough for fallback use.
+    if (!sync_http(req, "GET", {}, status, resp, err)) return false;
+    if (status != 200) {
+        err = "Firebase fallback room check failed (HTTP " + std::to_string(status) + ")";
+        return false;
+    }
+    if (QString::fromUtf8(resp).trimmed() != "null") {
+        err = "Firebase fallback room code collision";
+        return false;
+    }
+
+    QJsonObject obj;
+    obj["v"] = 1;
+    obj["lookup"] = QString::fromStdString(rec.lookupId);
+    obj["salt"] = QString::fromStdString(rec.salt);
+    obj["wrapped"] = QString::fromStdString(rec.wrapped);
+    obj["payload"] = QString::fromStdString(rec.payload);
+    obj["owner"] = QString::fromStdString(rec.owner);
+    obj["createdAt"] = static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+    QByteArray body = QJsonDocument(obj).toJson(QJsonDocument::Compact);
+
+    if (!sync_http(req, "PUT", body, status, resp, err)) return false;
+    if (status == 200) return true;
+    err = "Firebase fallback create failed (HTTP " + std::to_string(status) + "): " + resp.toStdString();
+    return false;
+}
+
+bool FirebaseSignalingClient::get(const std::string& lookupId, std::string& salt, std::string& wrapped,
+                                  std::string& payload, std::string& err) {
+    if (!configured()) { err = "Firebase fallback URL is not configured"; return false; }
+    int status = 0;
+    QByteArray resp;
+    if (!sync_http(firebase_request(lookupId), "GET", {}, status, resp, err)) return false;
+    if (status != 200) {
+        err = "Firebase fallback lookup failed (HTTP " + std::to_string(status) + ")";
+        return false;
+    }
+    if (QString::fromUtf8(resp).trimmed() == "null") {
+        err = "no Firebase fallback share found for that code";
+        return false;
+    }
+    QJsonParseError pe{};
+    QJsonDocument doc = QJsonDocument::fromJson(resp, &pe);
+    if (pe.error != QJsonParseError::NoError || !doc.isObject()) {
+        err = "Firebase fallback returned invalid JSON";
+        return false;
+    }
+    QJsonObject o = doc.object();
+    salt = o.value("salt").toString().toStdString();
+    wrapped = o.value("wrapped").toString().toStdString();
+    payload = o.value("payload").toString().toStdString();
+    if (salt.empty() || wrapped.empty() || payload.empty()) { err = "Firebase fallback returned an incomplete record"; return false; }
+    return true;
+}
+
+bool FirebaseSignalingClient::remove(const std::string& lookupId, const std::string& owner, std::string& err) {
+    (void)owner;
+    if (!configured()) { err = "Firebase fallback URL is not configured"; return false; }
+    int status = 0;
+    QByteArray resp;
+    if (!sync_http(firebase_request(lookupId), "DELETE", {}, status, resp, err)) return false;
+    if (status == 200 || status == 204) return true;
+    err = "Firebase fallback delete failed (HTTP " + std::to_string(status) + ")";
     return false;
 }
 

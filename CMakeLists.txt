@@ -26,6 +26,7 @@ set(FB_COMMON_SOURCES
   src/server.cpp
   src/client.cpp
   src/upnp.cpp
+  src/web_compat.cpp
   src/fuse_backend.cpp
   resources.qrc
 )
@@ -47,6 +48,35 @@ target_link_libraries(folderbuddies PRIVATE Qt6::Widgets Qt6::Network Threads::T
 set(FB_SIGNALING_URL "" CACHE STRING "Hardcoded Cloudflare Worker base URL")
 if(FB_SIGNALING_URL)
   target_compile_definitions(folderbuddies PRIVATE FB_SIGNALING_URL="${FB_SIGNALING_URL}")
+endif()
+
+# Optional native Firebase Realtime Database fallback. Runtime env
+# FOLDERBUDDIES_FIREBASE_DATABASE_URL overrides this build-time value.
+set(FB_FIREBASE_DATABASE_URL "" CACHE STRING "Hardcoded Firebase Realtime Database URL")
+if(FB_FIREBASE_DATABASE_URL)
+  target_compile_definitions(folderbuddies PRIVATE FB_FIREBASE_DATABASE_URL="${FB_FIREBASE_DATABASE_URL}")
+endif()
+
+
+# ---- WebRTC compatibility transport (optional) -----------------------------
+# Keeps native↔native on TCP while allowing native↔browser fallback via
+# RTCDataChannel when libdatachannel is available.
+find_package(LibDataChannel CONFIG QUIET)
+if(NOT LibDataChannel_FOUND)
+  find_package(libdatachannel CONFIG QUIET)
+endif()
+if(LibDataChannel_FOUND OR libdatachannel_FOUND)
+  target_compile_definitions(folderbuddies PRIVATE FB_HAVE_LIBDATACHANNEL)
+  if(TARGET LibDataChannel::datachannel)
+    target_link_libraries(folderbuddies PRIVATE LibDataChannel::datachannel)
+  elseif(TARGET datachannel)
+    target_link_libraries(folderbuddies PRIVATE datachannel)
+  elseif(TARGET libdatachannel::datachannel)
+    target_link_libraries(folderbuddies PRIVATE libdatachannel::datachannel)
+  endif()
+  message(STATUS "WebRTC compatibility: enabled (libdatachannel)")
+else()
+  message(STATUS "WebRTC compatibility: disabled (libdatachannel not found)")
 endif()
 
 # ---- Mount backend (per platform) -----------------------------------------

@@ -25,6 +25,7 @@ struct HostedShareTicket {
     std::string lookupId;       // Cloudflare KV key (public half of the code)
     std::string reach;
     std::string cloudStatus;
+    std::string signalingBackend; // "cloudflare" or "firebase" when published remotely
     bool cloudPublished = false;
 };
 
@@ -58,6 +59,19 @@ bool open_cloud_record(const std::string& roomCode, const std::string& salt,
 class SignalingClient {
 public:
     // Hardcoded at build time; overridable with FOLDERBUDDIES_SIGNALING_URL.
+    static std::string base_url();
+    static bool configured();
+
+    bool create(const CloudRecord& rec, std::string& err);
+    bool get(const std::string& lookupId, std::string& salt, std::string& wrapped,
+             std::string& payload, std::string& err);
+    bool remove(const std::string& lookupId, const std::string& owner, std::string& err);
+};
+
+class FirebaseSignalingClient {
+public:
+    // Optional native fallback. Runtime env wins over build-time macro.
+    // Example: https://PROJECT.europe-west1.firebasedatabase.app
     static std::string base_url();
     static bool configured();
 
