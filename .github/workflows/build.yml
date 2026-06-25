@@ -18,45 +18,26 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  BUILD_TYPE: Release
+  FB_SIGNALING_URL: ${{ vars.FB_SIGNALING_URL }}
+  FIREBASE_DATABASE_URL: ${{ vars.FIREBASE_DATABASE_URL }}
+  VCPKG_COMMIT: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
+
 jobs:
-  build:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+  build-linux:
+    name: Linux AppImage
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux
-            os: ubuntu-24.04
-          - name: macos
-            os: macos-15
-          - name: windows
-            os: windows-2025
-
-    env:
-      BUILD_TYPE: Release
-      FB_SIGNALING_URL: ${{ vars.FB_SIGNALING_URL }}
-      FIREBASE_DATABASE_URL: ${{ vars.FIREBASE_DATABASE_URL }}
-      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
-      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-
     steps:
       - uses: actions/checkout@v6
 
       - name: Verify C++23 project settings
-        shell: bash
         run: |
           grep -q 'set(CMAKE_CXX_STANDARD 23)' client/CMakeLists.txt
           grep -q 'set(CMAKE_CXX_STANDARD 23)' databases/cloudflare/CMakeLists.txt
 
-      # ---------------- Linux: native FUSE + AppImage ----------------
-      - name: Install Linux dependencies
-        if: matrix.name == 'linux'
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -64,9 +45,7 @@ jobs:
             qt6-base-dev qt6-base-dev-tools libfuse3-dev libminiupnpc-dev \
             libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev fuse3 imagemagick libsodium-dev
 
-      - name: Generate app icons (Linux)
-        if: matrix.name == 'linux'
-        shell: bash
+      - name: Generate app icons
         run: |
           if [ -f client/src/icons/icon.png ]; then
             chmod +x client/src/icons/make-icons.sh
@@ -74,9 +53,7 @@ jobs:
             cp client/src/icons/icon.png client/icon.png
           fi
 
-      - name: Configure Linux
-        if: matrix.name == 'linux'
-        shell: bash
+      - name: Configure
         run: |
           args=(-G Ninja -S client -B build -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCMAKE_CXX_STANDARD=23)
           if [ -n "${FB_SIGNALING_URL:-}" ]; then
@@ -87,14 +64,12 @@ jobs:
           fi
           cmake "${args[@]}"
 
-      - name: Build and test Linux
-        if: matrix.name == 'linux'
+      - name: Build and test
         run: |
           cmake --build build --config "$BUILD_TYPE" --parallel
           ctest --test-dir build --output-on-failure -C "$BUILD_TYPE"
 
-      - name: Package Linux AppImage
-        if: matrix.name == 'linux'
+      - name: Package AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
         run: |
@@ -112,9 +87,27 @@ jobs:
             --plugin qt --output appimage
           mv ./*.AppImage folderbuddies-linux.AppImage
 
-      # ---------------- macOS: FUSE-T-preferred bundle ----------------
-      - name: Install macOS dependencies
-        if: matrix.name == 'macos'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: folderbuddies-linux
+          path: folderbuddies-linux.AppImage
+          if-no-files-found: error
+
+  build-macos:
+    name: macOS .app
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
         run: |
           brew update
           brew install cmake ninja pkg-config qt@6 miniupnpc imagemagick
@@ -122,9 +115,7 @@ jobs:
           echo "$(brew --prefix qt@6)/bin" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
-      - name: Generate app icons (macOS)
-        if: matrix.name == 'macos'
-        shell: bash
+      - name: Generate app icons
         run: |
           if [ -f client/src/icons/icon.png ]; then
             chmod +x client/src/icons/make-icons.sh
@@ -132,9 +123,10 @@ jobs:
             cp client/src/icons/icon.png client/icon.png
           fi
 
-      - name: Import macOS signing certificate
-        if: matrix.name == 'macos' && env.MACOS_CERTIFICATE_P12 != '' && env.MACOS_CERTIFICATE_PASSWORD != ''
-        shell: bash
+      - name: Import signing certificate
+        if: env.MACOS_CERTIFICATE_P12 != '' && env.MACOS_CERTIFICATE_PASSWORD != ''
+        env:
+          RUNNER_TEMP_KEYCHAIN_PASSWORD: folderbuddies-ci-keychain
         run: |
           security create-keychain -p "$RUNNER_TEMP_KEYCHAIN_PASSWORD" build.keychain
           security default-keychain -s build.keychain
@@ -143,12 +135,8 @@ jobs:
           printf '%s' "$MACOS_CERTIFICATE_P12" | base64 -D > certificate.p12
           security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$RUNNER_TEMP_KEYCHAIN_PASSWORD" build.keychain
-        env:
-          RUNNER_TEMP_KEYCHAIN_PASSWORD: folderbuddies-ci-keychain
 
-      - name: Configure macOS
-        if: matrix.name == 'macos'
-        shell: bash
+      - name: Configure
         run: |
           args=(-G Ninja -S client -B build -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCMAKE_CXX_STANDARD=23)
           if [ -n "${FB_SIGNALING_URL:-}" ]; then
@@ -157,32 +145,28 @@ jobs:
           if [ -n "${FIREBASE_DATABASE_URL:-}" ]; then
             args+=(-DFB_FIREBASE_DATABASE_URL="$FIREBASE_DATABASE_URL")
           fi
-          # Do not fail CI if the release-only FUSE-T installer package is absent.
           if [ -n "${FUSET_PKG:-}" ] && [ -f "$FUSET_PKG" ]; then
             args+=(-DFUSET_PKG="$FUSET_PKG")
           fi
           cmake "${args[@]}"
 
-      - name: Build and test macOS
-        if: matrix.name == 'macos'
+      - name: Build and test
         run: |
           cmake --build build --config "$BUILD_TYPE" --parallel
           ctest --test-dir build --output-on-failure -C "$BUILD_TYPE"
 
-      - name: Bundle Qt into macOS app
-        if: matrix.name == 'macos'
-        run: |
-          macdeployqt build/folderbuddies.app -always-overwrite
+      - name: Bundle Qt
+        run: macdeployqt build/folderbuddies.app -always-overwrite
 
-      - name: Codesign macOS app
-        if: matrix.name == 'macos' && env.MACOS_CODESIGN_IDENTITY != ''
+      - name: Codesign
+        if: env.MACOS_CODESIGN_IDENTITY != ''
         run: |
           codesign --force --deep --options runtime --timestamp \
             --sign "$MACOS_CODESIGN_IDENTITY" build/folderbuddies.app
           codesign --verify --deep --strict --verbose=2 build/folderbuddies.app
 
-      - name: Notarize and staple macOS app
-        if: matrix.name == 'macos' && env.MACOS_CODESIGN_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != '' && env.APPLE_TEAM_ID != ''
+      - name: Notarize and staple
+        if: env.MACOS_CODESIGN_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != '' && env.APPLE_TEAM_ID != ''
         run: |
           ditto -c -k --keepParent build/folderbuddies.app folderbuddies-macos-notary.zip
           xcrun notarytool submit folderbuddies-macos-notary.zip \
@@ -192,37 +176,60 @@ jobs:
             --wait
           xcrun stapler staple build/folderbuddies.app
 
-      - name: Package macOS app
-        if: matrix.name == 'macos'
+      - name: Package .app
         run: |
           rm -f folderbuddies-macos.zip
           ditto -c -k --keepParent build/folderbuddies.app folderbuddies-macos.zip
 
-      # ---------------- Windows: native ProjFS, no WinFsp ----------------
-      - name: Set up MSVC developer shell
-        if: matrix.name == 'windows'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: folderbuddies-macos
+          path: folderbuddies-macos.zip
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows static .exe
+    runs-on: windows-2025
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Bootstrap vcpkg
-        if: matrix.name == 'windows'
-        shell: pwsh
-        run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP/vcpkg"
-          & "$env:RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat"
-          "VCPKG_ROOT=$env:RUNNER_TEMP/vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v5
+        with:
+          path: _cache/vcpkg-bincache
+          key: vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-${{ env.VCPKG_COMMIT }}
+          restore-keys: |
+            vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-
+            vcpkg-windows-static-qtbase-core-gui-widgets-network-
 
-      - name: Install Windows dependencies
-        if: matrix.name == 'windows'
+      - name: Bootstrap vcpkg
         shell: pwsh
         run: |
-          & "$env:VCPKG_ROOT/vcpkg.exe" install `
+          git clone https://github.com/microsoft/vcpkg.git _deps/vcpkg
+          cd _deps/vcpkg
+          git checkout $env:VCPKG_COMMIT
+          cd ../..
+          .\_deps\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Install dependencies
+        shell: pwsh
+        env:
+          VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/_cache/vcpkg-bincache,readwrite"
+        run: |
+          .\_deps\vcpkg\vcpkg.exe install `
             "qtbase[core,gui,widgets,network]:x64-windows-static" `
             "miniupnpc:x64-windows-static" `
-            "libsodium:x64-windows-static"
+            "libsodium:x64-windows-static" `
+            --clean-after-build
 
-      - name: Configure Windows
-        if: matrix.name == 'windows'
+      - name: Configure
         shell: pwsh
+        env:
+          VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/_cache/vcpkg-bincache,readwrite"
         run: |
           $args = @(
             '-G', 'Ninja',
@@ -230,41 +237,21 @@ jobs:
             '-B', 'build',
             "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE",
             '-DCMAKE_CXX_STANDARD=23',
-            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake",
+            "-DCMAKE_TOOLCHAIN_FILE=$PWD/_deps/vcpkg/scripts/buildsystems/vcpkg.cmake",
             '-DVCPKG_TARGET_TRIPLET=x64-windows-static'
           )
           if ($env:FB_SIGNALING_URL) { $args += "-DFB_SIGNALING_URL=$env:FB_SIGNALING_URL" }
           if ($env:FIREBASE_DATABASE_URL) { $args += "-DFB_FIREBASE_DATABASE_URL=$env:FIREBASE_DATABASE_URL" }
           cmake @args
 
-      - name: Build and test Windows
-        if: matrix.name == 'windows'
+      - name: Build and test
         shell: pwsh
         run: |
           cmake --build build --config $env:BUILD_TYPE --parallel
           ctest --test-dir build --output-on-failure -C $env:BUILD_TYPE
           Copy-Item build/folderbuddies.exe folderbuddies-windows.exe
 
-      # ---------------- Upload ----------------
-      - name: Upload Linux artifact
-        if: matrix.name == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: folderbuddies-linux
-          path: folderbuddies-linux.AppImage
-          if-no-files-found: error
-
-      - name: Upload macOS artifact
-        if: matrix.name == 'macos'
-        uses: actions/upload-artifact@v4
-        with:
-          name: folderbuddies-macos
-          path: folderbuddies-macos.zip
-          if-no-files-found: error
-
-      - name: Upload Windows artifact
-        if: matrix.name == 'windows'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: folderbuddies-windows
           path: folderbuddies-windows.exe
