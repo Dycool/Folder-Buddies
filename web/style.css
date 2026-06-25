@@ -37,6 +37,8 @@ h2 { font-size: 22px; }
 }
 .config-card { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: end; }
 .config-card .hint { grid-column: 1 / -1; }
+.turnstile-card { margin-top: 18px; }
+.turnstile-widget { min-height: 70px; display: flex; align-items: center; }
 label { display: grid; gap: 7px; color: var(--muted); font-weight: 650; margin-top: 14px; }
 input, textarea {
   width: 100%;

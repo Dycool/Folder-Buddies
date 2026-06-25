@@ -20,6 +20,12 @@ Use GitHub repository secrets for deployment:
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CF_KV_ROOMS_ID`
 - `CF_KV_ROOMS_PREVIEW_ID`
+- `TURNSTILE_SECRET_KEY` optional, only when Turnstile is enabled for the webapp
+
+Use GitHub repository variables for public values:
+
+- `FB_SIGNALING_URL`
+- `TURNSTILE_SITE_KEY` optional, public Turnstile site key for the webapp
 
 The Durable Object binding and migration are public config and do not require secrets.
 
@@ -36,6 +42,17 @@ npx wrangler kv namespace create ROOMS --preview
 ```
 
 Copy the two namespace IDs into GitHub Secrets as `CF_KV_ROOMS_ID` and `CF_KV_ROOMS_PREVIEW_ID`. Do not paste them into `wrangler.toml` for the public repo.
+
+## Optional Cloudflare Turnstile
+
+To slow down bot-created browser signaling sessions, create a Turnstile widget in Cloudflare and add:
+
+- GitHub repository secret `TURNSTILE_SECRET_KEY` = the Turnstile secret key
+- GitHub repository variable `TURNSTILE_SITE_KEY` = the public Turnstile site key
+
+The Worker validates Turnstile tokens server-side for webapp WebSocket signaling when `TURNSTILE_SECRET_KEY` is configured. Native app KV rendezvous is not made dependent on Turnstile, so the native app keeps working without browser CAPTCHA flows.
+
+For the widget hostname list, add the exact GitHub Pages hostname, for example `diogoenes0.github.io`. Add `localhost` only if you want local testing. Do not include `https://` or a path.
 
 ## Manual deploy from GitHub Actions
 

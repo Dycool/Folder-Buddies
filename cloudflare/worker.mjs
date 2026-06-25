@@ -14,6 +14,7 @@ const ROOM_TTL_SECONDS = 30 * 24 * 60 * 60;
 const RATE_LIMIT_TTL_SECONDS = 60;
 const RATE_LIMIT_MAX = 5;
 const MAX_SIGNAL_BYTES = 96 * 1024;
+const MAX_TURNSTILE_TOKEN_BYTES = 4096;
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -78,6 +79,40 @@ async function verifyRequestAuth(request, stored, method, room) {
   return timingSafeEqual(got, expect);
 }
 
+
+async function verifyTurnstile(request, env, token) {
+  // Turnstile is intentionally optional so native clients keep working when the
+  // secret is not configured. When TURNSTILE_SECRET_KEY exists, browser
+  // WebSocket signaling must provide a fresh token.
+  if (!env.TURNSTILE_SECRET_KEY) return { ok: true, disabled: true };
+  if (typeof token !== "string" || token.length < 20) {
+    return { ok: false, status: 403, error: "turnstile_required" };
+  }
+  if (token.length > MAX_TURNSTILE_TOKEN_BYTES) {
+    return { ok: false, status: 400, error: "turnstile_token_too_large" };
+  }
+  const form = new FormData();
+  form.append("secret", env.TURNSTILE_SECRET_KEY);
+  form.append("response", token);
+  const ip = request.headers.get("CF-Connecting-IP");
+  if (ip) form.append("remoteip", ip);
+
+  let result;
+  try {
+    const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      body: form,
+    });
+    result = await res.json();
+  } catch {
+    return { ok: false, status: 503, error: "turnstile_unavailable" };
+  }
+  if (!result?.success) {
+    return { ok: false, status: 403, error: "turnstile_failed", codes: result?.["error-codes"] || [] };
+  }
+  return { ok: true };
+}
+
 async function create(request, env) {
   let body;
   try { body = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
@@ -88,6 +123,10 @@ async function create(request, env) {
   if (!validRoom(room)) return json({ error: "room_must_be_exactly_6_base91_chars" }, 400);
   if (typeof auth !== "string" || auth.length < 20) return json({ error: "bad_auth_verifier" }, 400);
   if (typeof payload !== "string" || payload.length < 40) return json({ error: "bad_payload" }, 400);
+  if (body?.turnstileToken) {
+    const turnstile = await verifyTurnstile(request, env, body.turnstileToken);
+    if (!turnstile.ok) return json({ error: turnstile.error, codes: turnstile.codes || [] }, turnstile.status || 403);
+  }
 
   // KV has no compare-and-swap. This avoids normal collisions; hosts retry on 409.
   if (await env.ROOMS.get(room)) return json({ error: "room_exists" }, 409);
@@ -118,6 +157,10 @@ async function webSocketRoom(request, env, room) {
   if (!(await rateLimit(env, request, "GET", room))) {
     return json({ error: "rate_limited", waitSeconds: 60 }, 429);
   }
+  const url = new URL(request.url);
+  const turnstile = await verifyTurnstile(request, env, url.searchParams.get("turnstile") || "");
+  if (!turnstile.ok) return json({ error: turnstile.error, codes: turnstile.codes || [] }, turnstile.status || 403);
+
   const id = env.WEB_ROOMS.idFromName(room);
   return env.WEB_ROOMS.get(id).fetch(request);
 }

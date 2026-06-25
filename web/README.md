@@ -16,6 +16,12 @@ This is the no-install browser version of Folder Buddies. It is meant to be host
 - It does not relay file bytes through Cloudflare or GitHub Pages.
 - It does not copy or cache the selected host folder. The host enumerates directories on request and streams each selected file with `File.stream()`.
 
+## Optional Turnstile protection
+
+The GitHub Pages build can embed Cloudflare Turnstile for cloud-room host/connect actions. Add the public site key as the repository variable `TURNSTILE_SITE_KEY`. The secret key must be stored only as the repository secret `TURNSTILE_SECRET_KEY` and uploaded to the Worker by the Cloudflare workflow.
+
+Turnstile is used only for Cloudflare WebRTC signaling connections. Offline fallback links continue to work without any Cloudflare request.
+
 ## Browser notes
 
 Hosting requires the File System Access API, so Chromium/Edge are the best targets. Browsing/downloading as a client works in more browsers, but saving very large files is best when `showSaveFilePicker` is available because chunks can be streamed straight to disk instead of being accumulated in memory as a Blob fallback.

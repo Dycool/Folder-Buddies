@@ -43,6 +43,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CF_KV_ROOMS_ID: ${{ secrets.CF_KV_ROOMS_ID }}
       CF_KV_ROOMS_PREVIEW_ID: ${{ secrets.CF_KV_ROOMS_PREVIEW_ID }}
+      TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
     steps:
       - uses: actions/checkout@v6
 
@@ -131,6 +132,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CF_KV_ROOMS_ID: ${{ secrets.CF_KV_ROOMS_ID }}
       CF_KV_ROOMS_PREVIEW_ID: ${{ secrets.CF_KV_ROOMS_PREVIEW_ID }}
+      TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
     steps:
       - uses: actions/checkout@v6
 
@@ -169,3 +171,10 @@ jobs:
           workingDirectory: cloudflare
           wranglerVersion: '4'
           command: deploy --config wrangler.ci.toml
+
+      - name: Upload optional Turnstile secret
+        if: env.TURNSTILE_SECRET_KEY != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$TURNSTILE_SECRET_KEY" | npx --yes wrangler@4 secret put TURNSTILE_SECRET_KEY --config cloudflare/wrangler.ci.toml

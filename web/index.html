@@ -30,6 +30,13 @@
       <p class="hint">The Worker URL is public and safe to hardcode. ICE servers are only used by WebRTC NAT traversal; files still do not pass through Cloudflare.</p>
     </section>
 
+    <section class="card turnstile-card" id="turnstileBox" hidden>
+      <h2>Browser check</h2>
+      <p class="muted">Cloud rooms use Cloudflare Turnstile to slow down bots before opening signaling. Offline fallback does not need it.</p>
+      <div id="turnstileWidget" class="turnstile-widget"></div>
+      <p id="turnstileStatus" class="hint">Waiting for Turnstile…</p>
+    </section>
+
     <section class="grid two">
       <article class="card">
         <h2>Host a folder</h2>
@@ -110,6 +117,7 @@
   </main>
 
   <script src="config.js"></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
   <script src="app.js"></script>
 </body>
 </html>

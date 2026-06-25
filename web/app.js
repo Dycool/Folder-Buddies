@@ -11,6 +11,9 @@
   const els = {
     workerUrl: $("workerUrl"),
     iceServers: $("iceServers"),
+    turnstileBox: $("turnstileBox"),
+    turnstileWidget: $("turnstileWidget"),
+    turnstileStatus: $("turnstileStatus"),
     connectionState: $("connectionState"),
     pickFolder: $("pickFolder"),
     hostCloud: $("hostCloud"),
@@ -55,6 +58,8 @@
     nextReqId: 1,
     downloads: new Map(),
     offlineHostPeer: null,
+    turnstileWidgetId: null,
+    turnstileToken: "",
   };
 
   function log(message, cls = "") {
@@ -223,7 +228,69 @@
     return value.replace(/\/+$/, "");
   }
 
-  function makeWsUrl(room, role) {
+  function getTurnstileSiteKey() {
+    return cleanInput(window.FB_WEBAPP_CONFIG?.turnstileSiteKey || "");
+  }
+
+  function initTurnstile() {
+    const siteKey = getTurnstileSiteKey();
+    if (!siteKey) {
+      els.turnstileBox.hidden = true;
+      return;
+    }
+    els.turnstileBox.hidden = false;
+    els.turnstileStatus.textContent = "Loading Cloudflare Turnstile…";
+
+    const render = () => {
+      if (!window.turnstile) {
+        setTimeout(render, 150);
+        return;
+      }
+      if (state.turnstileWidgetId !== null) return;
+      state.turnstileWidgetId = window.turnstile.render(els.turnstileWidget, {
+        sitekey: siteKey,
+        callback: (token) => {
+          state.turnstileToken = token || "";
+          els.turnstileStatus.textContent = state.turnstileToken
+            ? "Browser check ready for the next cloud connection."
+            : "Browser check did not return a token.";
+        },
+        "expired-callback": () => {
+          state.turnstileToken = "";
+          els.turnstileStatus.textContent = "Browser check expired. Please complete it again.";
+        },
+        "error-callback": () => {
+          state.turnstileToken = "";
+          els.turnstileStatus.textContent = "Turnstile failed to load. Offline fallback still works.";
+        },
+      });
+    };
+    render();
+  }
+
+  function resetTurnstile() {
+    const siteKey = getTurnstileSiteKey();
+    if (!siteKey || !window.turnstile || state.turnstileWidgetId === null) return;
+    state.turnstileToken = "";
+    els.turnstileStatus.textContent = "Refreshing browser check…";
+    try { window.turnstile.reset(state.turnstileWidgetId); }
+    catch { els.turnstileStatus.textContent = "Refresh the page to run Turnstile again."; }
+  }
+
+  async function takeTurnstileToken() {
+    if (!getTurnstileSiteKey()) return "";
+    if (!state.turnstileToken) {
+      throw new Error("Complete the Turnstile browser check before using a cloud room.");
+    }
+    const token = state.turnstileToken;
+    state.turnstileToken = "";
+    // Turnstile tokens are short-lived and validated server-side, so consume one
+    // per WebSocket connection and immediately ask the widget for the next one.
+    setTimeout(resetTurnstile, 0);
+    return token;
+  }
+
+  function makeWsUrl(room, role, turnstileToken = "") {
     const u = new URL(getWorkerUrl());
     u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
     u.pathname = "/room";
@@ -231,6 +298,7 @@
     u.searchParams.set("code", room);
     u.searchParams.set("role", role);
     u.searchParams.set("web", "1");
+    if (turnstileToken) u.searchParams.set("turnstile", turnstileToken);
     return u;
   }
 
@@ -265,8 +333,8 @@
     });
   }
 
-  async function openSignal(role, room, onMessage) {
-    const ws = new WebSocket(makeWsUrl(room, role));
+  async function openSignal(role, room, onMessage, turnstileToken = "") {
+    const ws = new WebSocket(makeWsUrl(room, role, turnstileToken));
     ws.onopen = () => log(`${role} signaling connected for room ${room}`, "ok");
     ws.onclose = (event) => log(`${role} signaling closed (${event.code || "no code"})`);
     ws.onerror = () => log(`${role} signaling error`, "err");
@@ -607,7 +675,8 @@
     if (!state.rootHandle) throw new Error("Choose a folder first");
     state.password = randomPassword();
     state.room = randomRoom();
-    state.hostWs = await openSignal("host", state.room, (msg) => handleHostSignal(msg).catch((e) => log(e.message, "err")));
+    const turnstileToken = await takeTurnstileToken();
+    state.hostWs = await openSignal("host", state.room, (msg) => handleHostSignal(msg).catch((e) => log(e.message, "err")), turnstileToken);
     els.hostRoom.textContent = state.room;
     els.hostPassword.textContent = state.password;
     els.shareLink.value = encodeHash({ r: state.room, p: state.password });
@@ -661,7 +730,8 @@
       if (parsed.offlineOffer) return makeOfflineAnswer();
       throw new Error("Paste a 6-character room code/link, or use the offline answer button for huge fallback links.");
     }
-    state.clientWs = await openSignal("client", state.room, (msg) => handleClientSignal(msg).catch((e) => log(e.message, "err")));
+    const turnstileToken = await takeTurnstileToken();
+    state.clientWs = await openSignal("client", state.room, (msg) => handleClientSignal(msg).catch((e) => log(e.message, "err")), turnstileToken);
     els.disconnect.disabled = false;
     setStatus("Connecting");
   }
@@ -814,6 +884,7 @@
     els.workerUrl.value = window.FB_WEBAPP_CONFIG?.signalingUrl || "";
     applyHashToJoinForm();
     initEvents();
+    initTurnstile();
     log("Ready. Host mode streams files on demand; it does not pre-cache the folder.");
   }
 
