@@ -42,7 +42,8 @@ void print_usage() {
           << "      --max-clients <n>   limit distinct clients (default: unlimited)\n"
           << "      --write             allow clients to upload, edit, and delete files\n"
           << "      --secure-hash       skip Cloudflare/Firebase and print the long offline code\n"
-          << "      (prints a 10-char room code; if Cloudflare/Firebase are unavailable,\n"
+          << "      (prints a short read-only room code, or a longer one with --write; if\n"
+          << "       Cloudflare/Firebase are unavailable,\n"
           << "       prints a long self-contained offline Base91 blob instead)\n\n"
           << "  folderbuddies connect <room-code-or-offline-blob> [options]\n"
           << "      --mount <dir>       base mount directory (default: ~/FolderBuddies)\n"
@@ -134,7 +135,7 @@ int cli_host(const Args& a) {
           << "  access: " << (a.has("--write") ? "read/write" : "read-only") << "\n"
           << "  encryption: ChaCha20-Poly1305 (always on)\n\n";
     if (ticket.cloudPublished) {
-        out() << "Room code (exactly 6 Base91 chars):\n  "
+        out() << "Room code:\n  "
               << QString::fromStdString(ticket.roomCode) << "\n\n"
               << "Offline secure hash fallback:\n  "
               << QString::fromStdString(ticket.offlineBlob) << "\n\n";

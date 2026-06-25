@@ -4,8 +4,13 @@ import { argon2id } from "./vendor/noble/argon2.js";
   "use strict";
 
   const BASE91 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+,-./:;<=>?@[]^_`{|}~";
-  const ROOM_LEN = 10;
-  const LOOKUP_LEN = 2;          // public half: the Durable Object room name
+  // Connect codes come in two tiers, told apart purely by total length:
+  //   read-only (default): 4-char lookup + 2-char secret half  ( 6 total)
+  //   read-write:          8-char lookup + 8-char secret half  (16 total)
+  // The host issues the long tier exactly when it grants write access. The lookup
+  // is the public Durable Object room name; the secret half never reaches Cloudflare.
+  const SHORT_LOOKUP_LEN = 4, SHORT_CODE_LEN = 6;
+  const LONG_LOOKUP_LEN = 8, LONG_CODE_LEN = 16;
   const ARGON = { t: 3, m: 65536, p: 1, dkLen: 32 }; // matches libsodium in the native app
   const BIN_MAGIC = 0x4642494e; // FBIN
   const CHUNK_SIZE = 64 * 1024;
@@ -62,7 +67,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   const state = {
     rootHandle: null,
-    code: "",          // full 10-char code
+    code: "",          // full connect code (6 read-only / 16 read-write)
     lookup: "",        // public half (relay room)
     secureSecret: "",  // always "" (reserved; the secure-hash long-code option was removed)
     connectToken: "",  // what the host shows/copies to clients
@@ -361,11 +366,13 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   function looksLikeRoom(text) {
-    return text.length === ROOM_LEN && [...text].every((c) => BASE91.includes(c));
+    return (text.length === SHORT_CODE_LEN || text.length === LONG_CODE_LEN) &&
+      [...text].every((c) => BASE91.includes(c));
   }
 
-  function lookupOf(code) { return code.slice(0, LOOKUP_LEN); }
-  function keyPartOf(code) { return code.slice(LOOKUP_LEN); }
+  function lookupLenOf(code) { return code.length === LONG_CODE_LEN ? LONG_LOOKUP_LEN : SHORT_LOOKUP_LEN; }
+  function lookupOf(code) { return code.slice(0, lookupLenOf(code)); }
+  function keyPartOf(code) { return code.slice(lookupLenOf(code)); }
 
   function randomBytes(n) {
     const b = new Uint8Array(n);
@@ -373,8 +380,9 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return b;
   }
 
-  function randomRoom() {
-    return [...randomBytes(ROOM_LEN)].map((b) => BASE91[b % BASE91.length]).join("");
+  function randomRoom(longCode = false) {
+    const n = longCode ? LONG_CODE_LEN : SHORT_CODE_LEN;
+    return [...randomBytes(n)].map((b) => BASE91[b % BASE91.length]).join("");
   }
 
   function concatBytes(...parts) {
@@ -752,7 +760,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
     const attempts = preferredCode ? 1 : 12;
     for (let attempt = 0; attempt < attempts; ++attempt) {
-      const code = preferredCode || randomRoom();
+      const code = preferredCode || randomRoom(state.allowWrites);
       const lookup = lookupOf(code);
       const path = firebaseRoomPath(lookup);
       const roomRef = sdk.ref(sdk.db, path);
@@ -872,7 +880,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   async function openCloudflareHostSignal(preferredCode = "") {
     const attempts = preferredCode ? 1 : 12;
     for (let attempt = 0; attempt < attempts; ++attempt) {
-      const code = preferredCode || randomRoom();
+      const code = preferredCode || randomRoom(state.allowWrites);
       const lookup = lookupOf(code);
       const token = await turnstileToken();
       const ws = await openSignal("host", lookup, (msg) => handleHostSignal(msg).catch((err) => toast(err.message)), token, state.maxClients);
@@ -1556,7 +1564,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       toast(state.hostWs?.provider === "firebase" ? "Hosting through Firebase fallback." : "Hosting.");
     } catch (e) {
       const cloudError = e.message;
-      state.code = randomRoom();
+      state.code = randomRoom(state.allowWrites);
       state.lookup = lookupOf(state.code);
       state.secureSecret = "";
       state.connectToken = state.code;
@@ -1612,7 +1620,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
     const resolved = resolveConnectToken(raw, { preserveDirect: !rawInput && !!state.pendingConnectToken });
     if (isWebOfflineOffer(resolved.token)) return connectManualOffer(resolved.token);
-    if (!looksLikeRoom(resolved.code)) throw new Error("The browser client accepts 10-character web room codes/share links or FBW2O offline web offer codes. Native IP/port blobs are for the native app.");
+    if (!looksLikeRoom(resolved.code)) throw new Error("The browser client accepts 6- or 16-character web room codes/share links or FBW2O offline web offer codes. Native IP/port blobs are for the native app.");
 
     setConnectStatus("Connecting…");
     state.code = resolved.code;

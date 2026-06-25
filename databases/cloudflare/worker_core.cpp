@@ -15,8 +15,10 @@ bool is_base91(char c) {
     return kBase91.find(c) != std::string_view::npos;
 }
 
+// Validates the public lookup half the Worker receives: 4 chars (read-only tier)
+// or 8 chars (read-write tier). Mirrors ROOM_RE in worker.mjs.
 extern "C" bool fb_valid_room_code(const char* ptr, unsigned len) {
-    if (!ptr || len != 6) return false;
+    if (!ptr || (len != 4 && len != 8)) return false;
     return std::all_of(ptr, ptr + len, is_base91);
 }
 

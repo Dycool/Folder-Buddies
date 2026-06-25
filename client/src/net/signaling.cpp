@@ -237,19 +237,39 @@ std::string clean_one_line(std::string s) {
     return out;
 }
 
+// Map a code's total length to its (lookup, secret) split. Returns false for any
+// length that isn't one of the two recognized tiers.
+bool code_split(size_t total, int& lookupLen, int& keyLen) {
+    if (total == static_cast<size_t>(kShortCodeLength)) {
+        lookupLen = kShortLookupLen; keyLen = kShortKeyPartLen; return true;
+    }
+    if (total == static_cast<size_t>(kLongCodeLength)) {
+        lookupLen = kLongLookupLen; keyLen = kLongKeyPartLen; return true;
+    }
+    return false;
+}
+
 } // namespace
 
-std::string random_room_code() {
-    std::vector<uint8_t> rb = random_bytes(kRoomCodeLength);
+std::string random_room_code(bool longCode) {
+    int n = longCode ? kLongCodeLength : kShortCodeLength;
+    std::vector<uint8_t> rb = random_bytes(static_cast<size_t>(n));
     std::string code;
-    code.reserve(kRoomCodeLength);
+    code.reserve(static_cast<size_t>(n));
     for (uint8_t b : rb) code.push_back(kBase91Alphabet[b % kBase91Base]);
     return code;
 }
 
 bool looks_like_room_code(const std::string& text) {
     std::string s = clean_one_line(text);
-    return s.size() == kRoomCodeLength && base91_is_clean(s);
+    int lookupLen = 0, keyLen = 0;
+    return code_split(s.size(), lookupLen, keyLen) && base91_is_clean(s);
+}
+
+std::string room_lookup_id(const std::string& code) {
+    int lookupLen = 0, keyLen = 0;
+    if (!code_split(code.size(), lookupLen, keyLen)) return code;
+    return code.substr(0, static_cast<size_t>(lookupLen));
 }
 
 bool seal_for_offline(const Token& tok, std::string& offlineBlob, std::string& err) {
@@ -280,8 +300,9 @@ bool open_offline_blob(const std::string& blob, Token& out, std::string& err) {
 
 bool seal_for_cloud(const Token& tok, const std::string& roomCode, CloudRecord& rec,
                     std::string& ownerOut, std::string& err) {
-    if (roomCode.size() != kRoomCodeLength) { err = "bad room code"; return false; }
-    std::string keyPart = roomCode.substr(kLookupLen, kKeyPartLen);
+    int lookupLen = 0, keyLen = 0;
+    if (!code_split(roomCode.size(), lookupLen, keyLen)) { err = "bad room code"; return false; }
+    std::string keyPart = roomCode.substr(lookupLen, keyLen);
 
     std::vector<uint8_t> blobKey, bundle;
     seal_token(tok, blobKey, bundle);
@@ -303,7 +324,7 @@ bool seal_for_cloud(const Token& tok, const std::string& roomCode, CloudRecord& 
     wrapped.insert(wrapped.end(), wtag, wtag + 16);
 
     ownerOut = base91_encode(random_bytes(16));
-    rec.lookupId = roomCode.substr(0, kLookupLen);
+    rec.lookupId = roomCode.substr(0, lookupLen);
     rec.salt = base91_encode(salt);
     rec.wrapped = base91_encode(wrapped);
     rec.payload = base91_encode(bundle);
@@ -314,8 +335,9 @@ bool seal_for_cloud(const Token& tok, const std::string& roomCode, CloudRecord& 
 bool open_cloud_record(const std::string& roomCode, const std::string& saltB91,
                        const std::string& wrappedB91, const std::string& payloadB91,
                        Token& out, std::string& err) {
-    if (roomCode.size() != kRoomCodeLength) { err = "bad room code"; return false; }
-    std::string keyPart = roomCode.substr(kLookupLen, kKeyPartLen);
+    int lookupLen = 0, keyLen = 0;
+    if (!code_split(roomCode.size(), lookupLen, keyLen)) { err = "bad room code"; return false; }
+    std::string keyPart = roomCode.substr(lookupLen, keyLen);
 
     bool ok = false;
     std::vector<uint8_t> salt = base91_decode(saltB91, &ok);
@@ -554,20 +576,22 @@ int main() {
     Token back;
     ok = ok && seal_for_offline(tok, blob, err) && open_offline_blob(blob, back, err) && same(tok, back);
 
-    // Cloudflare record round-trip.
-    std::string code = random_room_code();
-    CloudRecord rec;
-    std::string owner;
-    Token back2;
-    ok = ok && seal_for_cloud(tok, code, rec, owner, err) &&
-         open_cloud_record(code, rec.salt, rec.wrapped, rec.payload, back2, err) && same(tok, back2);
+    // Cloudflare record round-trip, both code tiers (short read-only, long read-write).
+    for (bool longCode : {false, true}) {
+        std::string code = random_room_code(longCode);
+        CloudRecord rec;
+        std::string owner;
+        Token back2;
+        ok = ok && seal_for_cloud(tok, code, rec, owner, err) &&
+             open_cloud_record(code, rec.salt, rec.wrapped, rec.payload, back2, err) && same(tok, back2);
 
-    // Wrong secret half must fail.
-    std::string wrong = code;
-    wrong[kLookupLen] = (wrong[kLookupLen] == 'A') ? 'B' : 'A';
-    Token bad;
-    bool wrongFails = !open_cloud_record(wrong, rec.salt, rec.wrapped, rec.payload, bad, err);
-    ok = ok && wrongFails;
+        // Wrong secret half must fail (flip the last char, which is always in the secret half).
+        std::string wrong = code;
+        size_t pos = code.size() - 1;
+        wrong[pos] = (wrong[pos] == 'A') ? 'B' : 'A';
+        Token bad;
+        ok = ok && !open_cloud_record(wrong, rec.salt, rec.wrapped, rec.payload, bad, err);
+    }
 
     std::printf("%s\n", ok ? "signaling self-test PASS" : "signaling self-test FAIL");
     return ok ? 0 : 1;

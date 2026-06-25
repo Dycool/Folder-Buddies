@@ -3,7 +3,7 @@
 // The host seals the connection Token (ip/port/folder/data-path secret) once.
 // The data-path secret is delivered to the client without the client ever typing
 // a password: either embedded in a long offline blob, or wrapped behind the
-// secret half of a short 10-char code that Cloudflare never receives.
+// secret half of a short room code that Cloudflare never receives.
 #pragma once
 
 #include "token.h"
@@ -12,13 +12,24 @@
 
 namespace fb {
 
-constexpr int kRoomCodeLength = 10;
-constexpr int kLookupLen = 2;   // public half: the Cloudflare KV key
-constexpr int kKeyPartLen = 8;  // secret half: never sent to Cloudflare (~52-bit)
+// Connect codes come in two tiers, told apart purely by total length so a
+// connecting client needs no out-of-band hint:
+//   * read-only (default): 4-char public lookup + 2-char secret half  ( 6 total)
+//   * read-write:          8-char public lookup + 8-char secret half  (16 total)
+// The host issues the long, ~52-bit tier exactly when it grants write access,
+// because tampering is the higher-stakes capability; read-only stays short for
+// convenience. The lookup is the public Cloudflare/Firebase key; the secret half
+// is never sent to the server.
+constexpr int kShortLookupLen = 4;
+constexpr int kShortKeyPartLen = 2;
+constexpr int kShortCodeLength = kShortLookupLen + kShortKeyPartLen;   // 6
+constexpr int kLongLookupLen = 8;
+constexpr int kLongKeyPartLen = 8;
+constexpr int kLongCodeLength = kLongLookupLen + kLongKeyPartLen;      // 16
 constexpr int kRoomTtlSeconds = 30 * 24 * 60 * 60;
 
 struct HostedShareTicket {
-    std::string roomCode;       // 6 Base91 chars when Cloudflare publish succeeds
+    std::string roomCode;       // the issued connect code when Cloudflare publish succeeds
     std::string offlineBlob;    // long self-contained Base91 blob
     std::string connectCode;    // roomCode if cloudPublished, otherwise offlineBlob
     std::string ownerToken;     // delete credential, not shown to the user
@@ -38,8 +49,13 @@ struct CloudRecord {
     std::string owner;      // delete credential
 };
 
-std::string random_room_code();                       // 6 Base91 chars
-bool looks_like_room_code(const std::string& text);   // exactly 6 clean Base91
+// Generate a connect code: the long read-write tier when `longCode` is set,
+// otherwise the short read-only tier.
+std::string random_room_code(bool longCode);
+// True for a clean Base91 code of either tier (6 or 16 chars).
+bool looks_like_room_code(const std::string& text);
+// The public lookup half (Cloudflare/Firebase key) of a connect code.
+std::string room_lookup_id(const std::string& code);
 
 // Seal `tok` into a self-contained offline blob (embeds its own key).
 bool seal_for_offline(const Token& tok, std::string& offlineBlob, std::string& err);

@@ -9,8 +9,10 @@
 // encrypted WebRTC signaling. File bytes never touch Cloudflare.
 
 const BASE91 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+,-./:;<=>?@[]^_`{|}~";
-const LOOKUP_LEN = 2;
-const ROOM_RE = new RegExp(`^[${BASE91.replace(/[\\^$.*+?()[\]{}|\-]/g, "\\$&")}]{${LOOKUP_LEN}}$`);
+// Public lookup half of a connect code: 4 chars (read-only tier) or 8 (read-write).
+const LOOKUP_LENS = [4, 8];
+const BASE91_CLASS = `[${BASE91.replace(/[\\^$.*+?()[\]{}|\-]/g, "\\$&")}]`;
+const ROOM_RE = new RegExp(`^(?:${LOOKUP_LENS.map((n) => `${BASE91_CLASS}{${n}}`).join("|")})$`);
 const ROOM_TTL_SECONDS = 30 * 24 * 60 * 60;
 const RATE_LIMIT_TTL_SECONDS = 60;
 const RATE_LIMIT_MAX = 5;

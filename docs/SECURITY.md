@@ -54,13 +54,24 @@ See [how-it-works.md](how-it-works.md) for the full protocol and architecture.
 
 These are deliberate design tradeoffs, documented so you can choose appropriately:
 
-- **Short 10-character codes have a ~52-bit secret.** The secret half is 8 Base91
-  characters, hardened with Argon2id and bounded by the room TTL. The public
-  lookup half is only 2 characters and therefore enumerable, so the secret half is
-  what resists an offline brute-force. At ~52 bits behind Argon2id this is a hard
-  target, but **for the strongest protection use the native client's "Secure hash
-  code" option or the self-contained offline blob**, which carry a full 256-bit
-  secret.
+- **Connect codes come in two tiers, and the read-only default is deliberately
+  weak.** A share's code length is chosen by the access it grants:
+  - **Read-only (default): a 6-character code** = 4-char public lookup + a **2-char
+    (~13-bit) secret half**. This is *not* meant to resist an attacker who already
+    holds the record: under a signaling-server breach or malicious insider (someone
+    who can dump the KV/Firebase record), a read-only share is decryptable in roughly
+    8,281 Argon2id guesses (seconds). Against an outside attacker it still requires
+    first finding a live 4-char lookup. Use read-only sharing for content where that
+    exposure is acceptable.
+  - **Read-write: a 16-character code** = 8-char public lookup + an **8-char
+    (~52-bit) secret half**, hardened with Argon2id. The host issues this tier
+    automatically whenever it grants write access, because tampering is the
+    higher-stakes capability. At ~52 bits behind Argon2id this is a hard target even
+    against a record dump.
+
+  In both tiers the secret half never reaches the server. **For the strongest
+  protection regardless of tier, use the native client's "Secure hash code" option
+  or the self-contained offline blob**, which carry a full 256-bit secret.
 - **Folder name during the native handshake.** The connecting client sends only a
   SHA-256 of the share's folder name in the initial (pre-encryption) `HELLO`
   message — never the literal name — so a passive observer cannot read it off the

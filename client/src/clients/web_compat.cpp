@@ -55,7 +55,7 @@ std::string strip_ws(std::string s) {
 }
 
 std::string lookup_of(const std::string& code) {
-    return code.size() >= static_cast<size_t>(kLookupLen) ? code.substr(0, kLookupLen) : code;
+    return room_lookup_id(code);
 }
 
 bool normalize_rel(const std::string& in, std::string& out) {
@@ -841,7 +841,7 @@ WebRtcCompatHost::WebRtcCompatHost() : impl_(new Impl) {}
 WebRtcCompatHost::~WebRtcCompatHost() { stop(); }
 
 bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomCode, bool allowWrites, int maxClients, std::string& err) {
-    if (!looks_like_room_code(roomCode)) { err = "WebRTC compatibility needs a 10-character room code"; return false; }
+    if (!looks_like_room_code(roomCode)) { err = "WebRTC compatibility needs a 6- or 16-character room code"; return false; }
     impl_->root = fs::weakly_canonical(folder).string();
     impl_->allowWrites = allowWrites;
     impl_->maxClients = maxClients;

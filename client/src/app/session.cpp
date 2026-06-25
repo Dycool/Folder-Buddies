@@ -56,7 +56,7 @@ bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int po
         SignalingClient sig;
         if (SignalingClient::configured()) {
             for (int attempt = 0; attempt < 12; ++attempt) {
-                std::string room = random_room_code();
+                std::string room = random_room_code(allowWrites);
                 CloudRecord rec;
                 std::string owner;
                 if (!seal_for_cloud(tok, room, rec, owner, e)) { ticket.cloudStatus = e; continue; }
@@ -80,7 +80,7 @@ bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int po
             std::string firebaseLast;
             FirebaseSignalingClient fb;
             for (int attempt = 0; attempt < 12; ++attempt) {
-                std::string room = random_room_code();
+                std::string room = random_room_code(allowWrites);
                 CloudRecord rec;
                 std::string owner;
                 if (!seal_for_cloud(tok, room, rec, owner, e)) { firebaseLast = e; continue; }
@@ -120,11 +120,11 @@ bool remove_published_room(const HostedShareTicket& ticket, std::string& err) {
 
 bool resolve_share_code(const std::string& codeOrBlob, Token& tok, std::string& err) {
     if (codeOrBlob.rfind("FBS2:", 0) == 0 || codeOrBlob.rfind("FBW2O:", 0) == 0 || codeOrBlob.rfind("FBW2A:", 0) == 0) {
-        err = "that is a web-browser WebRTC code. Native clients need a 10-character native room code or native offline Base91 blob.";
+        err = "that is a web-browser WebRTC code. Native clients need a native room code (6 or 16 chars) or native offline Base91 blob.";
         return false;
     }
     if (looks_like_room_code(codeOrBlob)) {
-        std::string lookupId = codeOrBlob.substr(0, kLookupLen);
+        std::string lookupId = room_lookup_id(codeOrBlob);
         std::string salt, wrapped, payload;
         std::string cloudErr, firebaseErr;
         SignalingClient sig;

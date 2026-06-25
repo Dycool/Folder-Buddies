@@ -8,7 +8,7 @@
 
 🔒 **End-to-end encrypted** — Every filesystem byte after the handshake is sealed with ChaCha20-Poly1305.
 
-👥 **No password to type** — Share a 10-character code or a self-contained offline blob. The client splits, fetches, and unwraps everything locally.
+👥 **No password to type** — Share a short room code or a self-contained offline blob. The client splits, fetches, and unwraps everything locally.
 
 🌐 **Works everywhere** — Native Linux FUSE, Windows ProjFS, macOS FUSE-T, and a browser-based webapp for quick access.
 
@@ -31,7 +31,7 @@
 ```
 folderbuddies host /path/to/folder [--lan] [--port N] [--max-clients N]
 ```
-This prints either a **10-character room code** (Cloudflare) or a **long offline blob**. Share one with the client.
+This prints either a **room code** (Cloudflare) or a **long offline blob**. Share one with the client. Read-only shares use a short 6-char code; enabling writes (`--write`) issues a stronger 16-char code.
 
 **2. 🔗 Connect using just that code**
 ```
@@ -50,7 +50,7 @@ The host seals connection metadata (IP, port, folder name, 256-bit session secre
 
 | Method | How it works |
 |---|---|
-| **10-char code** | Public 2-char lookup half → Cloudflare KV. Secret 8-char half never leaves the client. The KV value stores metadata wrapped under `Argon2id(secret half)`. |
+| **Room code** | Two tiers by access: read-only **6-char** (4-char lookup + ~13-bit secret) and read-write **16-char** (8-char lookup + ~52-bit secret). The public lookup half → Cloudflare KV; the secret half never leaves the client. The KV value stores metadata wrapped under `Argon2id(secret half)`. |
 | **Offline blob** | Self-contained Base91 string with its own 256-bit key. No server needed. |
 
 Cloudflare stores only the lookup half and an opaque encrypted record — never the IP, port, folder name, data-path secret, or secret half of the code.

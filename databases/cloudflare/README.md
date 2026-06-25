@@ -3,10 +3,10 @@
 The Worker exposes only:
 
 - `POST /create`
-- `GET /room?code=<2-char lookup>`
-- `DELETE /room?code=<2-char lookup>`
+- `GET /room?code=<lookup>`
+- `DELETE /room?code=<lookup>`
 
-Native app mode uses KV: the **public 2-char lookup half** of the code is the key, and the value is an opaque sealed record (the connection metadata plus a key wrapped under `Argon2id` of the *secret* half of the code, which never reaches Cloudflare). It never stores plaintext IP, port, folder name, filesystem secret, or the secret half of the code. Deletes are gated by a random owner token (`X-FB-Owner`).
+The lookup is the public half of a connect code — **4 chars** for read-only shares or **8 chars** for read-write shares. Native app mode uses KV: the lookup half is the key, and the value is an opaque sealed record (the connection metadata plus a key wrapped under `Argon2id` of the *secret* half of the code, which never reaches Cloudflare). It never stores plaintext IP, port, folder name, filesystem secret, or the secret half of the code. Deletes are gated by a random owner token (`X-FB-Owner`).
 
 Webapp mode reuses `GET /room` as a WebSocket upgrade. The Worker routes each room to a Durable Object that forwards encrypted WebRTC signaling messages between host and client. It does not store or relay file bytes.
 
@@ -101,8 +101,8 @@ Two recommendations are zone settings that must be toggled in the Cloudflare das
 The static webapp connects to:
 
 ```text
-wss://<worker-host>/room?code=<2-char lookup>&role=host&web=1
-wss://<worker-host>/room?code=<2-char lookup>&role=client&web=1
+wss://<worker-host>/room?code=<lookup>&role=host&web=1
+wss://<worker-host>/room?code=<lookup>&role=client&web=1
 ```
 
 The Durable Object sees only the public lookup half, peer IDs, and opaque encrypted signaling blobs. SDP offers/answers are encrypted in the browser with a key derived (via Argon2id) from the secret half of the code before being sent to Cloudflare. Actual folder data moves over WebRTC DataChannel directly between browsers.

@@ -44,19 +44,21 @@ handshake → HMAC-SHA256 → master secret
 
 The host never types a password. The connection metadata (IP, port, folder name, 256-bit data-path secret) is sealed into a share code in one of two forms:
 
-**10-character room code (Cloudflare)** — The code is split at character 2:
-- **Lookup half** (chars 0-1, public) — the Cloudflare KV key.
-- **Secret half** (chars 2-9, never leaves the client).
-The KV value holds the metadata encrypted under `Argon2id(secret half)`. Cloudflare only stores the lookup key and an opaque blob — it never receives the IP, port, folder name, or secret half.
+**Room code (Cloudflare)** — The code comes in two tiers, told apart purely by total length, and is split into a public lookup half (the Cloudflare KV key) and a secret half that never leaves the client:
+- **Read-only (default): 6 chars** = 4-char lookup + 2-char (~13-bit) secret half.
+- **Read-write: 16 chars** = 8-char lookup + 8-char (~52-bit) secret half. The host issues this stronger tier automatically whenever it grants write access, since tampering is the higher-stakes capability.
+
+The KV value holds the metadata encrypted under `Argon2id(secret half)`. Cloudflare only stores the lookup key and an opaque blob — it never receives the IP, port, folder name, or secret half. (Because the read-only secret is only ~13 bits, a read-only share is decryptable by anyone who can dump the stored record; use read-write or the offline blob for content that must survive a server compromise.)
 
 If Cloudflare is unreachable or rate-limited, the client transparently falls back to **Firebase Realtime Database** using the same record format, then to the self-contained offline blob.
 
 **Offline blob (self-contained)** — A long Base91 string embedding its own 256-bit key. No server needed at all. Used when Cloudflare is unavailable or when `--secure-hash` is set.
 
 ```
-                        ┌── lookup 2 chars → KV key
-10-char code ──────────┤
-                        └── secret 8 chars → Argon2id → wrap key
+read-only 6-char code ──┬── lookup 4 chars → KV key
+                        └── secret 2 chars ┐
+read-write 16-char code ┬── lookup 8 chars → KV key
+                        └── secret 8 chars ┴→ Argon2id → wrap key
                                                   │
                                     decrypts blob key → decrypts token
 
@@ -65,7 +67,7 @@ Offline blob ─── Base91 decode ─── extract blob key ─── decryp
 
 ### libsodium / Argon2id
 
-The secret half of the 10-character code protects the wrapped blob key with **Argon2id** (3 iterations, 64 MiB memory, 16-byte salt). This makes brute-forcing the ~52-bit secret half expensive while keeping the online path fast for legitimate clients. The webapp uses the same parameters via `@noble/hashes` so both sides derive identical wrap keys.
+The secret half of the room code protects the wrapped blob key with **Argon2id** (3 iterations, 64 MiB memory, 16-byte salt). For the read-write tier this makes brute-forcing the ~52-bit secret half expensive while keeping the online path fast for legitimate clients; the read-only tier's 2-char (~13-bit) secret is intentionally light (see the tradeoff note above). The webapp uses the same parameters via `@noble/hashes` so both sides derive identical wrap keys.
 
 ---
 

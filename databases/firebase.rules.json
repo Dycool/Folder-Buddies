@@ -80,7 +80,7 @@
           ".validate": "newData.isNumber() && newData.val() === 1"
         },
         "lookup": {
-          ".validate": "newData.isString() && newData.val().length === 2"
+          ".validate": "newData.isString() && (newData.val().length === 4 || newData.val().length === 8)"
         },
         "salt": {
           ".validate": "newData.isString() && newData.val().length >= 4 && newData.val().length <= 8192"
