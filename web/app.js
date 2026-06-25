@@ -235,7 +235,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (state.turnstileWidgetId === null) {
       state.turnstileWidgetId = window.turnstile.render(els.turnstileMount, {
         sitekey,
-        size: "invisible",
+        execution: "execute",
+        appearance: "interaction-only",
         callback: (token) => {
           if (state.turnstileResolver) {
             state.turnstileResolver.resolve(token || "");
@@ -311,7 +312,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     for (let attempt = 0; attempt < 12; ++attempt) {
       const code = randomRoom();
       const lookup = lookupOf(code);
-      const token = await turnstileToken().catch(() => "");
+      const token = await turnstileToken();
       const ws = await openSignal("host", lookup, (msg) => handleHostSignal(msg).catch((err) => toast(err.message)), token);
       const claimed = await new Promise((resolve) => {
         const onReady = (event) => {
