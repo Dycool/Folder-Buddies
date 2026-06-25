@@ -295,8 +295,8 @@ QWidget* MainWindow::buildShareTab() {
     auto* tl = new QHBoxLayout(tokenRow);
     tl->setContentsMargins(0, 0, 0, 0);
     tl->setSpacing(8);
-    tokenEdit_ = codeEdit("6-char room code, secure hash code, or offline blob appears here", true);
-    copyButton_ = new QPushButton("Copy all");
+    tokenEdit_ = codeEdit("", true);
+    copyButton_ = new QPushButton("Copy");
     copyButton_->setEnabled(false);
     connect(copyButton_, &QPushButton::clicked, this, &MainWindow::copyToken);
     tl->addWidget(tokenEdit_);
@@ -326,7 +326,7 @@ QWidget* MainWindow::buildConnectTab() {
     form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
 
-    tokenInput_ = codeEdit("paste the 6-char room code, secure hash code, share link, or offline offer code");
+    tokenInput_ = codeEdit("");
     form->addRow("Connect code:", tokenInput_);
 
     auto* mbRow = new QWidget;
@@ -462,11 +462,7 @@ void MainWindow::onClientsChanged() {
 }
 
 void MainWindow::copyToken() {
-    QString text = "Connect code:\n" + tokenEdit_->toPlainText();
-    if (offlineEdit_->isVisible() && !offlineEdit_->toPlainText().isEmpty()) {
-        text += "\n\nOffline fallback:\n" + offlineEdit_->toPlainText();
-    }
-    QApplication::clipboard()->setText(text);
+    QApplication::clipboard()->setText(tokenEdit_->toPlainText());
 }
 
 

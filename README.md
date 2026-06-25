@@ -6,9 +6,9 @@
 
 **Zero-knowledge, cross-platform P2P virtual filesystem — host a folder on one machine, mount it as a real volume on another.**
 
-🔒 **End-to-end encrypted** — Every filesystem byte after the handshake is sealed with ChaCha20-Poly1305. Cloudflare never sees your data.
+🔒 **End-to-end encrypted** — Every filesystem byte after the handshake is sealed with ChaCha20-Poly1305.
 
-👥 **No password to type** — Share a 6-character room code or a self-contained offline blob. The client splits, fetches, and unwraps everything locally.
+👥 **No password to type** — Share a 6-character code or a self-contained offline blob. The client splits, fetches, and unwraps everything locally.
 
 🌐 **Works everywhere** — Native Linux FUSE, Windows ProjFS, macOS FUSE-T, and a browser-based webapp for quick access.
 
@@ -16,7 +16,7 @@
 
 🔄 **Automatic fallback** — If Cloudflare is rate-limited or unreachable, the client transparently falls back to Firebase Realtime Database, then to the self-contained offline blob.
 
-🖥️ **CLI + GUI** — Both interfaces expose the same host/connect flow. There is no password field on either side.
+🖥️ **CLI + GUI** — Both interfaces expose the same host/connect flow.
 
 > **Pre-compiled Binaries Available!**
 > You can download the desktop client for Windows, macOS, and Linux directly from the **[Releases](https://github.com/anomalyco/Folder-Buddies/releases)** page.

@@ -39,6 +39,8 @@ jobs:
         run: |
           pip install aqtinstall
           aqt install-qt -O "${{ github.workspace }}\qt" windows desktop "${{ env.QT_VERSION }}" win64_msvc2022_64
+          $qtBin = "${{ github.workspace }}\qt\${{ env.QT_VERSION }}\msvc2022_64\bin"
+          Add-Content $env:GITHUB_PATH "$qtBin"
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v5
@@ -93,14 +95,13 @@ jobs:
         run: |
           cmake --build build --config $env:BUILD_TYPE --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ctest --test-dir build --output-on-failure -C $env:BUILD_TYPE
+          ctest --test-dir build --output-on-failure -C $env:BUILD_TYPE --timeout 120
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Deploy Qt DLLs
         shell: pwsh
         run: |
           $qtBin = "${{ github.workspace }}\qt\${{ env.QT_VERSION }}\msvc2022_64\bin"
-          Add-Content $env:GITHUB_PATH "$qtBin"
           & "$qtBin\windeployqt.exe" build/folderbuddies.exe
 
       - name: Package

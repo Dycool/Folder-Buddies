@@ -5,7 +5,7 @@ Static browser client for GitHub Pages. The UI has two tabs, **Host** and
 
 - **Host** — pick a folder, optionally allow writes, optionally cap the number
   of clients, then press *Host*. The app claims a free 6-character room on the
-  primary Cloudflare relay and shows the **connect code** plus share link.
+  primary Cloudflare relay and shows the **connect code**.
 - **Connect** — paste the connect code or share link, press *Connect & browse*,
   and the remote file explorer opens inline. Selected files stream over a WebRTC
   DataChannel.

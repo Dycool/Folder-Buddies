@@ -43,8 +43,11 @@ import { argon2id } from "./vendor/noble/argon2.js";
     explorer: $("explorer"),
     currentPath: $("currentPath"),
     upButton: $("upButton"),
+    shareFolderButton: $("shareFolderButton"),
     uploadButton: $("uploadButton"),
     uploadInput: $("uploadInput"),
+    uploadFolderButton: $("uploadFolderButton"),
+    folderUploadInput: $("folderUploadInput"),
     dropzone: $("dropzone"),
     fileRows: $("fileRows"),
     transfers: $("transfers"),
@@ -56,6 +59,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     previewBody: $("previewBody"),
     closePreview: $("closePreview"),
     savePreview: $("savePreview"),
+    unsupportedBrowser: $("unsupportedBrowser"),
   };
 
   const state = {
@@ -64,12 +68,15 @@ import { argon2id } from "./vendor/noble/argon2.js";
     lookup: "",        // public half (relay room)
     secureSecret: "",  // optional high-entropy web secret for secure-hash mode
     connectToken: "",  // what the host shows/copies to clients
+    pendingConnectToken: "", // hidden token loaded from URL hashes/direct links
     rootBase: null,    // HKDF base key derived from the secret half or secureSecret
     maxClients: 0,
     allowWrites: false,
     clientCanWrite: false,
     directFilePath: "",
     directFileConsumed: false,
+    directFolderPath: "",
+    directFolderConsumed: false,
     hostWs: null,
     clientWs: null,
     hostPeers: new Map(),
@@ -282,6 +289,47 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return !!(f.apiKey && f.databaseURL && f.projectId);
   }
 
+  function unsupportedBrowserReasons() {
+    const missing = [];
+    const c = globalThis.crypto;
+    if (!c || typeof c.getRandomValues !== "function" || !c.subtle) missing.push("Web Crypto");
+    if (!globalThis.RTCPeerConnection) missing.push("WebRTC");
+    if (!globalThis.WebSocket) missing.push("WebSockets");
+    if (!globalThis.TextEncoder || !globalThis.TextDecoder) missing.push("text encoding");
+    if (!globalThis.Blob || !globalThis.URL || typeof URL.createObjectURL !== "function") missing.push("downloads");
+    if (!globalThis.URLSearchParams) missing.push("share links");
+    return missing;
+  }
+
+  function supportsHosting() {
+    return typeof window.showDirectoryPicker === "function";
+  }
+
+  function supportsFolderUpload() {
+    const input = document.createElement("input");
+    return typeof window.showDirectoryPicker === "function" || "webkitdirectory" in input;
+  }
+
+  function blockUnsupportedBrowser(missing) {
+    document.querySelector(".window").hidden = true;
+    if (els.unsupportedBrowser) {
+      const detail = els.unsupportedBrowser.querySelector("[data-unsupported-detail]");
+      if (detail && missing.length) detail.textContent = `Missing: ${missing.join(", ")}.`;
+      els.unsupportedBrowser.hidden = false;
+    }
+  }
+
+  function disableHostTab() {
+    const tab = document.querySelector('[data-tab="share"]');
+    const page = document.querySelector('[data-page="share"]');
+    if (tab) {
+      tab.hidden = true;
+      tab.disabled = true;
+    }
+    if (page) page.hidden = true;
+    selectTab("connect");
+  }
+
   function firebaseRoomPath(lookup) {
     const safe = btoa(lookup).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
     return `webRooms/${safe}`;
@@ -449,8 +497,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
   }
 
-  function resolveConnectToken(raw) {
-    const codeOrToken = parseJoinInput(raw);
+  function resolveConnectToken(raw, options = {}) {
+    const codeOrToken = parseJoinInput(raw, options);
     if (isSecureWebCode(codeOrToken)) {
       const s = decodeSecureWebCode(codeOrToken);
       return { code: s.code, lookup: lookupOf(s.code), secureSecret: s.secret, token: codeOrToken };
@@ -487,21 +535,29 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return JSON.parse(td.decode(plain));
   }
 
-  function shareLink(code, path = "") {
+  function shareLink(code, path = "", kind = "file") {
     const params = new URLSearchParams();
     params.set("r", code);
-    if (path) params.set("f", normalizePath(path));
+    if (path) params.set(kind === "folder" ? "p" : "f", normalizePath(path));
     return `${location.origin}${location.pathname}#${params.toString()}`;
   }
 
-  function parseJoinInput(raw) {
+  function activeShareToken() {
+    return state.connectToken || state.code;
+  }
+
+  function parseJoinInput(raw, options = {}) {
     const text = clean(raw);
     const fromHash = (frag) => {
       const params = new URLSearchParams(frag);
       const file = params.get("f") || "";
-      const direct = file ? normalizePath(file) : "";
-      state.directFilePath = direct && direct !== "/" ? direct : "";
+      const folder = params.get("p") || params.get("d") || "";
+      const directFile = file ? normalizePath(file) : "";
+      const directFolder = folder ? normalizePath(folder) : "";
+      state.directFilePath = directFile && directFile !== "/" ? directFile : "";
+      state.directFolderPath = !state.directFilePath && directFolder ? directFolder : "";
       state.directFileConsumed = false;
+      state.directFolderConsumed = false;
       return params.get("r") || "";
     };
     try {
@@ -509,27 +565,42 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const r = fromHash(url.hash.slice(1));
       if (r) return r;
     } catch { /* not a URL */ }
-    if (text.includes("#")) {
-      const r = fromHash(text.split("#").pop());
-      if (r) return r;
+    const hashAt = text.indexOf("#");
+    if (hashAt >= 0) {
+      const frag = text.slice(hashAt + 1);
+      if (new URLSearchParams(frag).has("r")) {
+        const r = fromHash(frag);
+        if (r) return r;
+      }
     }
-    state.directFilePath = "";
-    state.directFileConsumed = false;
+    if (!options.preserveDirect) {
+      state.directFilePath = "";
+      state.directFileConsumed = false;
+      state.directFolderPath = "";
+      state.directFolderConsumed = false;
+    }
     return text;
   }
 
   function applyHash() {
-    if (!location.hash) return;
+    if (!location.hash) return false;
     const params = new URLSearchParams(location.hash.slice(1));
     const room = params.get("r") || "";
     const file = params.get("f") || "";
+    const folder = params.get("p") || params.get("d") || "";
     if (looksLikeRoom(room) || isSecureWebCode(room)) {
-      els.connectInput.value = room;
-      const direct = file ? normalizePath(file) : "";
-      state.directFilePath = direct && direct !== "/" ? direct : "";
+      state.pendingConnectToken = room;
+      const directFile = file ? normalizePath(file) : "";
+      const directFolder = folder ? normalizePath(folder) : "";
+      state.directFilePath = directFile && directFile !== "/" ? directFile : "";
+      state.directFolderPath = !state.directFilePath && directFolder ? directFolder : "";
       state.directFileConsumed = false;
+      state.directFolderConsumed = false;
+      els.connectInput.value = state.directFilePath || state.directFolderPath ? "" : room;
       selectTab("connect");
+      return !!(state.directFilePath || state.directFolderPath);
     }
+    return false;
   }
 
   async function turnstileToken() {
@@ -946,9 +1017,16 @@ import { argon2id } from "./vendor/noble/argon2.js";
       if (state.directFilePath && !state.directFileConsumed) {
         state.directFileConsumed = true;
         const filePath = state.directFilePath;
-        listRemote(parentPath(filePath)).then(() => {
-          toast("Direct file link opened");
-          return downloadRemote({ name: basename(filePath), path: filePath, kind: "file" });
+        setConnectStatus("Connected. Downloading…");
+        downloadRemote({ name: basename(filePath), path: filePath, kind: "file" }, { browserDownload: true, direct: true })
+          .then(() => toast("Download started"))
+          .catch((e) => toast(e.message));
+      } else if (state.directFolderPath && !state.directFolderConsumed) {
+        state.directFolderConsumed = true;
+        const folderPath = state.directFolderPath;
+        listRemote(folderPath).then(() => {
+          setConnectStatus("Connected.");
+          toast("Folder opened");
         }).catch((e) => toast(e.message));
       } else {
         listRemote("/").catch((e) => toast(e.message));
@@ -1080,6 +1158,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       }
       d.label.textContent = `${d.name} — done`;
       d.progress.value = d.progress.max;
+      if (d.mode === "direct") setConnectStatus("Download complete.");
     } catch (e) {
       d.reject?.(e);
       throw e;
@@ -1120,12 +1199,19 @@ import { argon2id } from "./vendor/noble/argon2.js";
       await assertHostWritable();
       const path = normalizePath(msg.path || "/");
       if (path === "/") throw new Error("Bad upload path");
-      const parent = await directoryHandleFor(parentPath(path));
+      const parent = await ensureDirectoryHandle(parentPath(path));
       const name = safeEntryName(basename(path));
       const fileHandle = await parent.getFileHandle(name, { create: true });
       const writer = await fileHandle.createWritable();
       state.uploads.set(msg.id, { writer, writeQueue: Promise.resolve(), received: 0, size: Number(msg.size || 0), name });
       safeSendJson(dc, { t: "uploadReady", id: msg.id });
+      return;
+    }
+    if (msg.t === "mkdir") {
+      await assertHostWritable();
+      const path = normalizePath(msg.path || "/");
+      await ensureDirectoryHandle(path);
+      safeSendJson(dc, { t: "ok", id: msg.id });
       return;
     }
     if (msg.t === "uploadEnd") {
@@ -1212,6 +1298,21 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return normalizePath(`${base.replace(/\/$/, "")}/${safeEntryName(name)}`);
   }
 
+  function safeRelativePath(path) {
+    const safe = [];
+    for (const part of String(path || "").split(/[\\/]+/).filter(Boolean)) {
+      if (part === ".") continue;
+      if (part === "..") safe.pop();
+      else safe.push(safeEntryName(part));
+    }
+    return safe.join("/");
+  }
+
+  function joinSafeRelativePath(base, path) {
+    const rel = safeRelativePath(path);
+    return rel ? normalizePath(`${base.replace(/\/$/, "")}/${rel}`) : normalizePath(base);
+  }
+
   function parentPath(path) {
     const parts = normalizePath(path).split("/").filter(Boolean);
     parts.pop();
@@ -1251,6 +1352,15 @@ import { argon2id } from "./vendor/noble/argon2.js";
   async function directoryHandleFor(path) {
     const handle = await handleForPath(path);
     if (handle.kind !== "directory") throw new Error("Not a directory");
+    return handle;
+  }
+
+  async function ensureDirectoryHandle(path) {
+    let handle = state.rootHandle;
+    for (const part of normalizePath(path).split("/").filter(Boolean)) {
+      if (handle.kind !== "directory") throw new Error("Path is not a directory");
+      handle = await handle.getDirectoryHandle(safeEntryName(part), { create: true });
+    }
     return handle;
   }
 
@@ -1418,12 +1528,13 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   async function pickFolder() {
-    if (!window.showDirectoryPicker) throw new Error("Folder hosting needs Chromium or Edge");
+    if (!supportsHosting()) throw new Error("Hosting is not supported in this browser");
     state.rootHandle = await window.showDirectoryPicker({ mode: wantsWriteAccess() ? "readwrite" : "read" });
     els.folderInput.value = state.rootHandle.name;
   }
 
   async function startHost() {
+    if (!supportsHosting()) throw new Error("Hosting is not supported in this browser");
     if (isMobile()) throw new Error("Hosting is not available on mobile browsers");
     if (!state.rootHandle) await pickFolder();
     setShareStatus("Starting…");
@@ -1492,15 +1603,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   function copyShareDetails() {
-    if (state.manualHost || isWebOfflineOffer(els.connectCode.value)) {
-      return [
-        "Offline web offer code:",
-        els.connectCode.value,
-        "",
-        "The client must paste this into Connect, then send you the generated answer code.",
-      ].join("\n");
-    }
-    return ["Connect code:", els.connectCode.value, "", "Share link:", shareLink(els.connectCode.value)].join("\n");
+    return els.connectCode.value;
   }
 
   function setConnected(connected) {
@@ -1509,10 +1612,12 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   async function connect() {
-    const raw = clean(els.connectInput.value);
+    const rawInput = clean(els.connectInput.value);
+    const raw = rawInput || clean(state.pendingConnectToken);
+    if (!raw) throw new Error("Enter a connect code or open a share link.");
     if (isWebOfflineOffer(raw)) return connectManualOffer(raw);
 
-    const resolved = resolveConnectToken(raw);
+    const resolved = resolveConnectToken(raw, { preserveDirect: !rawInput && !!state.pendingConnectToken });
     if (isWebOfflineOffer(resolved.token)) return connectManualOffer(resolved.token);
     if (!looksLikeRoom(resolved.code)) throw new Error("The browser client accepts 6-character web room codes/share links, secure web codes, or FBW2O offline web offer codes. Native IP/port blobs are for the native app.");
 
@@ -1574,6 +1679,10 @@ import { argon2id } from "./vendor/noble/argon2.js";
     state.clientPeer = null;
     state.dataChannel = null;
     state.clientCanWrite = false;
+    state.directFilePath = "";
+    state.directFileConsumed = false;
+    state.directFolderPath = "";
+    state.directFolderConsumed = false;
     CACHE.clear(); // drop all cached listings/previews on disconnect
     setConnected(false);
     els.explorer.hidden = true;
@@ -1602,9 +1711,41 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
     state.clientCanWrite = !!res.write; // also seeded from cached listings
     state.currentPath = res.path || p;
-    els.currentPath.textContent = state.currentPath;
+    renderCurrentPath(state.currentPath);
+    if (els.upButton) els.upButton.disabled = state.currentPath === "/";
+    if (els.shareFolderButton) els.shareFolderButton.disabled = !activeShareToken();
     renderWriteUi();
     renderRows(res.entries || []);
+  }
+
+  function renderCurrentPath(path) {
+    const p = normalizePath(path);
+    els.currentPath.textContent = "";
+    els.currentPath.title = p;
+
+    const root = document.createElement("button");
+    root.type = "button";
+    root.textContent = "/";
+    root.title = "/";
+    root.onclick = () => listRemote("/").catch((e) => toast(e.message));
+    els.currentPath.appendChild(root);
+
+    let acc = "";
+    for (const part of p.split("/").filter(Boolean)) {
+      acc = `${acc}/${part}`;
+      const sep = document.createElement("span");
+      sep.className = "pathsep";
+      sep.textContent = ">";
+      els.currentPath.appendChild(sep);
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = part;
+      btn.title = acc;
+      const target = acc;
+      btn.onclick = () => listRemote(target).catch((e) => toast(e.message));
+      els.currentPath.appendChild(btn);
+    }
   }
 
   function renderRows(entries) {
@@ -1625,7 +1766,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const name = document.createElement("td");
       name.className = "name";
       name.textContent = e.kind === "directory" ? `📁 ${e.name}` : `📄 ${e.name}`;
-      name.title = e.kind === "directory" ? "Open folder" : "Open preview, or download if unsupported";
+      name.title = e.path || e.name;
       name.onclick = () => previewRemote(e).catch((err) => toast(err.message));
       const size = document.createElement("td");
       size.textContent = e.kind === "file" ? formatSize(e.size || 0) : "—";
@@ -1639,7 +1780,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
         const share = document.createElement("button");
         share.textContent = "Share link";
-        share.onclick = () => copy(shareLink(state.code, e.path)).then(() => toast("File link copied")).catch((err) => toast(err.message));
+        share.onclick = () => copy(shareLink(activeShareToken(), e.path)).then(() => toast("File link copied")).catch((err) => toast(err.message));
         action.appendChild(share);
       }
       if (state.clientCanWrite) {
@@ -1693,11 +1834,11 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return { id, label, progress };
   }
 
-  async function downloadRemote(entry) {
+  async function downloadRemote(entry, options = {}) {
     if (!state.dataChannel || state.dataChannel.readyState !== "open") throw new Error("Not connected");
 
     let writer = null;
-    if (window.showSaveFilePicker) {
+    if (!options.browserDownload && window.showSaveFilePicker) {
       try {
         const saveHandle = await window.showSaveFilePicker({ suggestedName: entry.name });
         writer = await saveHandle.createWritable();
@@ -1708,7 +1849,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
 
     const { id, label, progress } = makeTransfer(entry, "starting");
-    state.downloads.set(id, { name: entry.name, size: entry.size || 0, received: 0, chunks: [], writer, writeQueue: Promise.resolve(), label, progress, mime: mimeForName(entry.name), mode: "download" });
+    state.downloads.set(id, { name: entry.name, size: entry.size || 0, received: 0, chunks: [], writer, writeQueue: Promise.resolve(), label, progress, mime: mimeForName(entry.name), mode: options.direct ? "direct" : "download" });
     safeSendJson(state.dataChannel, { t: "download", id, path: entry.path });
   }
 
@@ -1817,6 +1958,57 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (list.length) await listRemote(state.currentPath);
   }
 
+  async function uploadPickedFolder() {
+    if (!state.clientCanWrite) throw new Error("The host has writes disabled");
+    if (window.showDirectoryPicker) {
+      const handle = await window.showDirectoryPicker({ mode: "read" });
+      await uploadDirectoryHandle(handle);
+      await listRemote(state.currentPath);
+      toast("Folder uploaded");
+      return;
+    }
+    if (els.folderUploadInput && "webkitdirectory" in els.folderUploadInput) {
+      els.folderUploadInput.click();
+      return;
+    }
+    throw new Error("Folder upload is not supported in this browser");
+  }
+
+  async function uploadDirectoryHandle(handle, targetPath = "") {
+    if (handle.kind !== "directory") throw new Error("Choose a folder to upload");
+    const rootPath = targetPath || joinPath(state.currentPath, handle.name || "folder");
+    await createRemoteDirectory(rootPath);
+    for await (const [name, child] of handle.entries()) {
+      const childPath = joinSafeRelativePath(rootPath, name);
+      if (child.kind === "directory") {
+        await uploadDirectoryHandle(child, childPath);
+      } else if (child.kind === "file") {
+        await uploadRemoteFile(await child.getFile(), childPath);
+      }
+    }
+  }
+
+  async function uploadDirectoryFiles(files) {
+    if (!state.clientCanWrite) throw new Error("The host has writes disabled");
+    const list = [...files].filter((f) => f && f.size !== undefined);
+    for (const file of list) {
+      const rel = safeRelativePath(file.webkitRelativePath || file.name);
+      if (!rel) continue;
+      await uploadRemoteFile(file, joinSafeRelativePath(state.currentPath, rel));
+    }
+    if (list.length) {
+      await listRemote(state.currentPath);
+      toast("Folder uploaded");
+    }
+  }
+
+  async function createRemoteDirectory(path) {
+    if (!state.dataChannel || state.dataChannel.readyState !== "open") throw new Error("Not connected");
+    const p = normalizePath(path);
+    await requestJson(state.dataChannel, { t: "mkdir", path: p }, 30000);
+    CACHE.afterWrite(p);
+  }
+
   async function uploadRemoteFile(file, targetPath = "") {
     if (!state.dataChannel || state.dataChannel.readyState !== "open") throw new Error("Not connected");
     const name = safeEntryName(file.name);
@@ -1877,6 +2069,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function renderWriteUi() {
     if (els.uploadButton) els.uploadButton.disabled = !state.clientCanWrite;
+    if (els.uploadFolderButton) els.uploadFolderButton.disabled = !state.clientCanWrite || !supportsFolderUpload();
     if (els.dropzone) {
       els.dropzone.hidden = !state.clientCanWrite;
       els.dropzone.textContent = state.clientCanWrite ? "Drop files here to upload to this folder" : "";
@@ -1913,7 +2106,22 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   function copy(text) {
-    return navigator.clipboard.writeText(text);
+    if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      if (!document.execCommand("copy")) throw new Error("Clipboard copy failed");
+      return Promise.resolve();
+    } catch (e) {
+      return Promise.reject(e);
+    } finally {
+      textarea.remove();
+    }
   }
 
   function selectTab(name) {
@@ -1935,7 +2143,15 @@ import { argon2id } from "./vendor/noble/argon2.js";
       else startHost().catch((e) => { els.shareToggle.disabled = false; toast(e.message); });
     };
 
-    els.copyAll.onclick = () => copy(copyShareDetails()).then(() => toast("Copied")).catch((e) => toast(e.message));
+    els.copyAll.onclick = () => copy(copyShareDetails()).then(() => toast("Code copied")).catch((e) => toast(e.message));
+
+    els.connectInput.oninput = () => {
+      state.pendingConnectToken = "";
+      state.directFilePath = "";
+      state.directFileConsumed = false;
+      state.directFolderPath = "";
+      state.directFolderConsumed = false;
+    };
 
     if (els.applyOfflineAnswer) {
       els.applyOfflineAnswer.onclick = () => applyManualAnswer(els.offlineAnswerInput.value).catch((e) => toast(e.message));
@@ -1956,11 +2172,29 @@ import { argon2id } from "./vendor/noble/argon2.js";
       listRemote("/" + parts.join("/")).catch((e) => toast(e.message));
     };
 
+    if (els.shareFolderButton) {
+      els.shareFolderButton.onclick = () => {
+        const link = shareLink(activeShareToken(), state.currentPath || "/", "folder");
+        copy(link).then(() => toast("Folder link copied")).catch((e) => toast(e.message));
+      };
+    }
+
     if (els.uploadButton && els.uploadInput) {
       els.uploadButton.onclick = () => els.uploadInput.click();
       els.uploadInput.onchange = () => {
         uploadFiles(els.uploadInput.files).catch((e) => toast(e.message));
         els.uploadInput.value = "";
+      };
+    }
+
+    if (els.uploadFolderButton) {
+      els.uploadFolderButton.onclick = () => uploadPickedFolder().catch((e) => toast(e.message));
+    }
+
+    if (els.folderUploadInput) {
+      els.folderUploadInput.onchange = () => {
+        uploadDirectoryFiles(els.folderUploadInput.files).catch((e) => toast(e.message));
+        els.folderUploadInput.value = "";
       };
     }
 
@@ -1990,13 +2224,21 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   function init() {
-    if (isMobile()) {
-      document.querySelector('[data-tab="share"]').hidden = true;
-      document.querySelector('[data-page="share"]').hidden = true;
-      selectTab("connect");
+    const missing = unsupportedBrowserReasons();
+    if (missing.length) {
+      blockUnsupportedBrowser(missing);
+      return;
     }
-    applyHash();
+    if (isMobile() || !supportsHosting()) disableHostTab();
     initEvents();
+    const autoConnect = applyHash();
+    if (autoConnect) {
+      setConnectStatus("Opening shared link…");
+      connect().catch((e) => {
+        setConnectStatus("Not connected.");
+        toast(e.message);
+      });
+    }
     setInterval(refreshStats, STATS_INTERVAL_MS);
     // Hidden devtools-only diagnostic (not a UI setting): console -> fbCacheStats()
     try { window.fbCacheStats = () => CACHE.snapshot(); } catch { /* ignore */ }

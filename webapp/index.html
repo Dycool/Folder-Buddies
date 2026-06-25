@@ -11,15 +11,6 @@
 </head>
 <body>
   <main class="window" aria-label="Folder Buddies">
-    <div class="titlebar">
-      <div class="dots" aria-hidden="true">
-        <span class="dot red"></span>
-        <span class="dot yellow"></span>
-        <span class="dot green"></span>
-      </div>
-      Folder Buddies
-    </div>
-
     <div class="tabbar" role="tablist">
       <button class="tab active" data-tab="share" role="tab" aria-selected="true">Host</button>
       <button class="tab" data-tab="connect" role="tab" aria-selected="false">Connect</button>
@@ -69,8 +60,8 @@
         <div class="row">
           <label for="connectCode">Connect code:</label>
           <div class="field">
-            <textarea id="connectCode" readonly placeholder="6-char room code, secure hash code, or offline offer appears here" rows="3"></textarea>
-            <button id="copyAll" type="button" disabled>Copy all</button>
+            <textarea id="connectCode" readonly rows="3"></textarea>
+            <button id="copyAll" type="button" disabled>Copy</button>
           </div>
         </div>
 
@@ -93,7 +84,7 @@
       <form onsubmit="return false">
         <div class="row">
           <label for="connectInput">Connect code:</label>
-          <textarea id="connectInput" autocomplete="off" placeholder="paste the 6-char room code, secure hash code, share link, or offline offer code" rows="3"></textarea>
+          <textarea id="connectInput" autocomplete="off" rows="3"></textarea>
         </div>
 
         <div id="offlineAnswerOutRow" class="row" hidden>
@@ -117,10 +108,13 @@
 
       <section id="explorer" class="explorer" hidden aria-label="Remote files">
         <div class="explorerbar">
-          <code id="currentPath">/</code>
+          <nav id="currentPath" class="pathbar" aria-label="Current folder"></nav>
           <div class="exploreractions">
             <input id="uploadInput" type="file" multiple hidden>
+            <input id="folderUploadInput" type="file" webkitdirectory directory multiple hidden>
             <button id="uploadButton" type="button" disabled>Upload</button>
+            <button id="uploadFolderButton" type="button" disabled>Upload folder</button>
+            <button id="shareFolderButton" type="button">Share link</button>
             <button id="upButton" type="button">Up</button>
           </div>
         </div>
@@ -145,6 +139,12 @@
 
     <div class="statusbar"><span id="statsLabel">Idle</span></div>
   </main>
+
+  <section id="unsupportedBrowser" class="unsupported" role="alert" hidden>
+    <strong>Unsupported browser</strong>
+    <span>Folder Buddies needs a current browser with WebRTC, Web Crypto, WebSockets, and downloads.</span>
+    <small data-unsupported-detail></small>
+  </section>
 
   <div id="toast" role="status" aria-live="polite"></div>
   <div id="turnstileMount" class="turnstile-mount" aria-hidden="true"></div>

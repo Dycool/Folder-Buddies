@@ -550,6 +550,45 @@ struct WebRtcCompatHost::Impl {
         return true;
     }
 
+    bool resolve_write(const std::string& rel, fs::path& out) {
+        std::string norm;
+        if (!normalize_rel(rel, norm)) return false;
+        std::error_code ec;
+        fs::path rootPath = fs::weakly_canonical(root, ec);
+        if (ec) return false;
+
+        fs::path parent = rootPath;
+        fs::path tail;
+        bool missing = false;
+        for (const auto& partPath : fs::path(norm.substr(1))) {
+            const fs::path part = partPath.filename();
+            if (part.empty()) continue;
+            if (missing) {
+                tail /= part;
+                continue;
+            }
+
+            fs::path next = parent / part;
+            if (fs::exists(next, ec)) {
+                parent = fs::weakly_canonical(next, ec);
+                if (ec) return false;
+                std::string rp = rootPath.string();
+                std::string pp = parent.lexically_normal().string();
+                if (pp.rfind(rp, 0) != 0) return false;
+            } else {
+                missing = true;
+                tail /= part;
+            }
+        }
+
+        fs::path candidate = (parent / tail).lexically_normal();
+        std::string rp = rootPath.string();
+        std::string cp = candidate.string();
+        if (cp.rfind(rp, 0) != 0) return false;
+        out = candidate;
+        return true;
+    }
+
     void send_error(const std::shared_ptr<rtc::DataChannel>& dc, int id, const std::string& e) {
         QJsonObject o; o["t"] = "error"; o["id"] = id; o["message"] = QString::fromStdString(e);
         dc->send(json_compact(o).toStdString());
@@ -601,11 +640,21 @@ struct WebRtcCompatHost::Impl {
             if (t == "uploadStart") {
                 if (!allowWrites) throw std::runtime_error("The host has writes disabled");
                 fs::path abs;
-                if (!resolve(msg.value("path").toString().toStdString(), abs)) throw std::runtime_error("Bad upload path");
+                if (!resolve_write(msg.value("path").toString().toStdString(), abs)) throw std::runtime_error("Bad upload path");
                 fs::create_directories(abs.parent_path());
                 std::lock_guard<std::mutex> lk(mtx);
                 uploads[static_cast<uint32_t>(id)] = std::ofstream(abs, std::ios::binary | std::ios::trunc);
                 QJsonObject out; out["t"] = "uploadReady"; out["id"] = id; dc->send(json_compact(out).toStdString());
+                return;
+            }
+            if (t == "mkdir") {
+                if (!allowWrites) throw std::runtime_error("The host has writes disabled");
+                fs::path abs;
+                if (!resolve_write(msg.value("path").toString().toStdString(), abs)) throw std::runtime_error("Bad path");
+                std::error_code ec;
+                fs::create_directories(abs, ec);
+                if (ec) throw std::runtime_error("Create folder failed");
+                send_ok(dc, id);
                 return;
             }
             if (t == "uploadEnd") {
