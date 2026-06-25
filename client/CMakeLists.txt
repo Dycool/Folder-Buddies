@@ -107,13 +107,11 @@ if(WIN32)
 else()
   find_package(PkgConfig REQUIRED)
   if(APPLE)
-    # The FUSE-T kernel extension works with either FUSE 2 or 3 user-space API.
-    # We build against the FUSE 3 API because the code uses 3.x features like
-    # fuse_config and fuse_readdir_flags. Prefer fuse3 first, then fuse-t, then
-    # fuse (2.x) as a last resort.
-    pkg_check_modules(FUSE fuse3)
+    # Prefer FUSE-T if installed; fall back to other FUSE pkg-config names so
+    # developers can still build while packaging the FUSE-T installer separately.
+    pkg_check_modules(FUSE fuse-t)
     if(NOT FUSE_FOUND)
-      pkg_check_modules(FUSE fuse-t)
+      pkg_check_modules(FUSE fuse3)
     endif()
     if(NOT FUSE_FOUND)
       pkg_check_modules(FUSE REQUIRED fuse)

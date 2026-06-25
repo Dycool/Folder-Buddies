@@ -113,7 +113,7 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          brew install cmake ninja pkg-config qt@6 miniupnpc imagemagick fuse3
+          brew install cmake ninja pkg-config qt@6 miniupnpc imagemagick
           brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t || brew install --cask macfuse || true
           echo "$(brew --prefix qt@6)/bin" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
