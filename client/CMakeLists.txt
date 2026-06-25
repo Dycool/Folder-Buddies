@@ -27,6 +27,7 @@ set(FB_INCLUDE_DIRS
 
 set(FB_COMMON_SOURCES
   src/app/main.cpp
+  include/app/mainwindow.h
   src/app/mainwindow.cpp
   src/app/session.cpp
   src/app/cli.cpp
