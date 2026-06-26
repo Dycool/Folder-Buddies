@@ -14,30 +14,83 @@ if [ ! -f "$SRC" ]; then
   exit 1
 fi
 
+IM=()
 if command -v magick >/dev/null 2>&1; then
   IM=(magick)
 elif command -v convert >/dev/null 2>&1; then
   IM=(convert)
+fi
+# Fall back to Python/Pillow if ImageMagick is unavailable.
+
+# Fill the canvas so the folder artwork extends to the icon corner.
+mkdir -p "$OUT_DIR"
+DPI=72
+
+if [ ${#IM[@]} -gt 0 ]; then
+  "${IM[@]}" "$SRC" \
+    -background white \
+    -trim -fuzz 2% \
+    -resize "${SIZE}x${SIZE}^" \
+    -gravity center \
+    -extent "${SIZE}x${SIZE}" \
+    -density "${DPI}x${DPI}" \
+    "$OUT_DIR/icon.png"
+  echo "wrote src/icons/icon.png (ImageMagick)"
+elif python3 -c 'from PIL import Image; print("ok")' 2>/dev/null; then
+  python3 << PY
+import sys
+from PIL import Image
+
+src = '$SRC'
+dst = '$OUT_DIR/icon.png'
+size = $SIZE
+
+img = Image.open(src).convert('RGBA')
+fuzz = int(255 * 0.02)
+bbox = img.getbbox()
+if bbox:
+    img = img.crop(bbox)
+# Scale to fill most of canvas (no cropping) so artwork sits on a full white
+# background — like VS Code's solid-colour icon.
+fill = 900
+ratio = min(fill / img.width, fill / img.height)
+new_w = int(round(img.width * ratio))
+new_h = int(round(img.height * ratio))
+img = img.resize((new_w, new_h), Image.LANCZOS)
+
+# Full white square; macOS applies the rounded-rect mask.
+canvas = Image.new('RGBA', (size, size), (255,255,255,255))
+x = (size - img.width) // 2
+y = (size - img.height) // 2
+canvas.paste(img, (x, y), img)
+canvas.save(dst, dpi=(72,72))
+print(f'wrote src/icons/icon.png (Pillow, {img.width}x{img.height})')
+PY
 else
-  echo "error: ImageMagick is required (magick or convert)" >&2
-  exit 1
+  # Fallback: just copy as-is
+  cp "$SRC" "$OUT_DIR/icon.png"
+  echo "wrote src/icons/icon.png (copy)"
 fi
 
-mkdir -p "$OUT_DIR"
-
-# Normalize to a square PNG while preserving transparency. The source is already
-# the canonical artwork; this just creates packaging-friendly derivatives.
-"${IM[@]}" "$SRC" \
-  -background none \
-  -resize "${SIZE}x${SIZE}" \
-  -gravity center \
-  -extent "${SIZE}x${SIZE}" \
-  "$OUT_DIR/icon.png"
-echo "wrote src/icons/icon.png"
-
 # Windows .ico (multi-resolution).
-"${IM[@]}" "$OUT_DIR/icon.png" -define icon:auto-resize=256,128,64,48,32,16 "$OUT_DIR/icon.ico"
-echo "wrote src/icons/icon.ico"
+if [ ${#IM[@]} -gt 0 ]; then
+  "${IM[@]}" "$OUT_DIR/icon.png" -define icon:auto-resize=256,128,64,48,32,16 "$OUT_DIR/icon.ico"
+  echo "wrote src/icons/icon.ico"
+elif python3 -c 'from PIL import Image' 2>/dev/null; then
+  python3 << PY
+import sys
+from PIL import Image
+img = Image.open('$OUT_DIR/icon.png').convert('RGBA')
+sizes = [(256,256), (128,128), (64,64), (48,48), (32,32), (16,16)]
+frames = []
+for s in sizes:
+    frames.append(img.resize(s, Image.LANCZOS))
+frames[0].save('$OUT_DIR/icon.ico', format='ICO', append_images=frames[1:])
+print('wrote src/icons/icon.ico (Pillow)')
+PY
+else
+  echo "note: could not write src/icons/icon.ico (need ImageMagick or Pillow)"
+fi
 
 # macOS .icns.
 if command -v iconutil >/dev/null 2>&1 && command -v sips >/dev/null 2>&1; then
