@@ -59,21 +59,37 @@ endif()
 # only the static build looked broken.
 qt_add_executable(folderbuddies WIN32 MACOSX_BUNDLE ${FB_COMMON_SOURCES})
 
-# Belt-and-suspenders for STATIC Qt only: explicitly import the native Windows
-# style plugin so the static build never falls back to the basic style. The
-# target name differs across Qt versions (QModernWindowsStylePlugin in 6.7+,
-# QWindowsVistaStylePlugin earlier); include whichever exists. The platform and
-# image-format plugins are already covered by qt_add_executable's default import.
+# For STATIC Qt only: in a static build the Qt plugins are not separate DLLs
+# loaded at runtime — every plugin the app needs (platform integration, the
+# native Windows style, image-format handlers) must be linked in at build time
+# via Q_IMPORT_PLUGIN. qt_add_executable's automatic import covers the platform
+# plugin (the app starts) but NOT the native style, which is why the static build
+# rendered with the basic Fusion/common style: rough text, checkboxes with no
+# tick marks. Rather than guess the style plugin's target name (it varies across
+# Qt versions and packagings), import every plugin Qt exposes for the Gui and
+# Widgets modules — Qt populates these lists for us. We also print them so the CI
+# configure log shows exactly what was imported instead of failing silently.
 # Guarded to static Qt so the (working) dynamic Windows build is left untouched.
 if(WIN32)
   get_target_property(_fb_qt_core_type Qt6::Core TYPE)
   if(_fb_qt_core_type STREQUAL "STATIC_LIBRARY")
-    foreach(_style_plugin Qt6::QModernWindowsStylePlugin Qt6::QWindowsVistaStylePlugin)
-      if(TARGET ${_style_plugin})
-        qt6_import_plugins(folderbuddies INCLUDE ${_style_plugin})
-        break()
+    message(STATUS "Static Qt detected; importing GUI plugins into the binary.")
+    message(STATUS "  Qt6Gui_PLUGINS     = ${Qt6Gui_PLUGINS}")
+    message(STATUS "  Qt6Widgets_PLUGINS = ${Qt6Widgets_PLUGINS}")
+    set(_fb_imported_plugins "")
+    foreach(_plugin ${Qt6Gui_PLUGINS} ${Qt6Widgets_PLUGINS})
+      if(TARGET ${_plugin})
+        qt6_import_plugins(folderbuddies INCLUDE ${_plugin})
+        list(APPEND _fb_imported_plugins ${_plugin})
       endif()
     endforeach()
+    if(_fb_imported_plugins)
+      message(STATUS "  Imported static plugins: ${_fb_imported_plugins}")
+    else()
+      message(WARNING
+        "No Qt Gui/Widgets plugin targets were found to import. The static build "
+        "may render with the basic style (rough text, unchecked checkboxes).")
+    endif()
   endif()
 endif()
 
