@@ -12,6 +12,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMetaObject>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -82,6 +83,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     statsTimer_ = new QTimer(this);
     connect(statsTimer_, &QTimer::timeout, this, &MainWindow::refreshStats);
     statsTimer_->start(500);
+
+    mount_.setEjectedCallback([this] {
+        QMetaObject::invokeMethod(this, "onMountEjected", Qt::QueuedConnection);
+    });
 
     setFixedWidth(560);
     adjustSize();
@@ -226,7 +231,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 MainWindow::~MainWindow() {
-    if (mount_.active()) mount_.stop();
+    mount_.setEjectedCallback({});
+    mount_.stop();
     if (client_) client_->disconnect();
     if (webClient_) webClient_->disconnect();
     if (webCompatHost_) webCompatHost_->stop();
@@ -454,6 +460,17 @@ void MainWindow::toggleConnect() {
     }
 
     setConnected(true);
+}
+
+void MainWindow::onMountEjected() {
+    mount_.stop();
+    if (client_) client_->disconnect();
+    if (webClient_) webClient_->disconnect();
+    client_.reset();
+    webClient_.reset();
+    connectStatus_->setText("Disconnected (ejected).");
+    setConnected(false);
+    refreshStats();
 }
 
 void MainWindow::openMount() {

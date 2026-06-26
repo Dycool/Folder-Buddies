@@ -138,17 +138,17 @@ All data sockets use `TCP_NODELAY` (no Nagle) and 4 MiB send/receive buffers for
 
 ### Linux — kernel FUSE
 
-Uses **libfuse3** (`FUSE_USE_VERSION 31`) with the high-level API. Multi-threaded with `fuse_loop_mt`. Kernel writeback cache and parallel directory operations are enabled when supported. Mountpoint is `<mountBase>/<folder-name>`.
+Uses **libfuse3** (`FUSE_USE_VERSION 31`) with the high-level API. Multi-threaded with `fuse_loop_mt`. Kernel writeback cache and parallel directory operations are enabled when supported. Mounts prefer the normal desktop volume locations (`/media/$USER`, `/run/media/$USER`) and fall back to `$HOME/FolderBuddies`. If the user unmounts/ejects the volume, the FUSE loop exits and Folder Buddies disconnects.
 
 ### Windows — ProjFS
 
 Uses the native **Projected File System** shipped with Windows. The Provider pattern callbacks hydrate files on demand: placeholders appear immediately with metadata, content is fetched only when an application reads it. If ProjFS is disabled, the app requests UAC elevation and runs `dism /online /enable-feature /featurename:Client-ProjFS /all /norestart`.
 
-Mountpoints are drive letters (`Z:` through `D:`).
+The projected root is exposed as a drive letter (`Z:` through `D:`). If that drive mapping is removed/ejected, Folder Buddies stops the ProjFS provider and disconnects.
 
 ### macOS — FUSE-T
 
-**FUSE-T** is preferred over macFUSE. At launch the app checks if FUSE-T is installed and, if missing, installs it via Homebrew (installing Homebrew itself if needed). Mountpoints are at `/Volumes/<folder-name>`.
+macOS uses a **FUSE 3** provider; release builds currently install FUSE-T and use only its FUSE3 API. Mounts prefer `/Volumes/<folder-name>` and fall back to `$HOME/FolderBuddies` when the user cannot create `/Volumes` entries. The client verifies that macOS actually exposed the path as a mounted volume before reporting success, and Finder/OS unmounts disconnect the session.
 
 ---
 

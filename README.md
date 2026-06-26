@@ -61,9 +61,9 @@ Cloudflare stores only the lookup half and an opaque encrypted record — never 
 
 | Platform | Backend |
 |---|---|
-| **Linux** | Native kernel FUSE via `libfuse3` |
-| **Windows** | Native Projected File System (ProjFS) — auto-enables `Client-ProjFS` via UAC on first mount |
-| **macOS** | FUSE-T preferred. Release builds bundle the installer inside the `.app` |
+| **Linux** | Native kernel FUSE via `libfuse3`; unmount/eject disconnects the session |
+| **Windows** | Native Projected File System (ProjFS), exposed as a drive letter; drive removal disconnects the session |
+| **macOS** | FUSE3 provider (FUSE-T supported through its FUSE 3 API); Finder/OS unmount disconnects the session |
 
 ---
 
@@ -124,7 +124,7 @@ Detailed guides are in the `docs/` folder:
 | **Cryptography** | [ChaCha20-Poly1305](https://datatracker.ietf.org/doc/html/rfc8439) / [Argon2id](https://datatracker.ietf.org/doc/html/rfc9106) |
 | **Filesystem (Linux)** | [libfuse3](https://github.com/libfuse/libfuse) / kernel FUSE |
 | **Filesystem (Windows)** | [ProjFS](https://learn.microsoft.com/en-us/windows/win32/projfs/projected-file-system) |
-| **Filesystem (macOS)** | [FUSE-T](https://github.com/macos-fuse-t/fuse-t) |
+| **Filesystem (macOS)** | FUSE3 provider / [FUSE-T](https://github.com/macos-fuse-t/fuse-t) |
 | **Webapp** | WebRTC / File System Access API |
 | **Protocol** | Custom P2P TCP with per-session ChaCha20-Poly1305 sealing |
 

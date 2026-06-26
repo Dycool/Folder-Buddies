@@ -8,6 +8,7 @@
 #include <QTextStream>
 #include <QTimer>
 
+#include <atomic>
 #include <csignal>
 #include <cstring>
 #include <map>
@@ -21,6 +22,7 @@ namespace fb {
 namespace {
 
 volatile std::sig_atomic_t g_stop = 0;
+std::atomic_bool g_ejected{false};
 void on_signal(int) { g_stop = 1; }
 
 QTextStream& out() {
@@ -85,7 +87,7 @@ bool parse(int argc, char** argv, int start, Args& a, std::string& perr) {
 int run_until_signal() {
     QTimer poll;
     QObject::connect(&poll, &QTimer::timeout, [] {
-        if (g_stop) QCoreApplication::quit();
+        if (g_stop || g_ejected.load()) QCoreApplication::quit();
     });
     poll.start(200);
     return QCoreApplication::exec();
@@ -156,6 +158,8 @@ int cli_connect(const Args& a) {
     std::unique_ptr<Client> client;
     std::unique_ptr<WebRtcRemoteClient> webClient;
     std::string label = "share";
+    g_ejected.store(false);
+    mount.setEjectedCallback([] { g_ejected.store(true); });
 
     if (resolve_share_code(a.positional, tok, decodeErr)) {
         client = std::make_unique<Client>();
@@ -190,11 +194,11 @@ int cli_connect(const Args& a) {
           << QString::fromStdString(mountpoint) << "\n"
           << (webClient ? "Transport: WebRTC compatibility (browser/native).\n" : "Transport: native TCP.\n")
           << "It behaves like a local disk; only the bytes apps actually read cross the wire.\n\n"
-          << "Press Ctrl+C to unmount.\n";
+          << "Press Ctrl+C to unmount, or eject the drive/volume in the OS.\n";
     out().flush();
 
     int rc = run_until_signal();
-    out() << "\nUnmounting…\n";
+    out() << (g_ejected.load() ? "\nEjected; disconnecting…\n" : "\nUnmounting…\n");
     out().flush();
     mount.stop();
     if (client) client->disconnect();

@@ -164,7 +164,6 @@ jobs:
           if [ -n "${FIREBASE_DATABASE_URL:-}" ]; then
             args+=(-DFB_FIREBASE_DATABASE_URL="$FIREBASE_DATABASE_URL")
           fi
-          args+=(-DFB_MACOS_FUSE_BACKEND=fuse-t)
           cmake "${args[@]}"
 
       - name: Build and test
@@ -178,8 +177,8 @@ jobs:
 
           # Homebrew's Qt 6 packages are split across qt/qtbase and plugin
           # dependencies. macdeployqt needs explicit search roots for those
-          # transitive dylibs, and FUSE-T is installed by a cask rather than a
-          # formula prefix.
+          # transitive dylibs, and the FUSE3 provider may be installed by a
+          # cask rather than a formula prefix.
           add_deploy_libpath() {
             local libdir="$1"
             if [ ! -d "$libdir" ]; then
@@ -193,28 +192,30 @@ jobs:
             deploy_args+=("-libpath=$libdir")
           }
 
-          fuse_t_dylib=""
-          remember_fuse_t_dylib() {
+          fuse3_dylib=""
+          remember_fuse3_dylib() {
             local dylib="$1"
-            if [ -z "$fuse_t_dylib" ] && [ -f "$dylib" ]; then
-              fuse_t_dylib="$dylib"
+            if [ -z "$fuse3_dylib" ] && [ -f "$dylib" ]; then
+              fuse3_dylib="$dylib"
             fi
           }
 
-          fuse_libdir="$(pkg-config --variable=libdir fuse-t 2>/dev/null || true)"
+          fuse_libdir="$(pkg-config --variable=libdir fuse3 2>/dev/null || true)"
           add_deploy_libpath "$fuse_libdir"
-          remember_fuse_t_dylib "$fuse_libdir/libfuse-t.dylib"
+          remember_fuse3_dylib "$fuse_libdir/libfuse3.dylib"
+          remember_fuse3_dylib "$fuse_libdir/libfuse3.4.dylib"
 
-          for token in $(pkg-config --libs-only-L fuse-t 2>/dev/null || true); do
+          for token in $(pkg-config --libs-only-L fuse3 2>/dev/null || true); do
             libdir="${token#-L}"
             add_deploy_libpath "$libdir"
-            remember_fuse_t_dylib "$libdir/libfuse-t.dylib"
+            remember_fuse3_dylib "$libdir/libfuse3.dylib"
+            remember_fuse3_dylib "$libdir/libfuse3.4.dylib"
           done
 
           while IFS= read -r fuse_lib; do
-            remember_fuse_t_dylib "$fuse_lib"
+            remember_fuse3_dylib "$fuse_lib"
             add_deploy_libpath "${fuse_lib%/*}"
-          done < <(find /opt/homebrew /usr/local /Library -name libfuse-t.dylib -print 2>/dev/null)
+          done < <(find /opt/homebrew /usr/local /Library \( -name 'libfuse3*.dylib' -o -name 'libfuse-t.dylib' \) -print 2>/dev/null)
 
           formulas=(
             qt@6 qt qtbase qtsvg qtdeclarative qtshadertools qt3d qt5compat
@@ -246,13 +247,14 @@ jobs:
 
           macdeployqt "${deploy_args[@]}"
 
-          if [ -z "$fuse_t_dylib" ]; then
-            echo 'Could not locate libfuse-t.dylib for bundling.' >&2
+          if [ -z "$fuse3_dylib" ]; then
+            echo 'Could not locate libfuse3.dylib for bundling.' >&2
             exit 1
           fi
-          echo "Bundling FUSE-T runtime: $fuse_t_dylib"
-          cp "$fuse_t_dylib" build/folderbuddies.app/Contents/Frameworks/libfuse-t.dylib
-          test -f build/folderbuddies.app/Contents/Frameworks/libfuse-t.dylib
+          fuse3_name="$(basename "$fuse3_dylib")"
+          echo "Bundling FUSE3 runtime: $fuse3_dylib"
+          cp "$fuse3_dylib" "build/folderbuddies.app/Contents/Frameworks/$fuse3_name"
+          test -f "build/folderbuddies.app/Contents/Frameworks/$fuse3_name"
 
       - name: Codesign
         run: |

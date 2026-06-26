@@ -1,14 +1,5 @@
-// CMake defines the FUSE API shape from the pkg-config module it found.
-// FUSE-T currently exposes the FUSE 2 high-level API, so CMake defines both
-// FB_FUSE_T and FB_FUSE2 for that backend.
 #ifndef FUSE_USE_VERSION
-#  ifdef FB_FUSE2
-#    define FUSE_USE_VERSION 26
-#  elif defined(FB_FUSE_T)
-#    define FUSE_USE_VERSION 30
-#  else
-#    define FUSE_USE_VERSION 31
-#  endif
+#  define FUSE_USE_VERSION 31
 #endif
 
 #include "fuse_fs.h"
@@ -20,26 +11,14 @@
 
 #include <fuse.h>
 
-// Fallback for ad-hoc builds that do not go through the CMake pkg-config
-// detection above. Do not test FUSE_READDIR_PLUS here: libfuse3 exposes it as
-// an enum value, not a preprocessor macro.
-#if !defined(FB_FUSE2) && !defined(FB_FUSE_T)
-#  if !defined(FUSE_MAJOR_VERSION) || FUSE_MAJOR_VERSION < 3
-#    define FB_FUSE2
-#  endif
-#endif
-
-// FUSE 2 style APIs use a four-argument fuse_fill_dir_t and one-argument
-// fuse_loop_mt.
-#ifdef FB_FUSE2
-#  define FB_FUSE_FILLER_4ARG
-#  define FB_FUSE_LOOP_MT_1ARG
-#endif
-
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // POSIX FUSE aliases. Windows uses src/projfs_mount.cpp instead.
 #ifdef _WIN32
@@ -81,11 +60,7 @@ void fill_stat(FB_STAT& st, const WireAttr& a) {
 #endif
 }
 
-#ifndef FB_FUSE2
 int fs_getattr(const char* path, FB_STAT* stbuf, struct fuse_file_info*) {
-#else
-int fs_getattr(const char* path, FB_STAT* stbuf) {
-#endif
     Writer w;
     w.str(path);
     std::vector<uint8_t> resp;
@@ -98,13 +73,8 @@ int fs_getattr(const char* path, FB_STAT* stbuf) {
     return 0;
 }
 
-#ifndef FB_FUSE2
 int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t,
                struct fuse_file_info*, fuse_readdir_flags rdflags) {
-#else
-int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t,
-               struct fuse_file_info*) {
-#endif
     Writer w;
     w.str(path);
     std::vector<uint8_t> resp;
@@ -114,29 +84,17 @@ int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t,
     Reader r(resp.data(), resp.size());
     uint32_t n;
     if (!r.pod(n)) return -EIO;
-#ifdef FB_FUSE_FILLER_4ARG
-#  ifndef FB_FUSE2
-    (void)rdflags;
-#  endif
-    filler(buf, ".", nullptr, 0);
-    filler(buf, "..", nullptr, 0);
-#else
     filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
     filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
-#endif
     for (uint32_t i = 0; i < n; ++i) {
         std::string name;
         WireAttr a;
         if (!r.str(name) || !r.pod(a)) break;
         FB_STAT stbuf;
         fill_stat(stbuf, a);
-#ifdef FB_FUSE_FILLER_4ARG
-        filler(buf, name.c_str(), &stbuf, 0);
-#else
         fuse_fill_dir_flags fl = static_cast<fuse_fill_dir_flags>(0);
         if (rdflags & FUSE_READDIR_PLUS) fl = FUSE_FILL_DIR_PLUS;
         filler(buf, name.c_str(), &stbuf, 0, fl);
-#endif
     }
     return 0;
 }
@@ -250,11 +208,7 @@ int fs_mkdir(const char* path, fb_mode_t mode) {
     return st ? -st : 0;
 }
 
-#ifndef FB_FUSE2
 int fs_rename(const char* from, const char* to, unsigned int) {
-#else
-int fs_rename(const char* from, const char* to) {
-#endif
     Writer w;
     w.str(from);
     w.str(to);
@@ -263,11 +217,7 @@ int fs_rename(const char* from, const char* to) {
     return st ? -st : 0;
 }
 
-#ifndef FB_FUSE2
 int fs_truncate(const char* path, off_t size, struct fuse_file_info*) {
-#else
-int fs_truncate(const char* path, off_t size) {
-#endif
     Writer w;
     w.str(path);
     uint64_t s = static_cast<uint64_t>(size);
@@ -308,11 +258,7 @@ int fs_access(const char* path, int mode) {
     return st ? -st : 0;
 }
 
-#ifndef FB_FUSE2
 int fs_chmod(const char* path, mode_t mode, struct fuse_file_info*) {
-#else
-int fs_chmod(const char* path, mode_t mode) {
-#endif
     Writer w;
     w.str(path);
     uint32_t m = mode;
@@ -322,11 +268,7 @@ int fs_chmod(const char* path, mode_t mode) {
     return st ? -st : 0;
 }
 
-#ifndef FB_FUSE2
 int fs_utimens(const char* path, const struct timespec tv[2], struct fuse_file_info*) {
-#else
-int fs_utimens(const char* path, const struct timespec tv[2]) {
-#endif
     Writer w;
     w.str(path);
     int64_t atime = tv ? tv[0].tv_sec : 0;
@@ -338,16 +280,12 @@ int fs_utimens(const char* path, const struct timespec tv[2]) {
     return st ? -st : 0;
 }
 
-#ifndef FB_FUSE2
 void* fs_init(struct fuse_conn_info* conn, struct fuse_config* cfg) {
     cfg->kernel_cache = 1;
     cfg->entry_timeout = 1.0;
     cfg->attr_timeout = 1.0;
     cfg->negative_timeout = 1.0;
     cfg->use_ino = 0;
-#else
-void* fs_init(struct fuse_conn_info* conn) {
-#endif
     conn->max_write = kMaxIO;
 #ifdef FUSE_CAP_WRITEBACK_CACHE
     if (conn->capable & FUSE_CAP_WRITEBACK_CACHE) conn->want |= FUSE_CAP_WRITEBACK_CACHE;
@@ -446,6 +384,50 @@ std::string dedupe_path(const std::string& base, const std::string& name) {
     }
     return name;
 }
+
+bool is_mountpoint(const std::string& path) {
+    struct stat st {};
+    if (::stat(path.c_str(), &st) != 0) return false;
+
+    std::filesystem::path parentPath = std::filesystem::path(path).parent_path();
+    if (parentPath.empty()) return false;
+    struct stat parent {};
+    if (::stat(parentPath.string().c_str(), &parent) != 0) return false;
+
+    return st.st_dev != parent.st_dev || st.st_ino == parent.st_ino;
+}
+
+bool wait_for_mountpoint(const std::string& path, std::chrono::seconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (is_mountpoint(path)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return is_mountpoint(path);
+}
+
+bool ensure_directory(const std::string& path) {
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+    return !ec && std::filesystem::is_directory(path, ec) && ::access(path.c_str(), W_OK) == 0;
+}
+
+std::string default_linux_mount_base(const std::string& requested) {
+    if (!requested.empty() && ensure_directory(requested)) return requested;
+
+    const char* user = std::getenv("USER");
+    std::string username = user && *user ? user : "user";
+    std::string media = "/media/" + username;
+    if (ensure_directory(media)) return media;
+
+    std::string runMedia = "/run/media/" + username;
+    if (ensure_directory(runMedia)) return runMedia;
+
+    const char* home = std::getenv("HOME");
+    std::string fallback = std::string(home && *home ? home : "/tmp") + "/FolderBuddies";
+    ensure_directory(fallback);
+    return fallback;
+}
 #endif
 
 } // namespace
@@ -453,6 +435,10 @@ std::string dedupe_path(const std::string& base, const std::string& name) {
 bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::string& volname,
                   bool allowWrites, std::string& err) {
     if (!ensure_fuse_backend(err)) return false;
+    if (fuse_) { err = "a share is already mounted"; return false; }
+
+    stopping_.store(false);
+    active_.store(false);
 
     std::string name = sanitize(volname);
     std::string label; // volume label / displayed disk name
@@ -465,13 +451,23 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     mp_ = free_drive_letter();
     if (mp_.empty()) { err = "no free drive letter to mount the share"; return false; }
 #elif defined(__APPLE__)
+    std::error_code ec;
     label = dedupe_path("/Volumes", name); // /Volumes is the place disks show up
     mp_ = "/Volumes/" + label;
-    std::error_code ec;
     std::filesystem::create_directories(mp_, ec);
+    // /Volumes may not be writable (e.g. locked to root:wheel 755); fall back to
+    // a user-writable location so the mount still works.
+    if (!std::filesystem::is_directory(mp_)) {
+        const char* home = std::getenv("HOME");
+        std::string base = std::string(home ? home : "/tmp") + "/FolderBuddies";
+        std::filesystem::create_directories(base, ec);
+        label = dedupe_path(base, name);
+        mp_ = base + "/" + label;
+        std::filesystem::create_directories(mp_, ec);
+    }
 #else
     {
-        std::string base = mountBase.empty() ? "/media" : mountBase;
+        std::string base = default_linux_mount_base(mountBase);
         label = dedupe_path(base, name);
         mp_ = base + "/" + label;
         std::error_code ec;
@@ -481,45 +477,29 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
 
     struct fuse_args args = FUSE_ARGS_INIT(0, nullptr);
     fuse_opt_add_arg(&args, "folderbuddies");
-    fuse_opt_add_arg(&args, "-o");
-    fuse_opt_add_arg(&args, "max_read=1048576");
-    if (!allowWrites) {
+    auto add_opt = [&args](const std::string& opt) {
         fuse_opt_add_arg(&args, "-o");
-        fuse_opt_add_arg(&args, "ro");
+        fuse_opt_add_arg(&args, opt.c_str());
+    };
+    add_opt("fsname=FolderBuddies:" + label);
+    add_opt("subtype=folderbuddies");
+    if (!allowWrites) {
+        add_opt("ro");
     }
 #if defined(__APPLE__)
-    fuse_opt_add_arg(&args, "-o");
-    std::string vn = "volname=" + label;
-    fuse_opt_add_arg(&args, vn.c_str());
-    fuse_opt_add_arg(&args, "-o");
-    fuse_opt_add_arg(&args, "local"); // show on the desktop / Finder as a disk
-    fuse_opt_add_arg(&args, "-o");
-    fuse_opt_add_arg(&args, "noappledouble");
+    add_opt("volname=" + label);
+    add_opt("local"); // show on the desktop / Finder as a disk
+    add_opt("noappledouble");
+    add_opt("backend=nfs");
+    add_opt("location=127.0.0.1");
 #elif defined(_WIN32)
-    fuse_opt_add_arg(&args, "-o");
-    std::string vn = "volname=" + label;
-    fuse_opt_add_arg(&args, vn.c_str());
+    add_opt("volname=" + label);
 #else
-    (void)label;
+    add_opt("auto_unmount");
 #endif
 
     cache_ = std::make_unique<RamCache>(client);
 
-#ifdef FB_FUSE2
-    // FUSE 2 (macFUSE): mount first, then create handle.
-    struct fuse_chan* ch = fuse_mount(mp_.c_str(), &args);
-    if (!ch) { fuse_opt_free_args(&args); err = "fuse_mount failed for " + mp_; cache_.reset(); return false; }
-    fuse_ = fuse_new(ch, &args, &g_ops, sizeof(g_ops), cache_.get());
-    fuse_opt_free_args(&args);
-    if (!fuse_) {
-        err = "fuse_new failed (is the FUSE driver installed?)";
-        fuse_unmount(mp_.c_str(), ch);
-        cache_.reset();
-        return false;
-    }
-    fuse_chan_ = ch;
-#else
-    // FUSE 3 (libfuse3 / FUSE-T): create handle, then mount.
     fuse_ = fuse_new(&args, &g_ops, sizeof(g_ops), cache_.get());
     fuse_opt_free_args(&args);
     if (!fuse_) { err = "fuse_new failed (is the FUSE driver installed?)"; cache_.reset(); return false; }
@@ -528,33 +508,56 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
         err = "fuse_mount failed for " + mp_;
         fuse_destroy(fuse_);
         fuse_ = nullptr;
+        cache_.reset();
         return false;
     }
-#endif
 
-#ifdef FB_FUSE_LOOP_MT_1ARG
-    thread_ = std::thread([this] { fuse_loop_mt(fuse_); });
+    thread_ = std::thread([this] {
+        fuse_loop_mt(fuse_, 0);
+        if (!stopping_.load() && active_.exchange(false)) notifyEjected();
+    });
+
+    if (!wait_for_mountpoint(mp_, std::chrono::seconds(25))) {
+#if defined(__APPLE__)
+        err = "FUSE-T started but macOS did not expose " + mp_ + " as a mounted volume";
 #else
-    thread_ = std::thread([this] { fuse_loop_mt(fuse_, 0); });
+        err = "FUSE started but the OS did not expose " + mp_ + " as a mounted volume";
 #endif
+        stop();
+        return false;
+    }
+
+    active_.store(true);
     return true;
 }
 
 void Mount::stop() {
-    if (!fuse_) return;
-    fuse_exit(fuse_);
-#ifdef FB_FUSE2
-    if (fuse_chan_) {
-        fuse_unmount(mp_.c_str(), fuse_chan_);
-        fuse_chan_ = nullptr;
+    stopping_.store(true);
+    active_.store(false);
+    if (!fuse_) {
+        cache_.reset();
+        return;
     }
-#else
+    fuse_exit(fuse_);
     fuse_unmount(fuse_);
-#endif
-    if (thread_.joinable()) thread_.join();
+    if (thread_.joinable()) {
+        if (thread_.get_id() == std::this_thread::get_id()) thread_.detach();
+        else thread_.join();
+    }
     fuse_destroy(fuse_);
     fuse_ = nullptr;
     cache_.reset();
+
+#ifndef _WIN32
+    // Remove the mountpoint we created once it's no longer in use.
+    std::error_code ec;
+    if (!mp_.empty() && std::filesystem::is_empty(mp_, ec) && !ec) {
+        std::filesystem::remove(mp_, ec);
+        std::filesystem::path parent = std::filesystem::path(mp_).parent_path();
+        if (parent.filename() == "FolderBuddies")
+            std::filesystem::remove(parent, ec); // no-op unless empty
+    }
+#endif
 }
 
 } // namespace fb

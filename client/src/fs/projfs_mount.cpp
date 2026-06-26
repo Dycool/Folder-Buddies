@@ -12,10 +12,12 @@
 #endif
 #include <windows.h>
 #include <rpc.h>
+#include <shellapi.h>
 #include <projectedfslib.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
@@ -76,6 +78,14 @@ std::string sanitize(const std::string& name) {
     return s;
 }
 
+std::string free_drive_letter() {
+    DWORD mask = ::GetLogicalDrives();
+    for (char c = 'Z'; c >= 'D'; --c) {
+        if (!(mask & (1u << (c - 'A')))) return std::string(1, c) + ":";
+    }
+    return {};
+}
+
 std::string dedupe_path(const std::string& base, const std::string& name) {
     namespace fs = std::filesystem;
     for (int n = 1; n < 1000; ++n) {
@@ -86,6 +96,35 @@ std::string dedupe_path(const std::string& base, const std::string& name) {
         if (fs::is_directory(p, ec) && fs::is_empty(p, ec)) return p.string();
     }
     return (fs::path(base) / name).string();
+}
+
+std::string default_backing_base(const std::string& mountBase) {
+    if (!mountBase.empty()) return mountBase;
+    const char* local = std::getenv("LOCALAPPDATA");
+    if (local && *local) return (std::filesystem::path(local) / "FolderBuddies" / "mounts").string();
+    const char* profile = std::getenv("USERPROFILE");
+    return (std::filesystem::path(profile && *profile ? profile : "C:\\") /
+            "AppData" / "Local" / "FolderBuddies" / "mounts").string();
+}
+
+std::wstring drive_root(const std::wstring& driveName) {
+    return driveName + L"\\";
+}
+
+std::wstring dos_device_target(const std::string& path) {
+    std::error_code ec;
+    std::filesystem::path absolute = std::filesystem::absolute(path, ec);
+    return L"\\??\\" + widen((ec ? std::filesystem::path(path) : absolute).string());
+}
+
+bool drive_mapping_exists(const std::wstring& driveName) {
+    wchar_t target[32768];
+    return ::QueryDosDeviceW(driveName.c_str(), target,
+                             static_cast<DWORD>(sizeof(target) / sizeof(target[0]))) != 0;
+}
+
+std::string windows_error(const char* what) {
+    return std::string(what) + " (Windows error " + std::to_string(::GetLastError()) + ")";
 }
 
 LARGE_INTEGER unix_to_filetime(int64_t unixSeconds) {
@@ -495,13 +534,19 @@ PRJ_CALLBACKS callbacks() {
 bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::string& volname,
                   bool allowWrites, std::string& err) {
     if (!ensure_fuse_backend(err)) return false;
+    if (backend_) { err = "a share is already mounted"; return false; }
 
-    std::string base = mountBase.empty() ? (std::string(std::getenv("USERPROFILE") ? std::getenv("USERPROFILE") : "C:\\") + "\\FolderBuddies") : mountBase;
+    stopping_.store(false);
+    active_.store(false);
+    driveName_.clear();
+    driveTarget_.clear();
+
+    std::string base = default_backing_base(mountBase);
     std::error_code ec;
     std::filesystem::create_directories(base, ec);
-    mp_ = dedupe_path(base, sanitize(volname));
-    std::filesystem::create_directories(mp_, ec);
-    if (ec) { err = "failed to create ProjFS root: " + mp_; return false; }
+    std::string backingRoot = dedupe_path(base, sanitize(volname));
+    std::filesystem::create_directories(backingRoot, ec);
+    if (ec) { err = "failed to create ProjFS root: " + backingRoot; return false; }
 
     // Insert the RAM-only cache between ProjFS and the transport. No persistence.
     cache_ = std::make_unique<RamCache>(client);
@@ -509,11 +554,12 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     auto* state = new ProjfsState;
     state->client = cache_.get();
     state->allowWrites = allowWrites;
-    state->root = std::filesystem::path(mp_);
+    state->root = std::filesystem::path(backingRoot);
     PRJ_CALLBACKS cb = callbacks();
-    HRESULT hr = PrjMarkDirectoryAsPlaceholder(widen(mp_).c_str(), nullptr, nullptr, nullptr);
+    HRESULT hr = PrjMarkDirectoryAsPlaceholder(widen(backingRoot).c_str(), nullptr, nullptr, nullptr);
     if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) {
         delete state;
+        cache_.reset();
         err = "PrjMarkDirectoryAsPlaceholder failed";
         return false;
     }
@@ -523,22 +569,76 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     PRJ_STARTVIRTUALIZING_OPTIONS opts{};
     opts.NotificationMappings = &mapping;
     opts.NotificationMappingsCount = 1;
-    hr = PrjStartVirtualizing(widen(mp_).c_str(), &cb, state, &opts, &state->ctx);
+    hr = PrjStartVirtualizing(widen(backingRoot).c_str(), &cb, state, &opts, &state->ctx);
     if (FAILED(hr)) {
         delete state;
+        cache_.reset();
         err = "PrjStartVirtualizing failed";
         return false;
     }
+
+    std::string drive = free_drive_letter();
+    if (drive.empty()) {
+        PrjStopVirtualizing(state->ctx);
+        delete state;
+        cache_.reset();
+        err = "no free drive letter to mount the share";
+        return false;
+    }
+
+    driveName_ = widen(drive);
+    driveTarget_ = dos_device_target(backingRoot);
+    if (!::DefineDosDeviceW(DDD_RAW_TARGET_PATH, driveName_.c_str(), driveTarget_.c_str())) {
+        PrjStopVirtualizing(state->ctx);
+        delete state;
+        cache_.reset();
+        driveName_.clear();
+        driveTarget_.clear();
+        err = windows_error("DefineDosDevice failed");
+        return false;
+    }
+
+    mp_ = drive + "\\";
     backend_ = state;
+    active_.store(true);
+    ::SHChangeNotify(SHCNE_DRIVEADD, SHCNF_PATHW, drive_root(driveName_).c_str(), nullptr);
+
+    thread_ = std::thread([this] {
+        while (!stopping_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (!driveName_.empty() && !drive_mapping_exists(driveName_)) {
+                if (!stopping_.load() && active_.exchange(false)) notifyEjected();
+                break;
+            }
+        }
+    });
     return true;
 }
 
 void Mount::stop() {
-    if (!backend_) return;
-    auto* state = static_cast<ProjfsState*>(backend_);
-    if (state->ctx) PrjStopVirtualizing(state->ctx);
-    delete state;
+    stopping_.store(true);
+    active_.store(false);
+
+    if (!driveName_.empty()) {
+        std::wstring root = drive_root(driveName_);
+        ::DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE | DDD_RAW_TARGET_PATH,
+                           driveName_.c_str(), driveTarget_.empty() ? nullptr : driveTarget_.c_str());
+        ::SHChangeNotify(SHCNE_DRIVEREMOVED, SHCNF_PATHW, root.c_str(), nullptr);
+    }
+
+    if (thread_.joinable()) {
+        if (thread_.get_id() == std::this_thread::get_id()) thread_.detach();
+        else thread_.join();
+    }
+
+    if (backend_) {
+        auto* state = static_cast<ProjfsState*>(backend_);
+        if (state->ctx) PrjStopVirtualizing(state->ctx);
+        delete state;
+    }
     backend_ = nullptr;
+    driveName_.clear();
+    driveTarget_.clear();
     // Drop the cache (joins prefetch threads) while the transport is still alive.
     cache_.reset();
 }

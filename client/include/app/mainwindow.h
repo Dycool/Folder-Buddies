@@ -33,6 +33,7 @@ private slots:
     void openMount();
     void refreshStats();
     void onClientsChanged();
+    void onMountEjected();
 
 private:
     QWidget* buildShareTab();

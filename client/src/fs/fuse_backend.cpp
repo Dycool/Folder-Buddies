@@ -59,7 +59,8 @@ bool ensure_fuse_backend(std::string& err) {
 } // namespace fb
 
 // ===========================================================================
-// macOS: FUSE backend installed via Homebrew.
+// macOS: libfuse3 provider. Release builds currently install FUSE-T as that
+// provider, but the mount implementation stays on the FUSE3 API only.
 // ===========================================================================
 #elif defined(__APPLE__)
 
@@ -74,18 +75,12 @@ namespace {
 namespace fs = std::filesystem;
 
 bool backend_present() {
-    const char* markers[] = {
-        // Classic FUSE kext (fuse-t ≤ 1.1, macFUSE)
-        "/Library/Filesystems/fuse-t.fs",
-        "/Library/Filesystems/macfuse.fs",
-        // Modern fuse-t (≥ 1.2) — framework + support files
-        "/Library/Frameworks/fuse_t.framework",
-        "/Library/Application Support/fuse-t",
-    };
     std::error_code ec;
-    for (const char* m : markers)
-        if (fs::exists(m, ec)) return true;
-    return false;
+    bool libPresent = fs::exists("/usr/local/lib/libfuse3.dylib", ec) ||
+                      fs::exists("/Library/Application Support/fuse-t/lib/libfuse3.4.dylib", ec);
+    bool supportPresent = fs::exists("/Library/Frameworks/fuse_t.framework", ec) ||
+                          fs::exists("/Library/Application Support/fuse-t", ec);
+    return libPresent && supportPresent;
 }
 
 std::string shell_quote(const std::string& s) {

@@ -5,7 +5,13 @@
 #include <QApplication>
 #include <QIcon>
 
+#include <csignal>
+
 int main(int argc, char** argv) {
+#ifndef _WIN32
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
+
     // A recognised subcommand runs headless; a plain launch opens the GUI.
     if (fb::is_cli_invocation(argc, argv)) return fb::run_cli(argc, argv);
 

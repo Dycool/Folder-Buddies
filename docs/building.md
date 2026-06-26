@@ -12,7 +12,7 @@ Folder Buddies uses **CMake ≥ 3.21** with **Ninja** as the preferred generator
 | **C++23 compiler** | Yes | GCC 14+, Clang 18+, MSVC 2022 17.12+ |
 | **Qt 6** (Widgets + Network) | Yes | |
 | **libsodium** | Yes | Argon2id key derivation |
-| **FUSE / ProjFS** | Platform | Linux: libfuse3; macOS: FUSE-T; Windows: native |
+| **FUSE / ProjFS** | Platform | Linux: libfuse3; macOS: libfuse3 provider; Windows: native |
 | **miniupnpc** | Optional | UPnP port mapping |
 | **libdatachannel** | Optional | WebRTC compatibility transport |
 
@@ -66,12 +66,11 @@ brew install cmake ninja pkg-config qt@6 miniupnpc libsodium
 brew tap macos-fuse-t/homebrew-cask || true
 brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t
 
-cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release \
-  -DFB_MACOS_FUSE_BACKEND=fuse-t
+cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-macOS uses **FUSE-T** for the mount backend by default. A macFUSE fallback is only allowed when configuring with `-DFB_MACOS_FUSE_BACKEND=auto` or `macfuse`, which keeps release builds from accidentally linking against the wrong backend.
+macOS builds against the **FUSE 3** pkg-config module. The current release flow installs FUSE-T as that provider; the app no longer builds any FUSE2 or legacy compatibility backend.
 
 ### Notarization
 
@@ -102,7 +101,6 @@ cmake --build build/cloudflare-core
 |---|---|---|
 | `-DFB_SIGNALING_URL=<url>` | — | Hardcode your Worker endpoint into the build |
 | `-DFB_FIREBASE_DATABASE_URL=<url>` | — | Hardcode Firebase fallback endpoint |
-| `-DFB_MACOS_FUSE_BACKEND=<fuse-t|auto|macfuse>` | `fuse-t` | Select the macOS FUSE backend; release builds should use FUSE-T |
 | ~~`-DFUSET_PKG=<path>`~~ | — | *(removed — auto-installs via Homebrew at runtime)* |
 | `-DFB_CODESIGN_IDENTITY=<name>` | — | Developer ID identity for macOS codesigning |
 | `-DFB_BUILD_TESTS=ON` | ON | Build the crypto + signaling self-tests |
