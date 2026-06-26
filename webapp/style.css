@@ -93,6 +93,8 @@ form { display: grid; gap: 12px; }
 .row > label { justify-self: end; color: var(--muted); }
 .field { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .field input { flex: 1; min-width: 0; }
+.fieldbtns { display: flex; flex-direction: column; gap: 8px; align-self: stretch; }
+.fieldbtns button { width: 100%; }
 .hint { color: var(--muted); white-space: nowrap; }
 .checkline { display: flex; align-items: center; gap: 8px; color: var(--text); }
 .row > .checkline { justify-self: start; }

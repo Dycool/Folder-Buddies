@@ -84,7 +84,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     hostWs: null,
     clientWs: null,
     hostPeers: new Map(),
-    relayJobs: new Map(),
     plainSignalPeers: new Set(),
     manualHost: null,
     manualClient: false,
@@ -283,6 +282,11 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return value.replace(/\/+$/, "");
   }
 
+  function siteUrl() {
+    const base = clean(config().siteUrl) || "https://dycool.github.io/Folder-Buddies/";
+    return base.endsWith("/") ? base : base + "/";
+  }
+
   function iceServers() {
     return Array.isArray(config().iceServers) ? config().iceServers : DEFAULT_ICE;
   }
@@ -398,29 +402,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return out;
   }
 
-  function bytesToHex(bytes) {
-    return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-  }
-
-  function hexToBytes(hex) {
-    const clean = String(hex).trim();
-    if (clean.length % 2 || /[^0-9a-fA-F]/.test(clean)) throw new Error("Invalid hex");
-    const out = new Uint8Array(clean.length / 2);
-    for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-    return out;
-  }
-
-  function addCounter(iv, blocks) {
-    const out = iv.slice();
-    let add = BigInt(blocks);
-    for (let i = 15; i >= 0 && add > 0n; i--) {
-      const sum = BigInt(out[i]) + (add & 0xffn);
-      out[i] = Number(sum & 0xffn);
-      add = (add >> 8n) + (sum >> 8n);
-    }
-    return out;
-  }
-
   async function sha256Bytes(bytes) {
     return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   }
@@ -432,17 +413,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const secret = secureSecret || keyPartOf(code);
     const saltSeed = await sha256Bytes(te.encode("FolderBuddies-web-salt-v1\0" + lookupOf(code)));
     const root = argon2id(te.encode(secret), saltSeed.slice(0, 16), ARGON);
-    return crypto.subtle.importKey("raw", root, "HKDF", false, ["deriveKey", "deriveBits"]);
-  }
-
-  async function directFileKeyBytes(path) {
-    const salt = await sha256Bytes(te.encode("FolderBuddies-direct-file-v1\0" + normalizePath(path)));
-    const bits = await crypto.subtle.deriveBits(
-      { name: "HKDF", hash: "SHA-256", salt: salt.slice(0, 16), info: te.encode("direct-file-key") },
-      state.rootBase,
-      256
-    );
-    return new Uint8Array(bits);
+    return crypto.subtle.importKey("raw", root, "HKDF", false, ["deriveKey"]);
   }
 
   async function deriveAesKey(base, salt, aad) {
@@ -548,35 +519,11 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const params = new URLSearchParams();
     params.set("r", code);
     if (path) params.set(kind === "folder" ? "p" : "f", normalizePath(path));
-    return `${location.origin}${location.pathname}#${params.toString()}`;
+    return `${siteUrl()}#${params.toString()}`;
   }
 
   function activeShareToken() {
     return state.connectToken || state.code;
-  }
-
-  function directLink(lookup, path) {
-    const u = new URL(workerUrl());
-    u.pathname = "/file";
-    u.search = "";
-    u.hash = "";
-    u.searchParams.set("code", lookup);
-    u.searchParams.set("p", normalizePath(path));
-    return u.toString();
-  }
-
-  async function directLinkEncrypted(lookup, path) {
-    const keyHex = bytesToHex(await directFileKeyBytes(path));
-    const ivHex = bytesToHex(randomBytes(16));
-    const u = new URL(workerUrl());
-    u.pathname = "/file";
-    u.search = "";
-    u.hash = "";
-    u.searchParams.set("code", lookup);
-    u.searchParams.set("p", normalizePath(path));
-    u.searchParams.set("enc", "1");
-    u.searchParams.set("iv", ivHex);
-    return `${u.toString()}#k=${keyHex}`;
   }
 
   function parseJoinInput(raw, options = {}) {
@@ -631,7 +578,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       state.directFolderConsumed = false;
       els.connectInput.value = state.directFilePath || state.directFolderPath ? "" : room;
       selectTab("connect");
-      return !!(state.directFilePath || state.directFolderPath);
+      return true;
     }
     return false;
   }
@@ -1116,10 +1063,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
   }
 
-  function wsSendJson(ws, obj) {
-    try { ws.send(JSON.stringify(obj)); } catch { /* socket gone */ }
-  }
-
   function nextId() {
     return state.nextReqId++ >>> 0;
   }
@@ -1508,20 +1451,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
       renderShareStatus();
       return;
     }
-    if (msg.kind === "relay-req") {
-      serveDirectDownload(msg).catch(() => {});
-      return;
-    }
-    if (msg.kind === "relay-ack") {
-      const job = state.relayJobs.get(msg.reqId);
-      if (job) { job.credit += Number(msg.n) || 1; job.resume?.(); }
-      return;
-    }
-    if (msg.kind === "relay-cancel") {
-      const job = state.relayJobs.get(msg.reqId);
-      if (job) { job.cancelled = true; job.resume?.(); }
-      return;
-    }
     if (msg.kind === "client-joined") {
       if (state.maxClients > 0 && state.hostPeers.size >= state.maxClients) {
         toast("Max clients reached; ignoring a new connection");
@@ -1555,79 +1484,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
       if (!peer) return;
       if (signal.type === "answer") await peer.pc.setRemoteDescription(signal.sdp);
       else if (signal.type === "candidate" && signal.candidate) await peer.pc.addIceCandidate(signal.candidate);
-    }
-  }
-
-  async function serveDirectDownload(msg) {
-    const reqId = msg.reqId;
-    const ws = state.hostWs;
-    if (!ws || ws.provider !== "cloudflare" || !Number.isInteger(reqId)) return;
-    const fail = (error) => wsSendJson(ws, { kind: "relay-err", reqId, error });
-    if (!state.rootHandle) return fail("not_hosting");
-
-    const path = normalizePath(msg.path || "");
-    let file;
-    try {
-      const handle = await fileHandleFor(path);
-      file = await handle.getFile();
-    } catch { return fail("not_found"); }
-
-    const maxBytes = Number(msg.maxBytes) || 0;
-    if (maxBytes && file.size > maxBytes) return fail("too_large");
-
-    let cipherKey = null;
-    let ivBytes = null;
-    if (msg.enc) {
-      try {
-        ivBytes = hexToBytes(msg.iv || "");
-        if (ivBytes.length !== 16) throw new Error("iv");
-        cipherKey = await crypto.subtle.importKey("raw", await directFileKeyBytes(path), { name: "AES-CTR" }, false, ["encrypt"]);
-      } catch { return fail("bad_iv"); }
-    }
-
-    const job = { credit: Math.max(1, Number(msg.window) || 1), resume: null, cancelled: false };
-    state.relayJobs.set(reqId, job);
-    const awaitCredit = () => new Promise((res) => { job.resume = res; });
-
-    let blocks = 0;
-    const sendPiece = async (piece) => {
-      while (job.credit <= 0 && !job.cancelled) await awaitCredit();
-      if (job.cancelled) throw new Error("cancelled");
-      while (ws.bufferedAmount > 8 * 1024 * 1024) await new Promise((r) => setTimeout(r, 50));
-      let out = piece;
-      if (cipherKey) {
-        out = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-CTR", counter: addCounter(ivBytes, blocks), length: 128 }, cipherKey, piece));
-        blocks += Math.ceil(piece.byteLength / 16);
-      }
-      const frame = new Uint8Array(4 + out.byteLength);
-      new DataView(frame.buffer).setUint32(0, reqId >>> 0, false);
-      frame.set(out, 4);
-      ws.send(frame);
-      job.credit -= 1;
-      state.bytesServed += piece.byteLength;
-    };
-
-    wsSendJson(ws, { kind: "relay-head", reqId, name: file.name, size: file.size, mime: file.type || mimeForName(file.name) });
-
-    const reader = file.stream().getReader();
-    let carry = new Uint8Array(0);
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        carry = carry.byteLength ? concatBytes(carry, value) : value;
-        while (carry.byteLength >= CHUNK_SIZE) {
-          await sendPiece(carry.subarray(0, CHUNK_SIZE));
-          carry = carry.subarray(CHUNK_SIZE);
-        }
-      }
-      if (carry.byteLength) await sendPiece(carry);
-      wsSendJson(ws, { kind: "relay-end", reqId });
-    } catch {
-      if (!job.cancelled) fail("read_failed");
-    } finally {
-      reader.releaseLock();
-      state.relayJobs.delete(reqId);
     }
   }
 
@@ -1762,8 +1618,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
   async function stopHost() {
     if (state.hostWs) state.hostWs.close();
     for (const p of state.hostPeers.values()) p.pc.close();
-    for (const job of state.relayJobs.values()) { job.cancelled = true; job.resume?.(); }
-    state.relayJobs.clear();
     state.hostWs = null;
     state.manualHost = null;
     state.hostPeers.clear();
@@ -1997,20 +1851,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
         share.textContent = "Share link";
         share.onclick = () => copy(shareLink(activeShareToken(), e.path)).then(() => toast("File link copied")).catch((err) => toast(err.message));
         action.appendChild(share);
-
-        if (state.clientWs?.provider === "cloudflare") {
-          const direct = document.createElement("button");
-          direct.textContent = "Direct link";
-          direct.title = "Server-relayed link for curl/wget/browser. Host must stay online.";
-          direct.onclick = () => copy(directLink(state.lookup, e.path)).then(() => toast("Direct link copied")).catch((err) => toast(err.message));
-          action.appendChild(direct);
-
-          const enc = document.createElement("button");
-          enc.textContent = "Encrypted link";
-          enc.title = "Relayed link encrypted in transit (AES-256-CTR). Decrypt with the key in the URL fragment.";
-          enc.onclick = () => directLinkEncrypted(state.lookup, e.path).then((link) => copy(link)).then(() => toast("Encrypted link copied")).catch((err) => toast(err.message));
-          action.appendChild(enc);
-        }
       }
       if (state.clientCanWrite) {
         const del = document.createElement("button");
