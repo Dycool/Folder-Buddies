@@ -33,6 +33,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     shareToggle: $("shareToggle"),
     connectCode: $("connectCode"),
     copyAll: $("copyAll"),
+    copyShareLink: $("copyShareLink"),
     shareStatus: $("shareStatus"),
     offlineAnswerRow: $("offlineAnswerRow"),
     offlineAnswerInput: $("offlineAnswerInput"),
@@ -90,6 +91,9 @@ import { argon2id } from "./vendor/noble/argon2.js";
     clientPeer: null,
     dataChannel: null,
     currentPath: "/",
+    refreshTimer: null,
+    renderedSig: "",
+    renderedPath: "",
     pending: new Map(),
     downloads: new Map(),
     uploads: new Map(),
@@ -1086,8 +1090,14 @@ import { argon2id } from "./vendor/noble/argon2.js";
       } else {
         listRemote("/").catch((e) => toast(e.message));
       }
+      clearInterval(state.refreshTimer);
+      state.refreshTimer = setInterval(() => { pollCurrentDir().catch(() => {}); }, 4000);
     };
-    dc.onclose = () => setConnectStatus("Disconnected.");
+    dc.onclose = () => {
+      clearInterval(state.refreshTimer);
+      state.refreshTimer = null;
+      setConnectStatus("Disconnected.");
+    };
     dc.onerror = () => toast("Connection error");
     dc.onmessage = (event) => {
       if (typeof event.data === "string") handleClientJson(event.data);
@@ -1097,6 +1107,13 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function safeSendJson(dc, obj) {
     if (dc.readyState === "open") dc.send(JSON.stringify(obj));
+  }
+
+  function broadcastFsChanged(path, exceptPeerId) {
+    for (const [pid, peer] of state.hostPeers) {
+      if (pid === exceptPeerId) continue;
+      safeSendJson(peer.dc, { t: "fsChanged", path: normalizePath(path || "/") });
+    }
   }
 
   function wsSendJson(ws, obj) {
@@ -1128,6 +1145,14 @@ import { argon2id } from "./vendor/noble/argon2.js";
   function handleClientJson(text) {
     let msg;
     try { msg = JSON.parse(text); } catch { return; }
+    if (msg.t === "fsChanged") {
+      const changed = normalizePath(msg.path || "/");
+      if (changed === state.currentPath || parentPath(changed) === state.currentPath) {
+        CACHE.dirInvalidate(state.currentPath);
+        pollCurrentDir().catch(() => {});
+      }
+      return;
+    }
     if (msg.t === "error") {
       const pending = state.pending.get(msg.id);
       if (pending) {
@@ -1262,7 +1287,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const name = safeEntryName(basename(path));
       const fileHandle = await parent.getFileHandle(name, { create: true });
       const writer = await fileHandle.createWritable();
-      state.uploads.set(msg.id, { writer, writeQueue: Promise.resolve(), received: 0, size: Number(msg.size || 0), name });
+      state.uploads.set(msg.id, { writer, writeQueue: Promise.resolve(), received: 0, size: Number(msg.size || 0), name, path });
       safeSendJson(dc, { t: "uploadReady", id: msg.id });
       return;
     }
@@ -1271,6 +1296,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const path = normalizePath(msg.path || "/");
       await ensureDirectoryHandle(path);
       safeSendJson(dc, { t: "ok", id: msg.id });
+      broadcastFsChanged(path, peerId);
       return;
     }
     if (msg.t === "uploadEnd") {
@@ -1281,6 +1307,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       await upload.writer.close();
       state.uploads.delete(msg.id);
       safeSendJson(dc, { t: "ok", id: msg.id });
+      broadcastFsChanged(upload.path || "/", peerId);
       return;
     }
     if (msg.t === "delete") {
@@ -1290,6 +1317,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const parent = await directoryHandleFor(parentPath(path));
       await parent.removeEntry(basename(path), { recursive: true });
       safeSendJson(dc, { t: "ok", id: msg.id });
+      broadcastFsChanged(path, peerId);
       return;
     }
     throw new Error("Unknown request");
@@ -1664,6 +1692,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     els.maxClients.disabled = running;
     if (els.allowWrites) els.allowWrites.disabled = running;
     els.copyAll.disabled = !running;
+    els.copyShareLink.disabled = !running;
     if (els.offlineAnswerRow) els.offlineAnswerRow.hidden = !(running && state.manualHost);
     if (!running) {
       els.connectCode.value = "";
@@ -1826,6 +1855,10 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   function disconnectClient() {
+    clearInterval(state.refreshTimer);
+    state.refreshTimer = null;
+    state.renderedSig = "";
+    state.renderedPath = "";
     if (state.clientWs) state.clientWs.close();
     if (state.clientPeer?.pc) state.clientPeer.pc.close();
     state.clientWs = null;
@@ -1870,6 +1903,34 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (els.shareFolderButton) els.shareFolderButton.disabled = !activeShareToken();
     renderWriteUi();
     renderRows(res.entries || []);
+    state.renderedPath = state.currentPath;
+    state.renderedSig = listSignature(res.entries || []);
+  }
+
+  function listSignature(entries) {
+    return entries
+      .map((e) => `${e.kind}:${e.name}:${e.size ?? ""}:${e.mtime ?? ""}`)
+      .sort()
+      .join("|");
+  }
+
+  async function pollCurrentDir() {
+    const dc = state.dataChannel;
+    if (!dc || dc.readyState !== "open" || els.explorer.hidden) return;
+    const p = state.currentPath;
+    let res;
+    try {
+      res = await requestJson(dc, { t: "list", path: p });
+    } catch { return; }
+    if (state.currentPath !== p || state.dataChannel !== dc) return;
+    CACHE.dirSet(p, res);
+    const sig = listSignature(res.entries || []);
+    if (p === state.renderedPath && sig === state.renderedSig) return;
+    state.clientCanWrite = !!res.write;
+    renderWriteUi();
+    renderRows(res.entries || []);
+    state.renderedPath = p;
+    state.renderedSig = sig;
   }
 
   function renderCurrentPath(path) {
@@ -2312,6 +2373,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     };
 
     els.copyAll.onclick = () => copy(copyShareDetails()).then(() => toast("Code copied")).catch((e) => toast(e.message));
+    els.copyShareLink.onclick = () => copy(shareLink(activeShareToken())).then(() => toast("Share link copied")).catch((e) => toast(e.message));
 
     els.connectInput.oninput = () => {
       state.pendingConnectToken = "";
