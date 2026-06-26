@@ -87,6 +87,13 @@ if(WIN32)
     set(_fb_style_plugins "")
     foreach(_t ${_fb_imported_targets})
       if(_t MATCHES "Plugin$")
+        # Skip redundant platform plugins: QWindowsDirect2DIntegrationPlugin
+        # redefines all the same symbols as QWindowsIntegrationPlugin, causing
+        # LNK2005 multiply-defined errors in a static link. Keep the primary
+        # integration plugin (qwindows) but discard the Direct2D variant.
+        if(_t MATCHES "Direct2DIntegration")
+          continue()
+        endif()
         list(APPEND _fb_plugin_targets ${_t})
         if(_t MATCHES "Style")
           list(APPEND _fb_style_plugins ${_t})
