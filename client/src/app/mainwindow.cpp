@@ -81,7 +81,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(statsTimer_, &QTimer::timeout, this, &MainWindow::refreshStats);
     statsTimer_->start(500);
 
-    resize(560, 500);
+    setFixedSize(560, 460);
 
     setStyleSheet(R"(
         QMainWindow {
