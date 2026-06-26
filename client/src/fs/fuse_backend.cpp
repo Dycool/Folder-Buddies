@@ -192,24 +192,43 @@ bool ensure_fuse_backend(std::string& err) {
         if (!install_homebrew(brewPath, err)) return false;
     }
 
-    // Step 2: Install FUSE-T via Homebrew
-    std::string tapCmd = brewPath + " tap --quiet macos-fuse-t/homebrew-cask 2>/dev/null";
-    std::string installCmd = brewPath + " install --cask macos-fuse-t/homebrew-cask/fuse-t 2>&1";
-    std::string fullCmd = tapCmd + "; " + installCmd;
+    // Step 2: Tap the fuse-t cask and download the installer (no admin needed)
+    std::system((brewPath + " tap --quiet macos-fuse-t/homebrew-cask 2>/dev/null").c_str());
+    if (std::system((brewPath + " fetch --cask macos-fuse-t/homebrew-cask/fuse-t 2>/dev/null").c_str()) != 0) {
+        err = "Failed to download FUSE-T installer via Homebrew.\n"
+              "Install it manually: brew install macos-fuse-t/homebrew-cask/fuse-t";
+        return false;
+    }
 
-    int rc = run_admin_osascript(fullCmd,
+    // Step 3: Locate the cached .pkg and install it with admin privileges
+    std::string cacheCmd = brewPath + " --cache --cask macos-fuse-t/homebrew-cask/fuse-t 2>/dev/null";
+    std::string pkgPath;
+    char buf[4096] = {};
+    FILE* fp = popen(cacheCmd.c_str(), "r");
+    if (fp) {
+        if (fgets(buf, sizeof(buf), fp)) pkgPath = buf;
+        pclose(fp);
+    }
+    if (!pkgPath.empty() && pkgPath.back() == '\n') pkgPath.pop_back();
+
+    if (pkgPath.empty()) {
+        err = "FUSE-T package was downloaded but could not be located.";
+        return false;
+    }
+
+    std::error_code ec;
+    if (!fs::exists(pkgPath, ec)) {
+        err = "FUSE-T package was downloaded but the file is missing at:\n  " + pkgPath;
+        return false;
+    }
+
+    std::string installCmd = "installer -pkg " + shell_quote(pkgPath) + " -target /";
+    int rc = run_admin_osascript(installCmd,
         "Folder Buddies needs to install FUSE-T for mounting remote folders");
 
     if (rc != 0) {
-        // Brew cask install on Apple Silicon sometimes works without admin
-        std::string userScript =
-            "do shell script " + applescript_string(fullCmd);
-        rc = std::system(("osascript -e " + shell_quote(userScript) + " 2>/dev/null").c_str());
-    }
-
-    if (rc != 0) {
-        err = "FUSE-T installation via Homebrew was declined or failed.\n"
-              "You can install it manually: brew install macos-fuse-t/homebrew-cask/fuse-t";
+        err = "FUSE-T installation was declined or failed.\n"
+              "Install it manually: brew install macos-fuse-t/homebrew-cask/fuse-t";
         return false;
     }
 
