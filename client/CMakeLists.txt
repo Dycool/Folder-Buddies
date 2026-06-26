@@ -73,23 +73,50 @@ qt_add_executable(folderbuddies WIN32 MACOSX_BUNDLE ${FB_COMMON_SOURCES})
 if(WIN32)
   get_target_property(_fb_qt_core_type Qt6::Core TYPE)
   if(_fb_qt_core_type STREQUAL "STATIC_LIBRARY")
-    message(STATUS "Static Qt detected; importing GUI plugins into the binary.")
-    message(STATUS "  Qt6Gui_PLUGINS     = ${Qt6Gui_PLUGINS}")
-    message(STATUS "  Qt6Widgets_PLUGINS = ${Qt6Widgets_PLUGINS}")
-    set(_fb_imported_plugins "")
-    foreach(_plugin ${Qt6Gui_PLUGINS} ${Qt6Widgets_PLUGINS})
-      if(TARGET ${_plugin})
-        qt6_import_plugins(folderbuddies INCLUDE ${_plugin})
-        list(APPEND _fb_imported_plugins ${_plugin})
+    message(STATUS "Static Qt detected; locating plugin targets to import.")
+    # The Qt6Gui_PLUGINS / Qt6Widgets_PLUGINS lists come up empty with vcpkg's
+    # static qtbase, so enumerate the imported targets directly instead: every
+    # Qt plugin is an imported target whose name ends in "Plugin"
+    # (Qt6::QWindowsIntegrationPlugin, Qt6::QModernWindowsStylePlugin,
+    # Qt6::QICOPlugin, ...). This is version- and packaging-agnostic. We import
+    # all of them so the native style and image-format handlers are linked in,
+    # and print the list so the CI configure log is conclusive.
+    get_property(_fb_imported_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                 PROPERTY IMPORTED_TARGETS)
+    set(_fb_plugin_targets "")
+    set(_fb_style_plugins "")
+    foreach(_t ${_fb_imported_targets})
+      if(_t MATCHES "Plugin$")
+        list(APPEND _fb_plugin_targets ${_t})
+        if(_t MATCHES "Style")
+          list(APPEND _fb_style_plugins ${_t})
+        endif()
       endif()
     endforeach()
-    if(_fb_imported_plugins)
-      message(STATUS "  Imported static plugins: ${_fb_imported_plugins}")
-    else()
-      message(WARNING
-        "No Qt Gui/Widgets plugin targets were found to import. The static build "
-        "may render with the basic style (rough text, unchecked checkboxes).")
+    # Hard requirement: if there are no plugin targets at all, the static build
+    # cannot link in the platform/style/image plugins. Crash instead of silently
+    # shipping a broken binary, and dump every imported target so we can see the
+    # real names.
+    if(NOT _fb_plugin_targets)
+      message(FATAL_ERROR
+        "No Qt *Plugin imported targets are defined for the static build, so no "
+        "plugins (platform, native style, image formats) can be linked in.\n"
+        "All imported targets were:\n  ${_fb_imported_targets}")
     endif()
+    qt6_import_plugins(folderbuddies INCLUDE ${_fb_plugin_targets})
+    message(STATUS "  Imported plugin targets: ${_fb_plugin_targets}")
+    # The whole point of this block: guarantee the native Windows style plugin
+    # (Qt6::QModernWindowsStylePlugin / Qt6::QWindowsVistaStylePlugin) is one of
+    # them. Without it the static build renders with the basic style (rough text,
+    # unchecked checkboxes). Refuse to produce that binary.
+    if(NOT _fb_style_plugins)
+      message(FATAL_ERROR
+        "No native Qt style plugin was found among the imported plugin targets, "
+        "so the static build would fall back to the basic style (rough text, "
+        "unchecked checkboxes). Refusing to produce a broken binary.\n"
+        "Plugin targets found were:\n  ${_fb_plugin_targets}")
+    endif()
+    message(STATUS "  Native style plugin(s): ${_fb_style_plugins}")
   endif()
 endif()
 
