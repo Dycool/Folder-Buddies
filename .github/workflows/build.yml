@@ -127,10 +127,11 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          brew install cmake ninja pkg-config qt@6 miniupnpc imagemagick
+          brew install cmake ninja pkg-config qtbase miniupnpc imagemagick
           brew tap macos-fuse-t/homebrew-cask || true
           brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t
-          echo "$(brew --prefix qt@6)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix qtbase)/bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix qtbase):${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Generate app icons
@@ -182,10 +183,29 @@ jobs:
           # dependencies. macdeployqt needs explicit search roots for those
           # transitive dylibs, and FUSE-T is installed by a cask rather than a
           # formula prefix.
+          add_deploy_libpath() {
+            local libdir="$1"
+            if [ ! -d "$libdir" ]; then
+              return
+            fi
+            for arg in "${deploy_args[@]}"; do
+              if [ "$arg" = "-libpath=$libdir" ]; then
+                return
+              fi
+            done
+            deploy_args+=("-libpath=$libdir")
+          }
+
           fuse_libdir="$(pkg-config --variable=libdir fuse-t 2>/dev/null || true)"
-          if [ -d "$fuse_libdir" ]; then
-            deploy_args+=("-libpath=$fuse_libdir")
-          fi
+          add_deploy_libpath "$fuse_libdir"
+
+          for token in $(pkg-config --libs-only-L fuse-t 2>/dev/null || true); do
+            add_deploy_libpath "${token#-L}"
+          done
+
+          while IFS= read -r fuse_lib; do
+            add_deploy_libpath "${fuse_lib%/*}"
+          done < <(find /opt/homebrew /usr/local /Library -name libfuse-t.dylib -print 2>/dev/null)
 
           formulas=(
             qt@6 qt qtbase qtsvg qtdeclarative qtshadertools qt3d qt5compat
@@ -200,17 +220,20 @@ jobs:
           )
           for formula in "${formulas[@]}"; do
             if prefix="$(brew --prefix "$formula" 2>/dev/null)" && [ -d "$prefix/lib" ]; then
-              deploy_args+=("-libpath=$prefix/lib")
+              add_deploy_libpath "$prefix/lib"
             fi
           done
 
           for libdir in /opt/homebrew/lib /usr/local/lib \
+                        /Library/Filesystems/fuse-t.fs/Contents/Resources/lib \
+                        /Library/Filesystems/fuse-t.fs/Contents/Resources \
                         /Library/Frameworks/fuse_t.framework/Versions/A \
                         /Library/Frameworks/fuse-t.framework/Versions/A; do
-            if [ -d "$libdir" ]; then
-              deploy_args+=("-libpath=$libdir")
-            fi
+            add_deploy_libpath "$libdir"
           done
+
+          printf 'macdeployqt arguments:\n'
+          printf '  %s\n' "${deploy_args[@]}"
 
           macdeployqt "${deploy_args[@]}"
 
