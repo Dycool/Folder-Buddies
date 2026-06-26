@@ -144,24 +144,8 @@ else()
   target_compile_options(folderbuddies PRIVATE ${FUSE_CFLAGS_OTHER})
 endif()
 
-# ---- Bundle the macOS FUSE-T backend installer inside the .app ------------
+# ---- Code signing (macOS) ---------------------------------------------------
 if(APPLE)
-  set(FUSET_PKG "" CACHE FILEPATH "Path to a FUSE-T installer (.pkg/.dmg) to bundle")
-  set(MACFUSE_PKG "" CACHE FILEPATH "Optional fallback macFUSE installer (.pkg/.dmg) to bundle")
-  set(_pkg "")
-  if(FUSET_PKG AND EXISTS "${FUSET_PKG}")
-    set(_pkg "${FUSET_PKG}")
-  elseif(MACFUSE_PKG AND EXISTS "${MACFUSE_PKG}")
-    set(_pkg "${MACFUSE_PKG}")
-  endif()
-  if(_pkg)
-    set_source_files_properties("${_pkg}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
-    target_sources(folderbuddies PRIVATE "${_pkg}")
-    message(STATUS "FUSE backend installer bundled in the .app: ${_pkg}")
-  else()
-    message(STATUS "No bundled FUSE-T installer supplied; use -DFUSET_PKG=/path/to/FUSE-T.pkg for release packaging")
-  endif()
-
   set(FB_CODESIGN_IDENTITY "" CACHE STRING "Developer ID Application identity for signing the .app")
   if(FB_CODESIGN_IDENTITY)
     add_custom_command(TARGET folderbuddies POST_BUILD

@@ -164,9 +164,6 @@ jobs:
           if [ -n "${FIREBASE_DATABASE_URL:-}" ]; then
             args+=(-DFB_FIREBASE_DATABASE_URL="$FIREBASE_DATABASE_URL")
           fi
-          if [ -n "${FUSET_PKG:-}" ] && [ -f "$FUSET_PKG" ]; then
-            args+=(-DFUSET_PKG="$FUSET_PKG")
-          fi
           args+=(-DFB_MACOS_FUSE_BACKEND=fuse-t)
           cmake "${args[@]}"
 

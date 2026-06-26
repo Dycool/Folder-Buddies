@@ -148,7 +148,7 @@ Mountpoints are drive letters (`Z:` through `D:`).
 
 ### macOS — FUSE-T
 
-**FUSE-T** is preferred over macFUSE. The `.app` bundle can include the FUSE-T installer (via `-DFUSET_PKG`) which auto-installs on first mount with admin elevation. Mountpoints are at `/Volumes/<folder-name>`.
+**FUSE-T** is preferred over macFUSE. At launch the app checks if FUSE-T is installed and, if missing, installs it via Homebrew (installing Homebrew itself if needed). Mountpoints are at `/Volumes/<folder-name>`.
 
 ---
 

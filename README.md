@@ -90,7 +90,6 @@ cmake --build build
 ```
 brew install cmake ninja qt6 miniupnpc
 cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release \
-  -DFUSET_PKG=/path/to/FUSE-T.pkg \
   -DFB_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 cmake --build build
 ```

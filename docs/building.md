@@ -67,8 +67,7 @@ brew tap macos-fuse-t/homebrew-cask || true
 brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t
 
 cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release \
-  -DFB_MACOS_FUSE_BACKEND=fuse-t \
-  -DFUSET_PKG=/path/to/FUSE-T.pkg
+  -DFB_MACOS_FUSE_BACKEND=fuse-t
 cmake --build build
 ```
 
@@ -104,7 +103,7 @@ cmake --build build/cloudflare-core
 | `-DFB_SIGNALING_URL=<url>` | — | Hardcode your Worker endpoint into the build |
 | `-DFB_FIREBASE_DATABASE_URL=<url>` | — | Hardcode Firebase fallback endpoint |
 | `-DFB_MACOS_FUSE_BACKEND=<fuse-t|auto|macfuse>` | `fuse-t` | Select the macOS FUSE backend; release builds should use FUSE-T |
-| `-DFUSET_PKG=<path>` | — | Bundle a FUSE-T installer inside the macOS `.app` |
+| ~~`-DFUSET_PKG=<path>`~~ | — | *(removed — auto-installs via Homebrew at runtime)* |
 | `-DFB_CODESIGN_IDENTITY=<name>` | — | Developer ID identity for macOS codesigning |
 | `-DFB_BUILD_TESTS=ON` | ON | Build the crypto + signaling self-tests |
 | `-DFB_HAVE_LIBDATACHANNEL` | auto | Enable WebRTC compatibility transport |
