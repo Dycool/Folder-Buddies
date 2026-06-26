@@ -3,6 +3,7 @@
 #include "mainwindow.h"
 
 #include <QApplication>
+#include <QDebug>
 #include <QIcon>
 
 #include <csignal>
@@ -21,7 +22,7 @@ int main(int argc, char** argv) {
     QApplication::setWindowIcon(QIcon(":/icon.png"));
     
     // Debug: Ensure icon is loaded properly
-    QIcon appIcon = QApplication::applicationIcon();
+    QIcon appIcon = QApplication::windowIcon();
     if (appIcon.isNull()) {
         qDebug() << "Warning: Application icon not loaded";
     }

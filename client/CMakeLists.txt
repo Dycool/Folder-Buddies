@@ -84,15 +84,32 @@ if(NOT LibDataChannel_FOUND)
   find_package(libdatachannel CONFIG QUIET)
 endif()
 if(LibDataChannel_FOUND OR libdatachannel_FOUND)
-  target_compile_definitions(folderbuddies PRIVATE FB_HAVE_LIBDATACHANNEL)
-  if(TARGET LibDataChannel::datachannel)
-    target_link_libraries(folderbuddies PRIVATE LibDataChannel::datachannel)
-  elseif(TARGET datachannel)
-    target_link_libraries(folderbuddies PRIVATE datachannel)
-  elseif(TARGET libdatachannel::datachannel)
-    target_link_libraries(folderbuddies PRIVATE libdatachannel::datachannel)
+  # The imported target name varies between upstream, vcpkg, and Homebrew
+  # packagings (datachannel / datachannel-static / LibDataChannel::LibDataChannel).
+  # Pick the first that actually exists so we never define FB_HAVE_LIBDATACHANNEL
+  # without an accompanying link (which would fail at the linker).
+  set(_fb_dc_target "")
+  foreach(_cand
+      LibDataChannel::LibDataChannel
+      LibDataChannel::datachannel
+      LibDataChannel::datachannel-static
+      libdatachannel::libdatachannel
+      libdatachannel::datachannel
+      datachannel
+      datachannel-static)
+    if(TARGET ${_cand})
+      set(_fb_dc_target ${_cand})
+      break()
+    endif()
+  endforeach()
+  if(_fb_dc_target)
+    target_compile_definitions(folderbuddies PRIVATE FB_HAVE_LIBDATACHANNEL)
+    target_link_libraries(folderbuddies PRIVATE ${_fb_dc_target})
+    message(STATUS "WebRTC compatibility: enabled (libdatachannel target ${_fb_dc_target})")
+  else()
+    message(WARNING "libdatachannel package found but no known imported target was exposed; "
+                    "WebRTC (native<->browser) compatibility will be disabled.")
   endif()
-  message(STATUS "WebRTC compatibility: enabled (libdatachannel)")
 else()
   message(STATUS "WebRTC compatibility: disabled (libdatachannel not found)")
 endif()
@@ -164,7 +181,9 @@ if(APPLE)
   set(FB_CODESIGN_IDENTITY "" CACHE STRING "Developer ID Application identity for signing the .app")
   if(FB_CODESIGN_IDENTITY)
     add_custom_command(TARGET folderbuddies POST_BUILD
-      COMMAND codesign --force --deep --options runtime --sign "${FB_CODESIGN_IDENTITY}" "$<TARGET_BUNDLE_DIR:folderbuddies>"
+      COMMAND codesign --force --deep --options runtime
+              --entitlements "${CMAKE_SOURCE_DIR}/src/macos/folderbuddies.entitlements"
+              --sign "${FB_CODESIGN_IDENTITY}" "$<TARGET_BUNDLE_DIR:folderbuddies>"
       COMMENT "Codesigning Folder Buddies.app")
   endif()
 endif()
@@ -176,13 +195,21 @@ set(FB_ICON_PNG "${CMAKE_SOURCE_DIR}/src/icons/icon.png")
 set(FB_ICON_ICNS "${CMAKE_SOURCE_DIR}/src/icons/icon.icns")
 set(FB_ICON_ICO "${CMAKE_SOURCE_DIR}/src/icons/icon.ico")
 
-if(APPLE AND EXISTS "${FB_ICON_ICNS}")
-  set_source_files_properties("${FB_ICON_ICNS}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
-  target_sources(folderbuddies PRIVATE "${FB_ICON_ICNS}")
+if(APPLE)
+  # A custom Info.plist carries the TCC folder usage-description strings macOS
+  # needs to prompt for (rather than silently deny) access to the user's
+  # Desktop/Documents/Downloads/external volumes when hosting or mounting.
   set_target_properties(folderbuddies PROPERTIES
-    MACOSX_BUNDLE_ICON_FILE icon.icns
     MACOSX_BUNDLE_BUNDLE_NAME "Folder Buddies"
-    MACOSX_BUNDLE_GUI_IDENTIFIER "dev.folderbuddies.app")
+    MACOSX_BUNDLE_GUI_IDENTIFIER "dev.folderbuddies.app"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/src/macos/Info.plist.in")
+  if(EXISTS "${FB_ICON_ICNS}")
+    set_source_files_properties("${FB_ICON_ICNS}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    target_sources(folderbuddies PRIVATE "${FB_ICON_ICNS}")
+    set_target_properties(folderbuddies PROPERTIES MACOSX_BUNDLE_ICON_FILE icon.icns)
+  endif()
 elseif(WIN32 AND EXISTS "${FB_ICON_ICO}")
   # Ensure the resource file is properly configured and embedded
   configure_file(${CMAKE_SOURCE_DIR}/src/icons/appicon.rc.in ${CMAKE_BINARY_DIR}/appicon.rc @ONLY)

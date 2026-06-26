@@ -41,11 +41,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build pkg-config wget ca-certificates \
+            build-essential cmake ninja-build pkg-config wget git ca-certificates \
             qt6-base-dev qt6-base-dev-tools qt6-qpa-plugins qt6-translations-l10n \
-            libfuse3-3 libfuse3-dev libminiupnpc-dev \
+            libfuse3-3 libfuse3-dev libminiupnpc-dev libssl-dev \
             libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev fuse3 imagemagick libsodium-dev python3-pil \
             xdg-desktop-portal
+
+      - name: Build libdatachannel (native<->browser WebRTC bridge)
+        run: |
+          # Not packaged in Ubuntu's repos, so build the WebRTC transport from
+          # source. OpenSSL backend + bundled libjuice (no GnuTLS / libnice).
+          git clone --depth 1 --branch v0.24.5 --recurse-submodules \
+            https://github.com/paullouisageneau/libdatachannel.git _deps/libdatachannel
+          cmake -G Ninja -S _deps/libdatachannel -B _deps/libdatachannel/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_GNUTLS=OFF -DUSE_NICE=OFF \
+            -DNO_EXAMPLES=ON -DNO_TESTS=ON
+          cmake --build _deps/libdatachannel/build --parallel
+          sudo cmake --install _deps/libdatachannel/build
+          sudo ldconfig
 
       - name: Generate app icons
         run: |
@@ -127,11 +141,14 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          brew install cmake ninja pkg-config qtbase miniupnpc imagemagick
+          brew install cmake ninja pkg-config qtbase miniupnpc imagemagick libdatachannel
           brew tap macos-fuse-t/homebrew-cask || true
           brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t
           echo "$(brew --prefix qtbase)/bin" >> "$GITHUB_PATH"
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix qtbase):${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
+          # Append the generic Homebrew prefix so CMake find_package() can locate
+          # libdatachannel / miniupnpc configs (CMake does not search /opt/homebrew
+          # by default on Apple Silicon).
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix qtbase):$(brew --prefix):${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Generate app icons
@@ -226,7 +243,7 @@ jobs:
             qtremoteobjects qtscxml qtsensors qtserialbus qtspeech qttasktree
             qttools qttranslations qtvirtualkeyboard qtwebchannel qtwebengine
             qtwebview brotli webp zstd libpng jpeg-turbo libtiff jasper libmng
-            md4c dbus graphite2 libsodium miniupnpc
+            md4c dbus graphite2 libsodium miniupnpc libdatachannel openssl@3
           )
           for formula in "${formulas[@]}"; do
             if prefix="$(brew --prefix "$formula" 2>/dev/null)" && [ -d "$prefix/lib" ]; then
@@ -258,11 +275,15 @@ jobs:
 
       - name: Codesign
         run: |
+          entitlements="client/src/macos/folderbuddies.entitlements"
           if [ -n "$MACOS_CODESIGN_IDENTITY" ]; then
             codesign --force --deep --options runtime --timestamp \
+              --entitlements "$entitlements" \
               --sign "$MACOS_CODESIGN_IDENTITY" build/folderbuddies.app
           else
-            codesign --force --deep --sign - build/folderbuddies.app
+            codesign --force --deep \
+              --entitlements "$entitlements" \
+              --sign - build/folderbuddies.app
           fi
           codesign --verify --deep --strict --verbose=2 build/folderbuddies.app
 
@@ -302,8 +323,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: _cache/vcpkg-bincache
-          key: vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-${{ env.VCPKG_COMMIT }}
+          key: vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-libdatachannel-${{ env.VCPKG_COMMIT }}
           restore-keys: |
+            vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-libdatachannel-
             vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-
             vcpkg-windows-static-qtbase-core-gui-widgets-network-
 
@@ -325,6 +347,7 @@ jobs:
             "qtbase[core,gui,widgets,network]:x64-windows-static" `
             "miniupnpc:x64-windows-static" `
             "libsodium:x64-windows-static" `
+            "libdatachannel:x64-windows-static" `
             --clean-after-build
 
       - name: Configure

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The app loads bundled third-party dylibs (Qt, FUSE-T / libfuse3) that may
+       be signed by a different team identity. Under the hardened runtime,
+       library validation would otherwise refuse to load them, which can break
+       mounting. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- Peer-to-peer transfers: the app acts as both client and server. -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <key>com.apple.security.network.server</key>
+  <true/>
+
+  <!-- Read/write the folder the user picks in the open panel. Harmless when not
+       sandboxed; correct if App Sandbox is ever enabled. -->
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+</dict>
+</plist>

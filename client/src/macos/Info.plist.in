@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>@MACOSX_BUNDLE_EXECUTABLE_NAME@</string>
+  <key>CFBundleIconFile</key>
+  <string>@MACOSX_BUNDLE_ICON_FILE@</string>
+  <key>CFBundleIdentifier</key>
+  <string>@MACOSX_BUNDLE_GUI_IDENTIFIER@</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>@MACOSX_BUNDLE_BUNDLE_NAME@</string>
+  <key>CFBundleDisplayName</key>
+  <string>Folder Buddies</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@MACOSX_BUNDLE_SHORT_VERSION_STRING@</string>
+  <key>CFBundleVersion</key>
+  <string>@MACOSX_BUNDLE_BUNDLE_VERSION@</string>
+  <key>CFBundleSignature</key>
+  <string>????</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Folder Buddies</string>
+
+  <!-- TCC folder-access prompts. Without these usage strings macOS denies
+       access to protected locations silently instead of prompting, which is
+       why hosting or mounting a folder under Desktop/Documents/Downloads or
+       on an external volume fails. -->
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>Folder Buddies needs access to your Desktop to host or mount folders you select there.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>Folder Buddies needs access to your Documents to host or mount folders you select there.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>Folder Buddies needs access to your Downloads to host or mount folders you select there.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>Folder Buddies needs access to removable volumes to host or mount folders stored on them.</string>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>Folder Buddies needs access to network volumes to host or mount folders stored on them.</string>
+
+  <!-- The app shares folders peer-to-peer over the local network. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Folder Buddies uses the local network to share folders directly with nearby devices.</string>
+</dict>
+</plist>

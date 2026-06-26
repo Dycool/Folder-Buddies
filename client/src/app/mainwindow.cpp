@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QDebug>
 #include <QDesktopServices>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -65,10 +66,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowIcon(QIcon(":/icon.png"));
 
     // Debug: Ensure window icon is loaded properly
-    QIcon windowIcon = windowIcon();
-    if (windowIcon.isNull()) {
+    QIcon currentIcon = windowIcon();
+    if (currentIcon.isNull()) {
         qDebug() << "Warning: Window icon not loaded";
     }
+
+    auto* tabs = new QTabWidget;
     tabs->setObjectName("modeTabs");
     tabs->tabBar()->setExpanding(false);
     tabs->addTab(buildShareTab(), "Host");
