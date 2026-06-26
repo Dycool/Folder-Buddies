@@ -17,12 +17,8 @@ jobs:
       release_build: true
     secrets: inherit
 
-  cloudflare-validate:
-    uses: ./.github/workflows/cloudflare-worker.yml
-    secrets: inherit
-
   release:
-    needs: [build, cloudflare-validate]
+    needs: [build]
     runs-on: ubuntu-24.04
     steps:
       - name: Download all build artifacts
