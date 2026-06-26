@@ -34,6 +34,9 @@ private slots:
     void refreshStats();
     void onClientsChanged();
     void onMountEjected();
+#ifdef _WIN32
+    void checkProjFS();
+#endif
 
 private:
     QWidget* buildShareTab();

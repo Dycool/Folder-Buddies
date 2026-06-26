@@ -2,6 +2,7 @@
 
 #include "session.h"
 #include "token.h"
+#include "fuse_backend.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -10,6 +11,7 @@
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMetaObject>
@@ -60,6 +62,7 @@ static QLabel* hintLabel(const QString& text) {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Folder Buddies");
+    setWindowIcon(QIcon(":/icon.png"));
 
     auto* tabs = new QTabWidget;
     tabs->setObjectName("modeTabs");
@@ -228,6 +231,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             font-weight: 500;
         }
     )");
+
+#ifdef _WIN32
+    QTimer::singleShot(0, this, &MainWindow::checkProjFS);
+#endif
 }
 
 MainWindow::~MainWindow() {
@@ -339,6 +346,32 @@ void MainWindow::setShareRunning(bool running) {
     writeCheck_->setEnabled(!running);
     copyButton_->setEnabled(running);
 }
+
+#ifdef _WIN32
+void MainWindow::checkProjFS() {
+    if (fb::projfs_available()) return;
+
+    auto reply = QMessageBox::question(this, "Enable Projected File System?",
+        "Folder Buddies needs the Windows Projected File System (ProjFS) to "
+        "create virtual drives, but it is not enabled on your system.\n\n"
+        "Would you like to enable it now?\n\n"
+        "This requires administrator privileges and a system reboot.",
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+
+    if (reply == QMessageBox::Yes) {
+        std::string err;
+        if (fb::enable_fuse_backend(err)) {
+            QMessageBox::information(this, "Restart Required",
+                "ProjFS has been enabled. You must restart your computer for the "
+                "change to take effect.\n\n"
+                "After rebooting, Folder Buddies will be able to mount remote shares.");
+        } else {
+            QMessageBox::warning(this, "Could Not Enable ProjFS",
+                QString::fromStdString(err));
+        }
+    }
+}
+#endif
 
 void MainWindow::toggleShare() {
     if (server_ && server_->running()) {

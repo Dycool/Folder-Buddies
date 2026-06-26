@@ -1,7 +1,9 @@
 #include "fuse_backend.h"
 
 // ===========================================================================
-// Windows: native ProjFS optional feature check / silent DISM enable.
+// Windows: native ProjFS availability check and enable function (DISM).
+// The startup dialog in MainWindow handles the user-facing prompt — these
+// functions only perform the check / operation, no auto-enable.
 // ===========================================================================
 #ifdef _WIN32
 
@@ -27,12 +29,12 @@ bool run_dism_enable_projfs(std::string& err) {
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-    sei.lpVerb = L"runas"; // UAC elevation prompt
+    sei.lpVerb = L"runas";
     sei.lpFile = L"dism.exe";
     sei.lpParameters = L"/online /enable-feature /featurename:Client-ProjFS /all /norestart";
     sei.nShow = SW_HIDE;
     if (!ShellExecuteExW(&sei) || !sei.hProcess) {
-        err = "Projected File System is disabled and the elevation prompt was declined or failed";
+        err = "UAC elevation was declined or failed";
         return false;
     }
     WaitForSingleObject(sei.hProcess, INFINITE);
@@ -48,11 +50,23 @@ bool run_dism_enable_projfs(std::string& err) {
 
 } // namespace
 
+bool projfs_available() {
+    return projfs_dll_present();
+}
+
+bool enable_fuse_backend(std::string& err) {
+    return run_dism_enable_projfs(err);
+}
+
+// ensure_fuse_backend checks availability only — no auto-enable. The caller
+// (Mount::start or the startup dialog) determines whether to offer enablement.
 bool ensure_fuse_backend(std::string& err) {
     if (projfs_dll_present()) return true;
-    if (!run_dism_enable_projfs(err)) return false;
-    if (projfs_dll_present()) return true;
-    err = "Client-ProjFS was enabled but ProjectedFSLib.dll is still unavailable; reboot Windows and try again";
+    err = "Projected File System (ProjFS) is not enabled.\n\n"
+          "Folder Buddies uses the Windows Projected File System to create virtual "
+          "drives in Explorer. Open Windows Settings → Optional features → "
+          "Projected File System, or let Folder Buddies enable it for you\n"
+          "(requires administrator privileges and a reboot).";
     return false;
 }
 
