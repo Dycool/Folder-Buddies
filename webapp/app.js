@@ -526,29 +526,45 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return state.connectToken || state.code;
   }
 
+  function hashFragmentFrom(text) {
+    const hashAt = String(text || "").indexOf("#");
+    return hashAt >= 0 ? String(text).slice(hashAt + 1) : "";
+  }
+
+  function currentHashFragment() {
+    return hashFragmentFrom(location.href) || (location.hash ? location.hash.slice(1) : "");
+  }
+
+  function shareParamsFromFragment(frag) {
+    const params = new URLSearchParams(frag);
+    return {
+      room: params.get("r") || "",
+      file: params.get("f") || "",
+      folder: params.get("p") || params.get("d") || "",
+    };
+  }
+
   function parseJoinInput(raw, options = {}) {
     const text = clean(raw);
     const fromHash = (frag) => {
-      const params = new URLSearchParams(frag);
-      const file = params.get("f") || "";
-      const folder = params.get("p") || params.get("d") || "";
+      const { room, file, folder } = shareParamsFromFragment(frag);
       const directFile = file ? normalizePath(file) : "";
       const directFolder = folder ? normalizePath(folder) : "";
       state.directFilePath = directFile && directFile !== "/" ? directFile : "";
       state.directFolderPath = !state.directFilePath && directFolder ? directFolder : "";
       state.directFileConsumed = false;
       state.directFolderConsumed = false;
-      return params.get("r") || "";
+      return room;
     };
     try {
       const url = new URL(text);
-      const r = fromHash(url.hash.slice(1));
+      const r = fromHash(hashFragmentFrom(url.href) || url.hash.slice(1));
       if (r) return r;
     } catch { /* not a URL */ }
     const hashAt = text.indexOf("#");
     if (hashAt >= 0) {
       const frag = text.slice(hashAt + 1);
-      if (new URLSearchParams(frag).has("r")) {
+      if (shareParamsFromFragment(frag).room) {
         const r = fromHash(frag);
         if (r) return r;
       }
@@ -563,11 +579,9 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   function applyHash() {
-    if (!location.hash) return false;
-    const params = new URLSearchParams(location.hash.slice(1));
-    const room = params.get("r") || "";
-    const file = params.get("f") || "";
-    const folder = params.get("p") || params.get("d") || "";
+    const frag = currentHashFragment();
+    if (!frag) return false;
+    const { room, file, folder } = shareParamsFromFragment(frag);
     if (looksLikeRoom(room)) {
       state.pendingConnectToken = room;
       const directFile = file ? normalizePath(file) : "";
@@ -576,7 +590,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       state.directFolderPath = !state.directFilePath && directFolder ? directFolder : "";
       state.directFileConsumed = false;
       state.directFolderConsumed = false;
-      els.connectInput.value = state.directFilePath || state.directFolderPath ? "" : room;
+      els.connectInput.value = room;
       selectTab("connect");
       return true;
     }
@@ -1646,13 +1660,19 @@ import { argon2id } from "./vendor/noble/argon2.js";
     els.connectInput.disabled = connected;
   }
 
+  function hasClientSession() {
+    return !!(state.clientWs || state.dataChannel || state.clientPeer || state.manualClient);
+  }
+
   async function connect() {
     const rawInput = clean(els.connectInput.value);
-    const raw = rawInput || clean(state.pendingConnectToken);
+    const pendingToken = clean(state.pendingConnectToken);
+    const raw = rawInput || pendingToken;
     if (!raw) throw new Error("Enter a connect code or open a share link.");
     if (isWebOfflineOffer(raw)) return connectManualOffer(raw);
 
-    const resolved = resolveConnectToken(raw, { preserveDirect: !rawInput && !!state.pendingConnectToken });
+    const usingPreloadedToken = !!pendingToken && (!rawInput || rawInput === pendingToken);
+    const resolved = resolveConnectToken(raw, { preserveDirect: usingPreloadedToken });
     if (isWebOfflineOffer(resolved.token)) return connectManualOffer(resolved.token);
     if (!looksLikeRoom(resolved.code)) throw new Error("The browser client accepts 6- or 16-character web room codes/share links or FBW2O offline web offer codes. Native IP/port blobs are for the native app.");
 
@@ -2286,11 +2306,24 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (els.closePreview) els.closePreview.onclick = () => { els.previewPanel.hidden = true; els.previewBody.textContent = ""; };
 
     window.addEventListener("beforeunload", disconnectAll);
+    window.addEventListener("hashchange", openSharedHash);
+    window.addEventListener("pageshow", (event) => {
+      if (event.persisted) openSharedHash();
+    });
   }
 
   function isMobile() {
     return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
       || (navigator.maxTouchPoints > 1 && window.innerWidth < 800);
+  }
+
+  function openSharedHash() {
+    if (!applyHash() || hasClientSession()) return;
+    setConnectStatus("Opening shared link…");
+    connect().catch((e) => {
+      setConnectStatus("Not connected.");
+      toast(e.message);
+    });
   }
 
   function init() {
@@ -2301,14 +2334,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
     if (isMobile() || !supportsHosting()) disableHostTab();
     initEvents();
-    const autoConnect = applyHash();
-    if (autoConnect) {
-      setConnectStatus("Opening shared link…");
-      connect().catch((e) => {
-        setConnectStatus("Not connected.");
-        toast(e.message);
-      });
-    }
+    openSharedHash();
     setInterval(refreshStats, STATS_INTERVAL_MS);
     // Hidden devtools-only diagnostic (not a UI setting): console -> fbCacheStats()
     try { window.fbCacheStats = () => CACHE.snapshot(); } catch { /* ignore */ }
