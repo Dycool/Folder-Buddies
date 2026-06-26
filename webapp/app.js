@@ -662,6 +662,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   async function turnstileToken() {
+    if (config().turnstileRequiredForWebSocket !== true) return "";
     const sitekey = clean(config().turnstileSiteKey);
     if (!sitekey) return "";
     await waitForTurnstile();

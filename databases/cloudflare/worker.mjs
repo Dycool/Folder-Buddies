@@ -185,6 +185,21 @@ async function verifyTurnstile(request, env, token) {
   return { ok: true };
 }
 
+function envFlag(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || "").trim());
+}
+
+async function verifyWebSocketTurnstile(request, env, token) {
+  // WebSocket signaling must work for native clients too. Native clients cannot
+  // solve browser Turnstile challenges, and privacy/DNS filters can also block
+  // challenges.cloudflare.com in browsers. Keep Turnstile opt-in for WS rooms;
+  // rate limits and message caps remain the default protection.
+  const required = envFlag(env.REQUIRE_TURNSTILE_FOR_WEBSOCKET);
+  if (!env.TURNSTILE_SECRET_KEY) return { ok: true, disabled: true };
+  if (!required && !token) return { ok: true, skipped: true };
+  return verifyTurnstile(request, env, token);
+}
+
 async function create(request, env) {
   const contentLength = Number(request.headers.get("content-length") || "0");
   if (contentLength > MAX_CREATE_BODY_BYTES) return json({ error: "body_too_large" }, 413);
@@ -236,7 +251,7 @@ async function webSocketRoom(request, env, room) {
     return json({ error: "rate_limited", waitSeconds: 60 }, 429);
   }
   const url = new URL(request.url);
-  const turnstile = await verifyTurnstile(request, env, url.searchParams.get("turnstile") || "");
+  const turnstile = await verifyWebSocketTurnstile(request, env, url.searchParams.get("turnstile") || "");
   if (!turnstile.ok) return json({ error: turnstile.error, codes: turnstile.codes || [] }, turnstile.status || 403);
 
   const id = env.WEB_ROOMS.idFromName(room);

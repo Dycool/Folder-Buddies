@@ -47,6 +47,13 @@ std::string hresult_hex(HRESULT hr) {
     return buf;
 }
 
+bool make_virtualization_instance_id(GUID& id, std::string& err) {
+    RPC_STATUS st = ::UuidCreate(&id);
+    if (st == RPC_S_OK || st == RPC_S_UUID_LOCAL_ONLY) return true;
+    err = "UuidCreate failed (RPC status " + std::to_string(static_cast<unsigned long>(st)) + ")";
+    return false;
+}
+
 std::string narrow_raw(PCWSTR s) {
     if (!s) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, s, -1, nullptr, 0, nullptr, nullptr);
@@ -569,7 +576,13 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     state->allowWrites = allowWrites;
     state->root = std::filesystem::path(backingRoot);
     PRJ_CALLBACKS cb = callbacks();
-    HRESULT hr = fb::projfs::MarkDirectoryAsPlaceholder(widen(backingRoot).c_str(), nullptr, nullptr, nullptr);
+    GUID instanceId{};
+    if (!make_virtualization_instance_id(instanceId, err)) {
+        delete state;
+        cache_.reset();
+        return false;
+    }
+    HRESULT hr = fb::projfs::MarkDirectoryAsPlaceholder(widen(backingRoot).c_str(), nullptr, nullptr, &instanceId);
     if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) {
         delete state;
         cache_.reset();

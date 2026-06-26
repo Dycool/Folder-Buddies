@@ -164,11 +164,21 @@ bool extract_web_room(std::string text, std::string& code) {
 }
 
 std::string ws_url_for(const std::string& lookup, const char* role) {
-    std::string base = SignalingClient::base_url();
-    if (base.rfind("https://", 0) == 0) base.replace(0, 5, "wss");
-    else if (base.rfind("http://", 0) == 0) base.replace(0, 4, "ws");
-    while (!base.empty() && base.back() == '/') base.pop_back();
-    return base + "/room?code=" + lookup + "&role=" + role + "&web=1&compat=native";
+    QUrl url(QString::fromStdString(SignalingClient::base_url()));
+    if (url.scheme() == "https") url.setScheme("wss");
+    else if (url.scheme() == "http") url.setScheme("ws");
+
+    QString path = url.path();
+    while (path.endsWith('/')) path.chop(1);
+    url.setPath(path + "/room");
+
+    QUrlQuery q;
+    q.addQueryItem("code", QString::fromStdString(lookup));
+    q.addQueryItem("role", QString::fromLatin1(role));
+    q.addQueryItem("web", "1");
+    q.addQueryItem("compat", "native");
+    url.setQuery(q);
+    return url.toString(QUrl::FullyEncoded).toStdString();
 }
 
 #ifdef FB_HAVE_LIBDATACHANNEL
