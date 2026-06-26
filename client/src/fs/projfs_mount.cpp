@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <rpc.h>
 #include <shellapi.h>
+#include <shlobj_core.h>
 #include <projectedfslib.h>
 
 #include <algorithm>
