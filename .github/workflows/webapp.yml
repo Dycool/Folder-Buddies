@@ -64,6 +64,7 @@ jobs:
         env:
           FB_SIGNALING_URL: ${{ vars.FB_SIGNALING_URL }}
           TURNSTILE_SITE_KEY: ${{ vars.TURNSTILE_SITE_KEY }}
+          REQUIRE_TURNSTILE_FOR_WEBSOCKET: ${{ vars.REQUIRE_TURNSTILE_FOR_WEBSOCKET }}
           FIREBASE_API_KEY: ${{ vars.FIREBASE_API_KEY }}
           FIREBASE_AUTH_DOMAIN: ${{ vars.FIREBASE_AUTH_DOMAIN }}
           FIREBASE_DATABASE_URL: ${{ vars.FIREBASE_DATABASE_URL }}
@@ -93,6 +94,7 @@ jobs:
               'window.FB_WEBAPP_CONFIG = ' + json.dumps({
                   'signalingUrl': url,
                   'turnstileSiteKey': os.environ.get('TURNSTILE_SITE_KEY', ''),
+                  'turnstileRequiredForWebSocket': os.environ.get('REQUIRE_TURNSTILE_FOR_WEBSOCKET', '').lower() in ('1', 'true', 'yes', 'on'),
                   'firebase': firebase,
               }, indent=2) + ';\n'
           )

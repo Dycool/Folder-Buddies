@@ -533,6 +533,7 @@ struct WebRtcCompatHost::Impl {
     std::mutex mtx;
     std::condition_variable cv;
     std::atomic<bool> wsClosed{false};
+    std::string wsError;
     std::unordered_map<std::string, std::shared_ptr<rtc::PeerConnection>> pcs;
     std::unordered_map<std::string, std::shared_ptr<rtc::DataChannel>> channels;
     std::unordered_map<uint32_t, std::ofstream> uploads;
@@ -733,6 +734,8 @@ struct WebRtcCompatHost::Impl {
 
     void on_signal(const QJsonObject& msg) {
         const QString kind = msg.value("kind").toString();
+        if (kind == "ready") { live = true; cv.notify_all(); return; }
+        if (kind == "error") { std::lock_guard<std::mutex> lk(mtx); wsError = msg.value("error").toString("signaling error").toStdString(); wsClosed = true; cv.notify_all(); return; }
         if (kind == "client-joined") { create_peer(msg.value("peerId").toString().toStdString()); return; }
         if (kind == "client-left") { std::lock_guard<std::mutex> lk(mtx); pcs.erase(msg.value("peerId").toString().toStdString()); channels.erase(msg.value("peerId").toString().toStdString()); return; }
         if (kind != "signal") return;
@@ -853,6 +856,7 @@ bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomC
     impl_->root = fs::weakly_canonical(folder).string();
     impl_->allowWrites = allowWrites;
     impl_->wsClosed = false;
+    { std::lock_guard<std::mutex> lk(impl_->mtx); impl_->wsError.clear(); }
 
     std::string cloudErr;
     if (SignalingClient::configured()) {
@@ -861,15 +865,15 @@ bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomC
             if (!std::holds_alternative<rtc::string>(msg)) return;
             impl_->on_signal(parse_json_obj(std::get<rtc::string>(msg)));
         });
-        impl_->ws->onOpen([this]() { impl_->live = true; impl_->cv.notify_all(); });
+        impl_->ws->onOpen([this]() { impl_->cv.notify_all(); });
         impl_->ws->onClosed([this]() { impl_->live = false; impl_->wsClosed = true; impl_->cv.notify_all(); });
         try { impl_->ws->open(ws_url_for(lookup_of(roomCode), "host")); }
         catch (const std::exception& e) { cloudErr = e.what(); }
         if (cloudErr.empty()) {
             std::unique_lock<std::mutex> lk(impl_->mtx);
-            impl_->cv.wait_for(lk, std::chrono::seconds(4), [this]{ return impl_->live.load() || impl_->wsClosed.load(); });
+            impl_->cv.wait_for(lk, std::chrono::seconds(4), [this]{ return impl_->live.load() || impl_->wsClosed.load() || !impl_->wsError.empty(); });
             if (impl_->live.load()) return true;
-            cloudErr = "Cloudflare WebRTC compatibility signaling did not open";
+            cloudErr = impl_->wsError.empty() ? "Cloudflare WebRTC compatibility signaling did not become ready" : impl_->wsError;
         }
         try { if (impl_->ws) impl_->ws->close(); } catch (...) {}
         impl_->ws.reset();
@@ -928,6 +932,10 @@ bool WebRtcRemoteClient::connect(const std::string& webCodeOrRoom, std::string& 
         if (kind == "ready") {
             impl_->peerId = o.value("peerId").toString().toStdString();
             QJsonObject hello; hello["type"] = "compat-hello"; impl_->send_signal(hello);
+            return;
+        }
+        if (kind == "host-joined") {
+            if (!impl_->peerId.empty()) { QJsonObject hello; hello["type"] = "compat-hello"; impl_->send_signal(hello); }
             return;
         }
         if (kind == "host-left") {

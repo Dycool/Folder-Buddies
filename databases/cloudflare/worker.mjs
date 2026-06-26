@@ -316,8 +316,9 @@ export class WebSignalingRoom {
     }
     this.host = ws;
     ws.send(JSON.stringify({ kind: "ready", role: "host", room }));
-    for (const peerId of this.clients.keys()) {
+    for (const [peerId, client] of this.clients.entries()) {
       ws.send(JSON.stringify({ kind: "client-joined", peerId }));
+      safeSend(client, { kind: "host-joined" });
     }
     ws.addEventListener("message", (event) => this.onHostMessage(ws, event.data));
     ws.addEventListener("close", () => this.detachHost(ws));

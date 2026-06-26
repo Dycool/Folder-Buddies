@@ -740,6 +740,9 @@ import { argon2id } from "./vendor/noble/argon2.js";
       let settled = false;
       const ws = new WebSocket(signalUrl(lookup, role, token));
       ws.provider = "cloudflare";
+      ws._fbReady = false;
+      ws._fbSignalError = "";
+      ws._fbClosed = false;
       const fail = (message) => {
         if (settled) return;
         settled = true;
@@ -756,6 +759,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
       };
       ws.onerror = () => fail("Cloudflare signaling failed");
       ws.onclose = (event) => {
+        ws._fbClosed = true;
+        ws._fbCloseEvent = event;
         if (!settled) fail("Cloudflare signaling closed before it was ready");
         if (role === "host" && state.hostWs === ws) setShareStatus("Not hosting.");
         if (role === "client" && state.clientWs === ws) {
@@ -768,9 +773,36 @@ import { argon2id } from "./vendor/noble/argon2.js";
         }
       };
       ws.onmessage = (event) => {
-        try { onMessage(JSON.parse(event.data)); }
+        let msg;
+        try { msg = JSON.parse(event.data); }
+        catch { return; }
+        if (msg.kind === "ready") ws._fbReady = true;
+        if (msg.kind === "error") ws._fbSignalError = msg.error || "signaling_error";
+        try { onMessage(msg); }
         catch { /* ignore malformed signaling */ }
       };
+    });
+  }
+
+  function waitForCloudflareHostClaim(ws) {
+    if (ws._fbReady) return Promise.resolve(true);
+    if (ws._fbSignalError === "host_already_connected" || ws._fbClosed) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const done = (ok) => {
+        clearTimeout(timer);
+        ws.removeEventListener("message", onMessage);
+        ws.removeEventListener("close", onClose);
+        resolve(ok);
+      };
+      const onMessage = (event) => {
+        let msg; try { msg = JSON.parse(event.data); } catch { return; }
+        if (msg.kind === "ready") done(true);
+        else if (msg.kind === "error" && msg.error === "host_already_connected") done(false);
+      };
+      const onClose = () => done(false);
+      const timer = setTimeout(() => done(!ws._fbSignalError && !ws._fbClosed), 1500);
+      ws.addEventListener("message", onMessage);
+      ws.addEventListener("close", onClose);
     });
   }
 
@@ -971,17 +1003,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const lookup = lookupOf(code);
       const token = await turnstileToken();
       const ws = await openSignal("host", lookup, (msg) => handleHostSignal(msg).catch((err) => toast(err.message)), token);
-      const claimed = await new Promise((resolve) => {
-        const onReady = (event) => {
-          let msg; try { msg = JSON.parse(event.data); } catch { return; }
-          if (msg.kind === "ready") { cleanup(); resolve(true); }
-          else if (msg.kind === "error" && msg.error === "host_already_connected") { cleanup(); resolve(false); }
-        };
-        const onClose = () => { cleanup(); resolve(false); };
-        const cleanup = () => { ws.removeEventListener("message", onReady); ws.removeEventListener("close", onClose); };
-        ws.addEventListener("message", onReady);
-        ws.addEventListener("close", onClose);
-      });
+      const claimed = await waitForCloudflareHostClaim(ws);
       if (claimed) return { code, lookup, ws, provider: "cloudflare" };
       try { ws.close(); } catch { /* already closing */ }
     }
@@ -1581,6 +1603,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const peer = state.hostPeers.get(msg.peerId);
       if (peer) peer.pc.close();
       state.hostPeers.delete(msg.peerId);
+      state.plainSignalPeers.delete(msg.peerId);
       renderShareStatus();
       return;
     }
