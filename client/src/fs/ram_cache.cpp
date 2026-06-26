@@ -1,5 +1,6 @@
 #include "ram_cache.h"
 
+#include "client.h"
 #include "common.h"
 
 #include <algorithm>
@@ -274,6 +275,13 @@ struct RamCache::Impl {
         unsigned hw = std::thread::hardware_concurrency();
         unsigned workers = std::clamp<unsigned>(hw ? hw : 4, 2, 8);
         pool = std::make_unique<PrefetchPool>(workers);
+        if (auto* cl = dynamic_cast<Client*>(inner)) {
+            cl->onInvalidate = [this](const std::string& path) {
+                invalidateFile(path);
+                dirErase(path);
+                dirErase(parent_of(path));
+            };
+        }
     }
 
     ~Impl() {

@@ -21,7 +21,6 @@ const MAX_FIELD_BYTES = 8 * 1024;
 const MAX_CREATE_BODY_BYTES = 64 * 1024;
 const MAX_SIGNAL_BYTES = 96 * 1024;
 const MAX_TURNSTILE_TOKEN_BYTES = 4096;
-const MAX_CLIENTS_PER_ROOM = 8;
 const MAX_WS_MESSAGES_PER_SOCKET = 250;
 
 const SECURITY_CONTACT = "https://github.com/Dycool/Folder-Buddies/security/advisories/new";
@@ -272,7 +271,6 @@ export class WebSignalingRoom {
     this.state = state;
     this.env = env;
     this.host = null;
-    this.hostMax = 0; // host-configured client cap (0 = use MAX_CLIENTS_PER_ROOM)
     this.clients = new Map();
     this.messageCounts = new WeakMap();
   }
@@ -289,20 +287,19 @@ export class WebSignalingRoom {
     const [client, server] = Object.values(pair);
     server.accept();
 
-    if (role === "host") this.attachHost(server, room, url.searchParams.get("max"));
+    if (role === "host") this.attachHost(server, room);
     else this.attachClient(server, room);
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  attachHost(ws, room, max) {
+  attachHost(ws, room) {
     if (this.host) {
       ws.send(JSON.stringify({ kind: "error", error: "host_already_connected" }));
       ws.close(4409, "host already connected");
       return;
     }
     this.host = ws;
-    this.hostMax = clampMax(max);
     ws.send(JSON.stringify({ kind: "ready", role: "host", room }));
     for (const peerId of this.clients.keys()) {
       ws.send(JSON.stringify({ kind: "client-joined", peerId }));
@@ -313,12 +310,6 @@ export class WebSignalingRoom {
   }
 
   attachClient(ws, room) {
-    const limit = this.hostMax > 0 ? this.hostMax : MAX_CLIENTS_PER_ROOM;
-    if (this.clients.size >= limit) {
-      ws.send(JSON.stringify({ kind: "error", error: "room_full" }));
-      ws.close(4429, "room full");
-      return;
-    }
     const peerId = crypto.randomUUID();
     this.clients.set(peerId, ws);
     ws.send(JSON.stringify({ kind: "ready", role: "client", room, peerId }));
@@ -384,10 +375,4 @@ function safeSend(ws, msg) {
   try { ws.send(JSON.stringify(msg)); } catch { /* peer is gone */ }
 }
 
-// Host-supplied client cap, floored at the hard room limit. Returns 0 (unlimited
-// up to MAX_CLIENTS_PER_ROOM) for missing/invalid/zero values.
-function clampMax(raw) {
-  const n = Math.floor(Number(raw));
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.min(n, MAX_CLIENTS_PER_ROOM);
-}
+

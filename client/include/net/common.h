@@ -29,7 +29,7 @@ namespace fb {
 constexpr uint32_t kMagic = 0x46424459; // "FBDY"
 constexpr uint32_t kProtocolVersion = 2; // v2: post-handshake ChaCha20-Poly1305
 constexpr uint32_t kMaxIO = 1u << 20;   // 1 MiB read/write chunk
-constexpr int kDefaultConns = 4;        // parallel TCP streams per client
+constexpr int kDefaultConns = 8;        // automatic parallel TCP streams per client
 
 // Upper bound for an unauthenticated, plaintext handshake frame. recv_message()
 // is only used before the SecureChannel is active (HELLO/CHALLENGE/AUTH), all of
@@ -63,6 +63,7 @@ enum Op : uint16_t {
     OP_CHMOD = 25,
     OP_FLUSH = 26,
     OP_ACCESS = 27,
+    OP_INVALIDATE = 28,
 };
 
 #pragma pack(push, 1)

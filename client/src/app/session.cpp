@@ -5,10 +5,9 @@
 namespace fb {
 
 bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int port,
-                   int maxClients, bool lanOnly, bool allowWrites, bool secureHash,
-                   HostedShareTicket& ticket, std::string& err) {
+                   bool lanOnly, bool allowWrites, HostedShareTicket& ticket, std::string& err) {
     server.allowWrites = allowWrites;
-    if (!server.start(folder, port, maxClients, err)) return false;
+    if (!server.start(folder, port, err)) return false;
 
     std::string ip;
     uint16_t sharePort = server.boundPort;
@@ -49,64 +48,47 @@ bool start_hosting(Server& server, Upnp& upnp, const std::string& folder, int po
     }
 
     ticket.cloudPublished = false;
-    if (secureHash) {
+    SignalingClient sig;
+    if (SignalingClient::configured()) {
+        for (int attempt = 0; attempt < 12; ++attempt) {
+            std::string room = random_room_code(allowWrites);
+            CloudRecord rec;
+            std::string owner;
+            if (!seal_for_cloud(tok, room, rec, owner, e)) { ticket.cloudStatus = e; continue; }
+            if (sig.create(rec, e)) {
+                ticket.roomCode = room;
+                ticket.connectCode = room;
+                ticket.lookupId = rec.lookupId;
+                ticket.ownerToken = owner;
+                ticket.signalingBackend = "cloudflare";
+                ticket.cloudPublished = true;
+                break;
+            }
+            ticket.cloudStatus = e;
+        }
+    }
+
+    if (!ticket.cloudPublished && FirebaseSignalingClient::configured()) {
+        FirebaseSignalingClient fb;
+        for (int attempt = 0; attempt < 12; ++attempt) {
+            std::string room = random_room_code(allowWrites);
+            CloudRecord rec;
+            std::string owner;
+            if (!seal_for_cloud(tok, room, rec, owner, e)) { continue; }
+            if (fb.create(rec, e)) {
+                ticket.roomCode = room;
+                ticket.connectCode = room;
+                ticket.lookupId = rec.lookupId;
+                ticket.ownerToken = owner;
+                ticket.signalingBackend = "firebase";
+                ticket.cloudPublished = true;
+                break;
+            }
+        }
+    }
+
+    if (!ticket.cloudPublished) {
         ticket.connectCode = ticket.offlineBlob;
-        ticket.cloudStatus = "Secure hash mode — not published to Cloudflare/Firebase";
-    } else {
-        SignalingClient sig;
-        if (SignalingClient::configured()) {
-            for (int attempt = 0; attempt < 12; ++attempt) {
-                std::string room = random_room_code(allowWrites);
-                CloudRecord rec;
-                std::string owner;
-                if (!seal_for_cloud(tok, room, rec, owner, e)) { ticket.cloudStatus = e; continue; }
-                if (sig.create(rec, e)) {
-                    ticket.roomCode = room;
-                    ticket.connectCode = room;
-                    ticket.lookupId = rec.lookupId;
-                    ticket.ownerToken = owner;
-                    ticket.signalingBackend = "cloudflare";
-                    ticket.cloudPublished = true;
-                    ticket.cloudStatus = "Cloudflare room published; KV expires passively in 30 days";
-                    break;
-                }
-                ticket.cloudStatus = e;
-            }
-        } else {
-            ticket.cloudStatus = "Cloudflare signaling URL is not configured";
-        }
-
-        if (!ticket.cloudPublished && FirebaseSignalingClient::configured()) {
-            std::string firebaseLast;
-            FirebaseSignalingClient fb;
-            for (int attempt = 0; attempt < 12; ++attempt) {
-                std::string room = random_room_code(allowWrites);
-                CloudRecord rec;
-                std::string owner;
-                if (!seal_for_cloud(tok, room, rec, owner, e)) { firebaseLast = e; continue; }
-                if (fb.create(rec, e)) {
-                    ticket.roomCode = room;
-                    ticket.connectCode = room;
-                    ticket.lookupId = rec.lookupId;
-                    ticket.ownerToken = owner;
-                    ticket.signalingBackend = "firebase";
-                    ticket.cloudPublished = true;
-                    ticket.cloudStatus = "Cloudflare unavailable; Firebase fallback room published";
-                    break;
-                }
-                firebaseLast = e;
-            }
-            if (!ticket.cloudPublished && !firebaseLast.empty()) {
-                ticket.cloudStatus += "; Firebase fallback failed: " + firebaseLast;
-            }
-        } else if (!ticket.cloudPublished) {
-            ticket.cloudStatus += "; Firebase fallback URL is not configured";
-        }
-
-        if (!ticket.cloudPublished) {
-            ticket.connectCode = ticket.offlineBlob;
-            if (ticket.cloudStatus.empty()) ticket.cloudStatus = "Cloudflare/Firebase unavailable; using offline mode";
-        }
     }
     return true;
 }
@@ -143,10 +125,10 @@ bool resolve_share_code(const std::string& codeOrBlob, Token& tok, std::string& 
     return open_offline_blob(codeOrBlob, tok, err);
 }
 
-bool start_mounting(Client& client, Mount& mount, const Token& tok, const std::string& mountBase,
-                    int nconns, std::string& mountpoint, std::string& err) {
-    if (!client.connect(tok, nconns, err)) return false;
-    if (!mount.start(&client, mountBase, tok.folder, tok.allowWrites, err)) {
+bool start_mounting(Client& client, Mount& mount, const Token& tok,
+                    std::string& mountpoint, std::string& err) {
+    if (!client.connect(tok, kDefaultConns, err)) return false;
+    if (!mount.start(&client, "", tok.folder, tok.allowWrites, err)) {
         client.disconnect();
         return false;
     }

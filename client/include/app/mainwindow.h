@@ -14,7 +14,6 @@
 
 class QLineEdit;
 class QPlainTextEdit;
-class QSpinBox;
 class QCheckBox;
 class QPushButton;
 class QLabel;
@@ -30,7 +29,6 @@ private slots:
     void toggleShare();
     void toggleConnect();
     void browseFolder();
-    void browseMountBase();
     void copyToken();
     void openMount();
     void refreshStats();
@@ -44,23 +42,16 @@ private:
 
     // Share (server) side
     QLineEdit* folderEdit_;
-    QSpinBox* maxClientsSpin_;
-    QSpinBox* portSpin_;
     QCheckBox* lanCheck_;
     QCheckBox* writeCheck_;
-    QCheckBox* secureHashCheck_;
     QPushButton* shareButton_;
     QPlainTextEdit* tokenEdit_;
-    QLabel* offlineLabel_;
-    QPlainTextEdit* offlineEdit_;
     QPushButton* copyButton_;
     QLabel* shareStatus_;
     fb::HostedShareTicket activeTicket_;
 
     // Connect (client) side
     QPlainTextEdit* tokenInput_;
-    QLineEdit* mountBaseEdit_;
-    QSpinBox* connsSpin_;
     QPushButton* connectButton_;
     QPushButton* openButton_;
     QLabel* connectStatus_;

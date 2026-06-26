@@ -7,7 +7,6 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QDesktopServices>
-#include <QDir>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -17,7 +16,6 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSizePolicy>
-#include <QSpinBox>
 #include <QStatusBar>
 #include <QTabBar>
 #include <QTabWidget>
@@ -259,32 +257,11 @@ QWidget* MainWindow::buildShareTab() {
     fl->addWidget(browse);
     form->addRow("Folder:", folderRow);
 
-    maxClientsSpin_ = new QSpinBox;
-    maxClientsSpin_->setRange(0, 9999);
-    maxClientsSpin_->setValue(0);
-    auto* maxRow = new QWidget;
-    auto* maxLayout = new QHBoxLayout(maxRow);
-    maxLayout->setContentsMargins(0, 0, 0, 0);
-    maxLayout->setSpacing(8);
-    maxLayout->addWidget(maxClientsSpin_);
-    maxLayout->addWidget(hintLabel("0 = unlimited"));
-    maxLayout->addStretch(1);
-    form->addRow("Max clients:", maxRow);
-
-    portSpin_ = new QSpinBox;
-    portSpin_->setRange(0, 65535);
-    portSpin_->setValue(0);
-    portSpin_->setSpecialValueText("auto");
-    form->addRow("Port:", portSpin_);
-
     lanCheck_ = new QCheckBox("Share on this LAN only");
     form->addRow("", lanCheck_);
 
     writeCheck_ = new QCheckBox("Allow clients to upload and delete files");
     form->addRow("Access:", writeCheck_);
-
-    secureHashCheck_ = new QCheckBox("Secure hash code (long code; stronger secret than the room code)");
-    form->addRow("Security:", secureHashCheck_);
 
     shareButton_ = new QPushButton("Host");
     shareButton_->setObjectName("primaryButton");
@@ -302,12 +279,6 @@ QWidget* MainWindow::buildShareTab() {
     tl->addWidget(tokenEdit_);
     tl->addWidget(copyButton_);
     form->addRow("Connect code:", tokenRow);
-
-    offlineLabel_ = new QLabel("Offline fallback:");
-    offlineEdit_ = codeEdit("offline fallback blob appears here", true);
-    offlineLabel_->hide();
-    offlineEdit_->hide();
-    form->addRow(offlineLabel_, offlineEdit_);
 
     shareStatus_ = new QLabel("Not hosting.");
     shareStatus_->setObjectName("statusLabel");
@@ -328,22 +299,6 @@ QWidget* MainWindow::buildConnectTab() {
 
     tokenInput_ = codeEdit("");
     form->addRow("Connect code:", tokenInput_);
-
-    auto* mbRow = new QWidget;
-    auto* ml = new QHBoxLayout(mbRow);
-    ml->setContentsMargins(0, 0, 0, 0);
-    ml->setSpacing(8);
-    mountBaseEdit_ = new QLineEdit(QDir::homePath() + "/FolderBuddies");
-    auto* browse = new QPushButton("Browse…");
-    connect(browse, &QPushButton::clicked, this, &MainWindow::browseMountBase);
-    ml->addWidget(mountBaseEdit_);
-    ml->addWidget(browse);
-    form->addRow("Mount under:", mbRow);
-
-    connsSpin_ = new QSpinBox;
-    connsSpin_->setRange(1, 16);
-    connsSpin_->setValue(fb::kDefaultConns);
-    form->addRow("Connections:", connsSpin_);
 
     connectButton_ = new QPushButton("Connect");
     connectButton_->setObjectName("primaryButton");
@@ -367,25 +322,12 @@ void MainWindow::browseFolder() {
     if (!dir.isEmpty()) folderEdit_->setText(dir);
 }
 
-void MainWindow::browseMountBase() {
-    QString dir = QFileDialog::getExistingDirectory(this, "Choose mount base directory");
-    if (!dir.isEmpty()) mountBaseEdit_->setText(dir);
-}
-
 void MainWindow::setShareRunning(bool running) {
     shareButton_->setText(running ? "Stop hosting" : "Host");
     folderEdit_->setEnabled(!running);
-    maxClientsSpin_->setEnabled(!running);
-    portSpin_->setEnabled(!running);
     lanCheck_->setEnabled(!running);
     writeCheck_->setEnabled(!running);
-    secureHashCheck_->setEnabled(!running);
     copyButton_->setEnabled(running);
-    if (!running) {
-        offlineEdit_->clear();
-        offlineEdit_->hide();
-        offlineLabel_->hide();
-    }
 }
 
 void MainWindow::toggleShare() {
@@ -401,9 +343,6 @@ void MainWindow::toggleShare() {
         }
         activeTicket_ = fb::HostedShareTicket{};
         tokenEdit_->clear();
-        offlineEdit_->clear();
-        offlineEdit_->hide();
-        offlineLabel_->hide();
         shareStatus_->setText("Not hosting.");
         setShareRunning(false);
         return;
@@ -421,9 +360,8 @@ void MainWindow::toggleShare() {
     };
     std::string err;
     fb::HostedShareTicket ticket;
-    if (!fb::start_hosting(*server_, upnp_, folder.toStdString(), portSpin_->value(),
-                           maxClientsSpin_->value(), lanCheck_->isChecked(),
-                           writeCheck_->isChecked(), secureHashCheck_->isChecked(), ticket, err)) {
+    if (!fb::start_hosting(*server_, upnp_, folder.toStdString(), 0,
+                           lanCheck_->isChecked(), writeCheck_->isChecked(), ticket, err)) {
         QMessageBox::critical(this, "Folder Buddies", QString::fromStdString(err));
         upnp_.unmap();
         server_->stop();
@@ -435,20 +373,11 @@ void MainWindow::toggleShare() {
     if (ticket.cloudPublished && fb::web_compat_available()) {
         webCompatHost_ = std::make_unique<fb::WebRtcCompatHost>();
         std::string werr;
-        if (!webCompatHost_->start(folder.toStdString(), ticket.roomCode, writeCheck_->isChecked(),
-                                   maxClientsSpin_->value(), werr)) {
-            shareStatus_->setText("Native TCP sharing active; WebRTC compatibility failed: " + QString::fromStdString(werr));
+        if (!webCompatHost_->start(folder.toStdString(), ticket.roomCode, writeCheck_->isChecked(), werr)) {
         }
     }
     tokenEdit_->setPlainText(QString::fromStdString(ticket.connectCode));
-    const bool showOfflineFallback = ticket.cloudPublished && ticket.offlineBlob != ticket.connectCode;
-    offlineEdit_->setPlainText(QString::fromStdString(ticket.offlineBlob));
-    offlineEdit_->setVisible(showOfflineFallback);
-    offlineLabel_->setVisible(showOfflineFallback);
-    shareStatus_->setText(QString("Sharing on port %1 — %2 — %3 — 0 client(s)")
-                              .arg(server_->boundPort)
-                              .arg(QString::fromStdString(ticket.reach))
-                              .arg(QString::fromStdString(ticket.cloudStatus)) +
+    shareStatus_->setText(QString("Hosting — 0 client(s)") +
                           (writeCheck_->isChecked() ? " — read/write" : " — read-only"));
     setShareRunning(true);
 }
@@ -456,9 +385,10 @@ void MainWindow::toggleShare() {
 void MainWindow::onClientsChanged() {
     if (!server_ || !server_->running()) return;
     QString t = shareStatus_->text();
-    int dash = t.lastIndexOf(" — ");
+    int dash = t.indexOf(" — ");
     if (dash >= 0) t = t.left(dash);
-    shareStatus_->setText(t + QString(" — %1 client(s)").arg(server_->clientCount()));
+    shareStatus_->setText(t + QString(" — %1 client(s)").arg(server_->clientCount()) +
+                          (server_->allowWrites ? " — read/write" : " — read-only"));
 }
 
 void MainWindow::copyToken() {
@@ -469,8 +399,6 @@ void MainWindow::copyToken() {
 void MainWindow::setConnected(bool connected) {
     connectButton_->setText(connected ? "Disconnect" : "Connect");
     tokenInput_->setEnabled(!connected);
-    mountBaseEdit_->setEnabled(!connected);
-    connsSpin_->setEnabled(!connected);
     openButton_->setEnabled(connected);
 }
 
@@ -494,10 +422,9 @@ void MainWindow::toggleConnect() {
 
     if (fb::resolve_share_code(entered, tok, decodeErr)) {
         client_ = std::make_unique<fb::Client>();
-        if (fb::start_mounting(*client_, mount_, tok, mountBaseEdit_->text().toStdString(),
-                               connsSpin_->value(), mountpoint, err)) {
+        if (fb::start_mounting(*client_, mount_, tok, mountpoint, err)) {
             mounted = true;
-            connectStatus_->setText("Mounted as " + QString::fromStdString(mountpoint));
+            connectStatus_->setText("Connected.");
         } else {
             client_->disconnect();
             client_.reset();
@@ -508,10 +435,10 @@ void MainWindow::toggleConnect() {
         webClient_ = std::make_unique<fb::WebRtcRemoteClient>();
         if (webClient_->connect(entered, err)) {
             std::string name = "Web share";
-            if (mount_.start(webClient_.get(), mountBaseEdit_->text().toStdString(), name, true, err)) {
+            if (mount_.start(webClient_.get(), "", name, true, err)) {
                 mountpoint = mount_.mountpoint();
                 mounted = true;
-                connectStatus_->setText("Mounted via WebRTC compatibility as " + QString::fromStdString(mountpoint));
+                connectStatus_->setText("Connected.");
             }
         }
         if (!mounted) { webClient_->disconnect(); webClient_.reset(); }

@@ -29,7 +29,7 @@
 
 **1. 🔑 Host a folder**
 ```
-folderbuddies host /path/to/folder [--lan] [--port N] [--max-clients N]
+folderbuddies host /path/to/folder [--lan] [--port N]
 ```
 This prints either a **room code** (Cloudflare) or a **long offline blob**. Share one with the client. Read-only shares use a short 6-char code; enabling writes (`--write`) issues a stronger 16-char code.
 

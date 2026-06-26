@@ -4,7 +4,6 @@
 #include "web_compat.h"
 
 #include <QCoreApplication>
-#include <QDir>
 #include <QString>
 #include <QTextStream>
 #include <QTimer>
@@ -39,16 +38,11 @@ void print_usage() {
           << "  folderbuddies host <folder> [options]\n"
           << "      --lan               share on this LAN only (don't expose to the internet)\n"
           << "      --port <n>          listen port (default: auto / OS-chosen)\n"
-          << "      --max-clients <n>   limit distinct clients (default: unlimited)\n"
           << "      --write             allow clients to upload, edit, and delete files\n"
-          << "      --secure-hash       skip Cloudflare/Firebase and print the long offline code\n"
-          << "      (prints a short read-only room code, or a longer one with --write; if\n"
-          << "       Cloudflare/Firebase are unavailable,\n"
-          << "       prints a long self-contained offline Base91 blob instead)\n\n"
-          << "  folderbuddies connect <room-code-or-offline-blob> [options]\n"
-          << "      --mount <dir>       base mount directory (default: ~/FolderBuddies)\n"
-          << "      --conns <n>         parallel connections (default: "
-          << kDefaultConns << ")\n\n"
+          << "      (prints a connect code; a short room code when published via Cloudflare/Firebase,\n"
+          << "       or a longer self-contained offline Base91 blob when they are unavailable)\n\n"
+          << "  folderbuddies connect <room-code-or-offline-blob>\n"
+          << "      mounts automatically as a drive/volume at the platform default\n\n"
           << "  With no subcommand the graphical app is launched.\n";
     out().flush();
 }
@@ -65,7 +59,7 @@ struct Args {
 };
 
 bool takes_value(std::string_view f) {
-    return f == "--port" || f == "--max-clients" || f == "--mount" || f == "--conns";
+    return f == "--port" || f == "--conns";
 }
 
 bool parse(int argc, char** argv, int start, Args& a, std::string& perr) {
@@ -101,7 +95,6 @@ int cli_host(const Args& a) {
     if (a.positional.empty()) { err() << "host: missing <folder>\n"; err().flush(); return 2; }
 
     int port = a.get("--port") ? std::stoi(*a.get("--port")) : 0;
-    int maxClients = a.get("--max-clients") ? std::stoi(*a.get("--max-clients")) : 0;
 
     Server server;
     Upnp upnp;
@@ -112,8 +105,8 @@ int cli_host(const Args& a) {
 
     HostedShareTicket ticket;
     std::string e;
-    if (!start_hosting(server, upnp, a.positional, port, maxClients, a.has("--lan"),
-                       a.has("--write"), a.has("--secure-hash"), ticket, e)) {
+    if (!start_hosting(server, upnp, a.positional, port, a.has("--lan"),
+                       a.has("--write"), ticket, e)) {
         err() << "host failed: " << QString::fromStdString(e) << "\n";
         err().flush();
         return 1;
@@ -123,7 +116,7 @@ int cli_host(const Args& a) {
     if (ticket.cloudPublished && web_compat_available()) {
         webCompat = std::make_unique<WebRtcCompatHost>();
         std::string werr;
-        if (!webCompat->start(a.positional, ticket.roomCode, a.has("--write"), maxClients, werr)) {
+        if (!webCompat->start(a.positional, ticket.roomCode, a.has("--write"), werr)) {
             out() << "  WebRTC compatibility disabled: " << QString::fromStdString(werr) << "\n";
         }
     }
@@ -133,17 +126,10 @@ int cli_host(const Args& a) {
           << "  " << QString::fromStdString(ticket.reach) << "\n"
           << "  signaling: " << QString::fromStdString(ticket.cloudStatus) << "\n"
           << "  access: " << (a.has("--write") ? "read/write" : "read-only") << "\n"
-          << "  encryption: ChaCha20-Poly1305 (always on)\n\n";
-    if (ticket.cloudPublished) {
-        out() << "Room code:\n  "
-              << QString::fromStdString(ticket.roomCode) << "\n\n"
-              << "Offline secure hash fallback:\n  "
-              << QString::fromStdString(ticket.offlineBlob) << "\n\n";
-    } else {
-        out() << "Secure/offline Base91 code:\n  "
-              << QString::fromStdString(ticket.offlineBlob) << "\n\n";
-    }
-    out() << "Share only the code/blob — no password. Cloudflare never receives the\n"
+          << "  encryption: ChaCha20-Poly1305 (always on)\n\n"
+          << "Connect code:\n  "
+          << QString::fromStdString(ticket.connectCode) << "\n\n"
+          << "Share only that code — no password. Cloudflare never receives the\n"
           << "IP, port, data-path secret, or the secret half of the code.\n"
           << "Press Ctrl+C to stop sharing.\n";
     out().flush();
@@ -164,10 +150,6 @@ int cli_host(const Args& a) {
 int cli_connect(const Args& a) {
     if (a.positional.empty()) { err() << "connect: missing <room-code-or-offline-blob>\n"; err().flush(); return 2; }
 
-    std::string mountBase =
-        a.get("--mount").value_or((QDir::homePath() + "/FolderBuddies").toStdString());
-    int conns = a.get("--conns") ? std::stoi(*a.get("--conns")) : kDefaultConns;
-
     Token tok;
     std::string decodeErr, e, mountpoint;
     Mount mount;
@@ -177,7 +159,7 @@ int cli_connect(const Args& a) {
 
     if (resolve_share_code(a.positional, tok, decodeErr)) {
         client = std::make_unique<Client>();
-        if (start_mounting(*client, mount, tok, mountBase, conns, mountpoint, e)) {
+        if (start_mounting(*client, mount, tok, mountpoint, e)) {
             label = tok.folder;
         } else {
             client->disconnect();
@@ -189,7 +171,7 @@ int cli_connect(const Args& a) {
         webClient = std::make_unique<WebRtcRemoteClient>();
         if (webClient->connect(a.positional, e)) {
             label = "Web share";
-            if (!mount.start(webClient.get(), mountBase, label, true, e)) {
+            if (!mount.start(webClient.get(), "", label, true, e)) {
                 webClient->disconnect();
                 webClient.reset();
             } else {

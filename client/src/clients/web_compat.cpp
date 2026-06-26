@@ -518,7 +518,6 @@ bool looks_like_web_compat_code(const std::string& text) {
 struct WebRtcCompatHost::Impl {
     std::string root;
     bool allowWrites = false;
-    int maxClients = 0;
     std::shared_ptr<rtc::WebSocket> ws;
     std::shared_ptr<FirebaseCompatRelay> fbRelay;
     std::mutex mtx;
@@ -699,7 +698,6 @@ struct WebRtcCompatHost::Impl {
 
     void create_peer(const std::string& peerId) {
         std::lock_guard<std::mutex> lk(mtx);
-        if (maxClients > 0 && static_cast<int>(pcs.size()) >= maxClients) return;
         rtc::Configuration cfg;
         cfg.iceServers.emplace_back("stun:stun.l.google.com:19302");
         auto pc = std::make_shared<rtc::PeerConnection>(cfg);
@@ -840,11 +838,10 @@ struct WebRtcRemoteClient::Impl {
 WebRtcCompatHost::WebRtcCompatHost() : impl_(new Impl) {}
 WebRtcCompatHost::~WebRtcCompatHost() { stop(); }
 
-bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomCode, bool allowWrites, int maxClients, std::string& err) {
+bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomCode, bool allowWrites, std::string& err) {
     if (!looks_like_room_code(roomCode)) { err = "WebRTC compatibility needs a 6- or 16-character room code"; return false; }
     impl_->root = fs::weakly_canonical(folder).string();
     impl_->allowWrites = allowWrites;
-    impl_->maxClients = maxClients;
     impl_->wsClosed = false;
 
     std::string cloudErr;
@@ -1048,7 +1045,7 @@ struct WebRtcCompatHost::Impl {};
 struct WebRtcRemoteClient::Impl {};
 WebRtcCompatHost::WebRtcCompatHost() : impl_(new Impl) {}
 WebRtcCompatHost::~WebRtcCompatHost() = default;
-bool WebRtcCompatHost::start(const std::string&, const std::string&, bool, int, std::string& err) { err = "libdatachannel support was not built"; return false; }
+bool WebRtcCompatHost::start(const std::string&, const std::string&, bool, std::string& err) { err = "libdatachannel support was not built"; return false; }
 void WebRtcCompatHost::stop() {}
 bool WebRtcCompatHost::running() const { return false; }
 int WebRtcCompatHost::clientCount() const { return 0; }

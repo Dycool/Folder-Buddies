@@ -23,7 +23,7 @@ namespace fb {
 
 class Server {
 public:
-    bool start(const std::string& folder, int port, int maxClients, std::string& err);
+    bool start(const std::string& folder, int port, std::string& err);
     void stop();
     bool running() const { return running_.load(); }
 
@@ -38,6 +38,14 @@ public:
     int clientCount();
 
 private:
+    struct BroadcastSession {
+        socket_t sock;
+        SecureChannel* chan;
+    };
+    void broadcastInvalidate(const std::string& path);
+    void registerSession(socket_t s, SecureChannel* chan);
+    void unregisterSession(socket_t s);
+
     void acceptLoop();
     void handleConn(socket_t s);
     bool handshake(socket_t s, std::string& clientId, SecureChannel& chan);
@@ -45,7 +53,6 @@ private:
 
     std::string root_;
     QByteArray authKey_;
-    int maxClients_ = 0;
 
     socket_t listen_ = FB_BAD_SOCKET;
     std::thread acceptThread_;
@@ -62,6 +69,10 @@ private:
     std::mutex fhMtx_;
     std::unordered_map<uint64_t, std::shared_ptr<FileHandle>> handles_;
     std::atomic<uint64_t> nextFh_{1};
+    std::unordered_map<uint64_t, std::string> fhPaths_; // guarded by fhMtx_
+
+    std::mutex broadcastMtx_;
+    std::vector<BroadcastSession> broadcastSessions_;
 };
 
 } // namespace fb

@@ -4,6 +4,7 @@
 #include "osflags.h"
 #include "token.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -87,7 +88,7 @@ int Server::clientCount() {
     return static_cast<int>(sessions_.size());
 }
 
-bool Server::start(const std::string& folder, int port, int maxClients, std::string& err) {
+bool Server::start(const std::string& folder, int port, std::string& err) {
     net_startup();
     root_ = fs::weakly_canonical(fs::path(folder)).string();
     if (!fs::is_directory(root_)) { err = "Not a directory: " + folder; return false; }
@@ -96,7 +97,6 @@ bool Server::start(const std::string& folder, int port, int maxClients, std::str
 
     secret = random_bytes(kSecretBytes);
     authKey_ = derive_key(secret);
-    maxClients_ = maxClients;
 
     // Dual-stack IPv6 socket (IPV6_V6ONLY off) accepts IPv6 and IPv4-mapped
     // clients; fall back to plain IPv4 when IPv6 is unavailable.
@@ -231,16 +231,6 @@ bool Server::handshake(socket_t s, std::string& clientId, SecureChannel& chan) {
     }
     clientId.assign(reinterpret_cast<char*>(cid), 16);
 
-    // Enforce max clients (count distinct client ids).
-    {
-        std::lock_guard<std::mutex> lk(sessMtx_);
-        if (maxClients_ > 0 && sessions_.find(clientId) == sessions_.end() &&
-            static_cast<int>(sessions_.size()) >= maxClients_) {
-            send_message(s, OP_AUTH_FAIL, 0, h.req_id, nullptr, 0);
-            return false;
-        }
-    }
-
     std::vector<uint8_t> nonceS = random_bytes(16);
     if (!send_message(s, OP_CHALLENGE, 0, h.req_id, nonceS.data(), 16)) return false;
 
@@ -272,6 +262,7 @@ void Server::handleConn(socket_t s) {
         std::lock_guard<std::mutex> lk(sessMtx_);
         sessions_[clientId]++;
         if (onClientsChanged) onClientsChanged();
+        registerSession(s, &chan);
     }
 
     std::vector<uint8_t> payload;
@@ -343,8 +334,10 @@ void Server::handleConn(socket_t s) {
             {
                 std::lock_guard<std::mutex> lk(fhMtx_);
                 handles_[id] = fh;
+                fhPaths_[id] = path;
             }
             w.pod(id);
+            if (h.op == OP_CREATE) broadcastInvalidate(path);
             break;
         }
         case OP_READ: {
@@ -374,11 +367,14 @@ void Server::handleConn(socket_t s) {
             r.pod(fhid);
             r.pod(off);
             uint32_t n = static_cast<uint32_t>(r.e - r.p);
+            std::string writePath;
             std::shared_ptr<FileHandle> fh;
             {
                 std::lock_guard<std::mutex> lk(fhMtx_);
                 auto it = handles_.find(fhid);
                 if (it != handles_.end()) fh = it->second;
+                auto pit = fhPaths_.find(fhid);
+                if (pit != fhPaths_.end()) writePath = pit->second;
             }
             if (!fh) { status = EBADF; break; }
             int64_t put = fh->pwrite(r.p, n, off);
@@ -386,6 +382,7 @@ void Server::handleConn(socket_t s) {
             bytesIn += static_cast<uint64_t>(put);
             uint32_t written = static_cast<uint32_t>(put);
             w.pod(written);
+            if (!writePath.empty()) broadcastInvalidate(writePath);
             break;
         }
         case OP_RELEASE: {
@@ -393,6 +390,7 @@ void Server::handleConn(socket_t s) {
             r.pod(fhid);
             std::lock_guard<std::mutex> lk(fhMtx_);
             handles_.erase(fhid);
+            fhPaths_.erase(fhid);
             break;
         }
         case OP_FSYNC: {
@@ -418,6 +416,7 @@ void Server::handleConn(socket_t s) {
             if (!resolve(path, abs)) { status = EACCES; break; }
             std::error_code ec;
             if (!fs::create_directory(abs, ec)) status = ec ? EIO : EEXIST;
+            if (status == 0) broadcastInvalidate(path);
             break;
         }
         case OP_UNLINK:
@@ -428,6 +427,7 @@ void Server::handleConn(socket_t s) {
             if (!resolve(path, abs)) { status = EACCES; break; }
             std::error_code ec;
             if (!fs::remove(abs, ec)) status = ec ? EIO : ENOENT;
+            if (status == 0) broadcastInvalidate(path);
             break;
         }
         case OP_RENAME: {
@@ -439,6 +439,7 @@ void Server::handleConn(socket_t s) {
             std::error_code ec;
             fs::rename(afrom, ato, ec);
             if (ec) status = EIO;
+            if (status == 0) { broadcastInvalidate(from); broadcastInvalidate(to); }
             break;
         }
         case OP_TRUNCATE: {
@@ -451,6 +452,7 @@ void Server::handleConn(socket_t s) {
             std::error_code ec;
             fs::resize_file(abs, size, ec);
             if (ec) status = EIO;
+            if (status == 0) broadcastInvalidate(path);
             break;
         }
         case OP_STATFS: {
@@ -488,6 +490,7 @@ void Server::handleConn(socket_t s) {
 #ifndef _WIN32
             if (::chmod(abs.c_str(), mode) != 0) status = errno;
 #endif
+            if (status == 0) broadcastInvalidate(path);
             break;
         }
         case OP_UTIMENS: {
@@ -503,6 +506,7 @@ void Server::handleConn(socket_t s) {
                 abs, fs::file_time_type(std::chrono::seconds(mtime)), ec);
             (void)atime;
             if (ec) status = EIO;
+            if (status == 0) broadcastInvalidate(path);
             break;
         }
         default:
@@ -515,6 +519,7 @@ void Server::handleConn(socket_t s) {
             break;
     }
 
+    unregisterSession(s);
     if (authed) {
         std::lock_guard<std::mutex> lk(sessMtx_);
         if (--sessions_[clientId] <= 0) sessions_.erase(clientId);
@@ -526,6 +531,30 @@ void Server::handleConn(socket_t s) {
         if (--connCount_ == 0) connCv_.notify_all();
     }
     close_socket(s);
+}
+
+// ---- cross-client invalidation broadcast -----------------------------------
+
+void Server::registerSession(socket_t s, SecureChannel* chan) {
+    std::lock_guard<std::mutex> lk(broadcastMtx_);
+    broadcastSessions_.push_back({s, chan});
+}
+
+void Server::unregisterSession(socket_t s) {
+    std::lock_guard<std::mutex> lk(broadcastMtx_);
+    auto it = std::remove_if(broadcastSessions_.begin(), broadcastSessions_.end(),
+        [s](const BroadcastSession& bs) { return bs.sock == s; });
+    broadcastSessions_.erase(it, broadcastSessions_.end());
+}
+
+void Server::broadcastInvalidate(const std::string& path) {
+    Writer w;
+    w.str(path);
+    std::lock_guard<std::mutex> lk(broadcastMtx_);
+    for (auto& bs : broadcastSessions_) {
+        bs.chan->send(bs.sock, OP_INVALIDATE, 0, 0, w.b.data(),
+                      static_cast<uint32_t>(w.b.size()));
+    }
 }
 
 } // namespace fb

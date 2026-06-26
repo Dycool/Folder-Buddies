@@ -20,8 +20,7 @@ public:
     WebRtcCompatHost();
     ~WebRtcCompatHost();
 
-    bool start(const std::string& folder, const std::string& roomCode, bool allowWrites,
-               int maxClients, std::string& err);
+    bool start(const std::string& folder, const std::string& roomCode, bool allowWrites, std::string& err);
     void stop();
     bool running() const;
     int clientCount() const;

@@ -29,7 +29,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     pages: [...document.querySelectorAll(".tabpage")],
     folderInput: $("folderInput"),
     browseFolder: $("browseFolder"),
-    maxClients: $("maxClients"),
     allowWrites: $("allowWrites"),
     shareToggle: $("shareToggle"),
     connectCode: $("connectCode"),
@@ -75,7 +74,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     connectToken: "",  // what the host shows/copies to clients
     pendingConnectToken: "", // hidden token loaded from URL hashes/direct links
     rootBase: null,    // HKDF base key derived from the secret half of the code
-    maxClients: 0,
     allowWrites: false,
     clientCanWrite: false,
     directFilePath: "",
@@ -716,7 +714,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     });
   }
 
-  function signalUrl(lookup, role, token = "", maxClients = 0) {
+  function signalUrl(lookup, role, token = "") {
     const u = new URL(workerUrl());
     u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
     u.pathname = "/room";
@@ -725,14 +723,13 @@ import { argon2id } from "./vendor/noble/argon2.js";
     u.searchParams.set("role", role);
     u.searchParams.set("web", "1");
     if (token) u.searchParams.set("turnstile", token);
-    if (role === "host" && maxClients > 0) u.searchParams.set("max", String(maxClients));
     return u;
   }
 
-  function openSignal(role, lookup, onMessage, token = "", maxClients = 0) {
+  function openSignal(role, lookup, onMessage, token = "") {
     return new Promise((resolve, reject) => {
       let settled = false;
-      const ws = new WebSocket(signalUrl(lookup, role, token, maxClients));
+      const ws = new WebSocket(signalUrl(lookup, role, token));
       ws.provider = "cloudflare";
       const fail = (message) => {
         if (settled) return;
@@ -861,7 +858,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
       }
 
       const host = { createdAt: Date.now() };
-      if (state.maxClients > 0) host.max = state.maxClients;
       const claim = await sdk.runTransaction(roomRef, (current) => {
         if (current !== null) return;
         return { v: 1, host };
@@ -922,12 +918,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
       throw taggedError("Host not found", "room_not_found");
     }
 
-    const max = Number(room?.host?.max) || 0;
-    if (max > 0) {
-      const count = room.clients ? Object.keys(room.clients).length : 0;
-      if (count >= max) throw taggedError("The host's client limit is full.", "room_full");
-    }
-
     const peerId = crypto.randomUUID();
     const clientRef = sdk.ref(sdk.db, `${path}/clients/${peerId}`);
     const unsubs = [];
@@ -971,7 +961,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const code = preferredCode || randomRoom(state.allowWrites);
       const lookup = lookupOf(code);
       const token = await turnstileToken();
-      const ws = await openSignal("host", lookup, (msg) => handleHostSignal(msg).catch((err) => toast(err.message)), token, state.maxClients);
+      const ws = await openSignal("host", lookup, (msg) => handleHostSignal(msg).catch((err) => toast(err.message)), token);
       const claimed = await new Promise((resolve) => {
         const onReady = (event) => {
           let msg; try { msg = JSON.parse(event.data); } catch { return; }
@@ -1568,10 +1558,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
       return;
     }
     if (msg.kind === "client-joined") {
-      if (state.maxClients > 0 && state.hostPeers.size >= state.maxClients) {
-        toast("Max clients reached; ignoring a new connection");
-        return;
-      }
       // Native compatibility clients announce themselves with a plain compat-hello
       // first. Wait briefly so we can answer with plain SDP; browser clients get
       // the normal encrypted signaling path after the grace period.
@@ -1662,7 +1648,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     els.shareToggle.textContent = running ? "Stop hosting" : "Host";
     els.folderInput.disabled = running;
     els.browseFolder.disabled = running;
-    els.maxClients.disabled = running;
     if (els.allowWrites) els.allowWrites.disabled = running;
     els.copyAll.disabled = !running;
     els.copyShareLink.disabled = !running;
@@ -1687,15 +1672,9 @@ import { argon2id } from "./vendor/noble/argon2.js";
   async function startHost() {
     if (!supportsHosting()) throw new Error("Hosting is not supported in this browser");
     if (isMobile()) throw new Error("Hosting is not available on mobile browsers");
-    const maxClientsRaw = (els.maxClients.value || "").trim();
-    const maxClients = Number(maxClientsRaw);
-    if (maxClientsRaw !== "" && (!Number.isInteger(maxClients) || maxClients < 0)) {
-      throw new Error("Max clients must be 0 (unlimited) or a positive whole number");
-    }
     if (!state.rootHandle) await pickFolder();
     setShareStatus("Starting…");
     els.shareToggle.disabled = true;
-    state.maxClients = maxClients > 0 ? maxClients : 0;
     state.allowWrites = wantsWriteAccess();
     if (state.allowWrites) await assertHostWritable();
 

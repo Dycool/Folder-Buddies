@@ -470,10 +470,13 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     std::error_code ec;
     std::filesystem::create_directories(mp_, ec);
 #else
-    label = dedupe_path(mountBase, name);
-    mp_ = mountBase + "/" + label;
-    std::error_code ec;
-    std::filesystem::create_directories(mp_, ec);
+    {
+        std::string base = mountBase.empty() ? "/media" : mountBase;
+        label = dedupe_path(base, name);
+        mp_ = base + "/" + label;
+        std::error_code ec;
+        std::filesystem::create_directories(mp_, ec);
+    }
 #endif
 
     struct fuse_args args = FUSE_ARGS_INIT(0, nullptr);

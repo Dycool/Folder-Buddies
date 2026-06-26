@@ -124,6 +124,12 @@ void Client::readerLoop(Conn* c) {
     MsgHeader h;
     std::vector<uint8_t> payload;
     while (c->alive.load() && c->chan.recv(c->sock, h, payload)) {
+        if (h.op == OP_INVALIDATE && onInvalidate) {
+            Reader r(payload.data(), payload.size());
+            std::string path;
+            if (r.str(path)) onInvalidate(path);
+            continue;
+        }
         std::shared_ptr<Pending> p;
         {
             std::lock_guard<std::mutex> lk(c->pmtx);

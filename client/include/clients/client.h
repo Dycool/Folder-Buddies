@@ -11,6 +11,7 @@
 #include <QString>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -29,6 +30,9 @@ public:
     // Returns 0 on success (resp filled) or a positive errno on failure.
     int request(uint16_t op, const std::vector<uint8_t>& payload, std::vector<uint8_t>& resp) override;
 
+    // Callback invoked by the background reader thread when the server pushes
+    // an OP_INVALIDATE message for a path. Set by RamCache to invalidate caches.
+    std::function<void(const std::string& path)> onInvalidate;
 
 private:
     struct Pending {
