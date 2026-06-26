@@ -14,7 +14,7 @@
 #include <rpc.h>
 #include <shellapi.h>
 #include <shlobj_core.h>
-#include <projectedfslib.h>
+#include "projfs_loader.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -369,8 +369,8 @@ HRESULT CALLBACK get_enum_cb(const PRJ_CALLBACK_DATA* data, const GUID* enumId,
         entries = it->second;
     }
     for (const auto& e : entries) {
-        if (searchExpression && !PrjFileNameMatch(e.name.c_str(), searchExpression)) continue;
-        HRESULT hr = PrjFillDirEntryBuffer(e.name.c_str(), const_cast<PRJ_FILE_BASIC_INFO*>(&e.info),
+        if (searchExpression && !fb::projfs::FileNameMatch(e.name.c_str(), searchExpression)) continue;
+        HRESULT hr = fb::projfs::FillDirEntryBuffer(e.name.c_str(), const_cast<PRJ_FILE_BASIC_INFO*>(&e.info),
                                            dirEntryBufferHandle);
         if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER)) return S_OK;
         if (FAILED(hr)) return hr;
@@ -385,7 +385,7 @@ HRESULT CALLBACK placeholder_cb(const PRJ_CALLBACK_DATA* data) {
     if (FAILED(hr)) return hr;
     PRJ_PLACEHOLDER_INFO info{};
     info.FileBasicInfo = apply_readonly(to_basic_info(a), st->allowWrites);
-    return PrjWritePlaceholderInfo(st->ctx, data->FilePathName, &info, sizeof(info));
+    return fb::projfs::WritePlaceholderInfo(st->ctx, data->FilePathName, &info, sizeof(info));
 }
 
 HRESULT CALLBACK file_data_cb(const PRJ_CALLBACK_DATA* data, UINT64 byteOffset, UINT32 length) {
@@ -427,7 +427,7 @@ HRESULT CALLBACK file_data_cb(const PRJ_CALLBACK_DATA* data, UINT64 byteOffset, 
 
         if (rc) return status_to_hresult(rc);
         if (readResp.empty()) break;
-        HRESULT hr = PrjWriteFileData(st->ctx, &data->DataStreamId, readResp.data(), offset,
+        HRESULT hr = fb::projfs::WriteFileData(st->ctx, &data->DataStreamId, readResp.data(), offset,
                                       static_cast<UINT32>(readResp.size()));
         if (FAILED(hr)) return hr;
         offset += readResp.size();
@@ -535,6 +535,7 @@ PRJ_CALLBACKS callbacks() {
 bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::string& volname,
                   bool allowWrites, std::string& err) {
     if (!ensure_fuse_backend(err)) return false;
+    if (!fb::projfs::ensure_loaded()) { err = "ProjectedFSLib.dll could not be loaded"; return false; }
     if (backend_) { err = "a share is already mounted"; return false; }
 
     stopping_.store(false);
@@ -557,11 +558,11 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     state->allowWrites = allowWrites;
     state->root = std::filesystem::path(backingRoot);
     PRJ_CALLBACKS cb = callbacks();
-    HRESULT hr = PrjMarkDirectoryAsPlaceholder(widen(backingRoot).c_str(), nullptr, nullptr, nullptr);
+    HRESULT hr = fb::projfs::MarkDirectoryAsPlaceholder(widen(backingRoot).c_str(), nullptr, nullptr, nullptr);
     if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) {
         delete state;
         cache_.reset();
-        err = "PrjMarkDirectoryAsPlaceholder failed";
+        err = "fb::projfs::MarkDirectoryAsPlaceholder failed";
         return false;
     }
     PRJ_NOTIFICATION_MAPPING mapping{};
@@ -570,17 +571,17 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     PRJ_STARTVIRTUALIZING_OPTIONS opts{};
     opts.NotificationMappings = &mapping;
     opts.NotificationMappingsCount = 1;
-    hr = PrjStartVirtualizing(widen(backingRoot).c_str(), &cb, state, &opts, &state->ctx);
+    hr = fb::projfs::StartVirtualizing(widen(backingRoot).c_str(), &cb, state, &opts, &state->ctx);
     if (FAILED(hr)) {
         delete state;
         cache_.reset();
-        err = "PrjStartVirtualizing failed";
+        err = "fb::projfs::StartVirtualizing failed";
         return false;
     }
 
     std::string drive = free_drive_letter();
     if (drive.empty()) {
-        PrjStopVirtualizing(state->ctx);
+        fb::projfs::StopVirtualizing(state->ctx);
         delete state;
         cache_.reset();
         err = "no free drive letter to mount the share";
@@ -590,7 +591,7 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     driveName_ = widen(drive);
     driveTarget_ = dos_device_target(backingRoot);
     if (!::DefineDosDeviceW(DDD_RAW_TARGET_PATH, driveName_.c_str(), driveTarget_.c_str())) {
-        PrjStopVirtualizing(state->ctx);
+        fb::projfs::StopVirtualizing(state->ctx);
         delete state;
         cache_.reset();
         driveName_.clear();
@@ -634,7 +635,7 @@ void Mount::stop() {
 
     if (backend_) {
         auto* state = static_cast<ProjfsState*>(backend_);
-        if (state->ctx) PrjStopVirtualizing(state->ctx);
+        if (state->ctx) fb::projfs::StopVirtualizing(state->ctx);
         delete state;
     }
     backend_ = nullptr;

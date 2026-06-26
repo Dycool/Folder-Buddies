@@ -46,7 +46,7 @@ set(FB_COMMON_SOURCES
 )
 
 if(WIN32)
-  list(APPEND FB_COMMON_SOURCES src/fs/projfs_mount.cpp)
+  list(APPEND FB_COMMON_SOURCES src/fs/projfs_mount.cpp src/fs/projfs_loader.cpp)
 else()
   list(APPEND FB_COMMON_SOURCES src/fs/fuse_fs.cpp)
 endif()
@@ -100,11 +100,11 @@ endif()
 # ---- Mount backend (per platform) -----------------------------------------
 if(WIN32)
   # Windows now uses Microsoft's native Projected File System (ProjFS), not WinFsp.
-  # ProjectedFSLib.h / ProjectedFSLib.lib ship with the Windows SDK. At runtime
-  # fuse_backend.cpp enables the Client-ProjFS optional feature with UAC + DISM
-  # if ProjectedFSLib.dll is not available yet.
+  # ProjectedFSLib.h ships with the Windows SDK. At runtime projfs_loader.cpp loads
+  # ProjectedFSLib.dll dynamically via LoadLibrary+GetProcAddress, so the app can
+  # start without it. fuse_backend.cpp then enables the optional feature with DISM.
   target_compile_definitions(folderbuddies PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_link_libraries(folderbuddies PRIVATE ProjectedFSLib ws2_32 iphlpapi shell32 advapi32 Rpcrt4)
+  target_link_libraries(folderbuddies PRIVATE ws2_32 iphlpapi shell32 advapi32 Rpcrt4)
 elseif(APPLE)
   # FUSE-T/macFUSE installers do not always expose a stable fuse3.pc on macOS.
   # Prefer pkg-config when present, but fall back to the well-known installer
