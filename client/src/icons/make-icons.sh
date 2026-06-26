@@ -23,57 +23,34 @@ if command -v magick >/dev/null 2>&1; then
 elif command -v convert >/dev/null 2>&1; then
   IM=(convert)
 fi
-# Fall back to Python/Pillow if ImageMagick is unavailable.
-
-# Fill the canvas so the folder artwork extends to the icon corner.
 mkdir -p "$OUT_DIR"
-DPI=72
 
-if [ ${#IM[@]} -gt 0 ]; then
-  "${IM[@]}" "$SRC" \
-    -background white \
-    -trim -fuzz 2% \
-    -resize "${FILL}x${FILL}" \
-    -gravity center \
-    -extent "${SIZE}x${SIZE}" \
-    -density "${DPI}x${DPI}" \
-    "$OUT_DIR/icon.png"
-  echo "wrote src/icons/icon.png (ImageMagick)"
-elif python3 -c 'from PIL import Image; print("ok")' 2>/dev/null; then
-  python3 << PY
+# macOS/Linux/in-app icon.png — white rounded squircle with a transparent
+# margin (macOS Big Sur style). Pillow only, so local previews match CI.
+python3 - "$ICON_SOURCE" "$OUT_DIR/icon.png" "$SIZE" <<'PY'
 import sys
-from PIL import Image
-
-src = '$SRC'
-dst = '$OUT_DIR/icon.png'
-size = $SIZE
-
-img = Image.open(src).convert('RGBA')
-fuzz = int(255 * 0.02)
+from PIL import Image, ImageDraw
+src_path, dst, size = sys.argv[1], sys.argv[2], int(sys.argv[3])
+margin = round(size * 100 / 1024)
+folder_fill = 0.62
+radius_frac = 0.225
+img = Image.open(src_path).convert('RGBA')
 bbox = img.getbbox()
 if bbox:
     img = img.crop(bbox)
-# Scale to fill most of canvas (no cropping) so artwork sits on a full white
-# background — like VS Code's solid-colour icon.
-fill = 900
-ratio = min(fill / img.width, fill / img.height)
-new_w = int(round(img.width * ratio))
-new_h = int(round(img.height * ratio))
-img = img.resize((new_w, new_h), Image.LANCZOS)
-
-# Full white square; macOS applies the rounded-rect mask.
-canvas = Image.new('RGBA', (size, size), (255,255,255,255))
-x = (size - img.width) // 2
-y = (size - img.height) // 2
-canvas.paste(img, (x, y), img)
-canvas.save(dst, dpi=(72,72))
-print(f'wrote src/icons/icon.png (Pillow, {img.width}x{img.height})')
+body = size - 2 * margin
+radius = int(body * radius_frac)
+canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+ImageDraw.Draw(canvas).rounded_rectangle(
+    [margin, margin, margin + body, margin + body], radius=radius,
+    fill=(255, 255, 255, 255))
+fw = int(size * folder_fill)
+ratio = fw / img.width
+folder = img.resize((fw, int(img.height * ratio)), Image.LANCZOS)
+canvas.alpha_composite(folder, ((size - fw) // 2, (size - folder.height) // 2))
+canvas.save(dst, dpi=(72, 72))
+print('wrote src/icons/icon.png (squircle)')
 PY
-else
-  # Fallback: just copy as-is
-  cp "$SRC" "$OUT_DIR/icon.png"
-  echo "wrote src/icons/icon.png (copy)"
-fi
 
 # Windows .ico (multi-resolution, transparent background).
 if [ ${#IM[@]} -gt 0 ]; then
