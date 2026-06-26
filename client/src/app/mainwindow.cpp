@@ -417,6 +417,11 @@ void MainWindow::toggleShare() {
         webCompatHost_ = std::make_unique<fb::WebRtcCompatHost>();
         std::string werr;
         if (!webCompatHost_->start(folder.toStdString(), ticket.roomCode, writeCheck_->isChecked(), werr)) {
+            webCompatHost_.reset();
+            QMessageBox::warning(
+                this, "Browser Compatibility Unavailable",
+                QString("Native sharing is running, but browser clients cannot connect:\n\n") +
+                    QString::fromStdString(werr));
         }
     }
     tokenEdit_->setPlainText(QString::fromStdString(ticket.connectCode));
@@ -478,7 +483,7 @@ void MainWindow::toggleConnect() {
         webClient_ = std::make_unique<fb::WebRtcRemoteClient>();
         if (webClient_->connect(entered, err)) {
             std::string name = "Web share";
-            if (mount_.start(webClient_.get(), "", name, true, err)) {
+            if (mount_.start(webClient_.get(), "", name, webClient_->canWrite(), err)) {
                 mountpoint = mount_.mountpoint();
                 mounted = true;
                 connectStatus_->setText("Connected.");

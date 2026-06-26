@@ -205,7 +205,7 @@ constexpr PRJ_NOTIFY_TYPES kWriteNotifyMask = static_cast<PRJ_NOTIFY_TYPES>(
 
 PRJ_FILE_BASIC_INFO apply_readonly(const PRJ_FILE_BASIC_INFO& in, bool allowWrites) {
     PRJ_FILE_BASIC_INFO out = in;
-    if (!allowWrites && !out.IsDirectory) out.FileAttributes |= FILE_ATTRIBUTE_READONLY;
+    if (!allowWrites) out.FileAttributes |= FILE_ATTRIBUTE_READONLY;
     return out;
 }
 
@@ -331,27 +331,27 @@ HRESULT query_attr(ProjfsState* st, const std::string& path, WireAttr& attr) {
     return S_OK;
 }
 
-std::vector<DirEntry> query_dir(ProjfsState* st, const std::string& path) {
+HRESULT query_dir(ProjfsState* st, const std::string& path, std::vector<DirEntry>& entries) {
     Writer w;
     w.str(path);
     std::vector<uint8_t> resp;
     int rc = st->client->request(OP_READDIR, w.b, resp);
-    if (rc) return {};
+    if (rc) return status_to_hresult(rc);
     Reader r(resp.data(), resp.size());
     uint32_t n = 0;
-    if (!r.pod(n)) return {};
-    std::vector<DirEntry> entries;
+    if (!r.pod(n)) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    entries.clear();
     entries.reserve(n);
     for (uint32_t i = 0; i < n; ++i) {
         std::string name;
         WireAttr a;
-        if (!r.str(name) || !r.pod(a)) break;
+        if (!r.str(name) || !r.pod(a)) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
         entries.push_back({widen(name), apply_readonly(to_basic_info(a), st->allowWrites)});
     }
     std::sort(entries.begin(), entries.end(), [](const DirEntry& a, const DirEntry& b) {
         return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
     });
-    return entries;
+    return S_OK;
 }
 
 std::string enum_key(const GUID& g) {
@@ -364,8 +364,11 @@ std::string enum_key(const GUID& g) {
 
 HRESULT CALLBACK start_enum_cb(const PRJ_CALLBACK_DATA* data, const GUID* enumId) {
     auto* st = static_cast<ProjfsState*>(data->InstanceContext);
+    std::vector<DirEntry> entries;
+    HRESULT hr = query_dir(st, narrow(data->FilePathName), entries);
+    if (FAILED(hr)) return hr;
     std::lock_guard<std::mutex> lk(st->enumMtx);
-    st->enumerations[enum_key(*enumId)] = query_dir(st, narrow(data->FilePathName));
+    st->enumerations[enum_key(*enumId)] = std::move(entries);
     return S_OK;
 }
 
@@ -475,6 +478,9 @@ HRESULT CALLBACK notification_cb(const PRJ_CALLBACK_DATA* data, BOOLEAN isDirect
         if (!operationParameters) return;
         operationParameters->FileRenamed.NotificationMask = kWriteNotifyMask;
     };
+    auto reject_readonly_mutation = [&]() -> HRESULT {
+        return st->allowWrites ? S_OK : HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+    };
 
     switch (notification) {
     case PRJ_NOTIFICATION_FILE_OPENED:
@@ -483,7 +489,7 @@ HRESULT CALLBACK notification_cb(const PRJ_CALLBACK_DATA* data, BOOLEAN isDirect
 
     case PRJ_NOTIFICATION_NEW_FILE_CREATED:
         post_mask();
-        if (!st->allowWrites) return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+        if (FAILED(reject_readonly_mutation())) return reject_readonly_mutation();
         if (dir) return status_to_hresult(remote_mkdir(st, path));
         // Create/truncate now so zero-byte files appear remotely even if no
         // modified-close notification follows. Final contents are uploaded on close.
@@ -491,7 +497,7 @@ HRESULT CALLBACK notification_cb(const PRJ_CALLBACK_DATA* data, BOOLEAN isDirect
 
     case PRJ_NOTIFICATION_FILE_OVERWRITTEN:
         post_mask();
-        if (!st->allowWrites) return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+        if (FAILED(reject_readonly_mutation())) return reject_readonly_mutation();
         return dir ? S_OK : status_to_hresult(remote_create_empty_file(st, path));
 
     case PRJ_NOTIFICATION_PRE_DELETE:
@@ -509,7 +515,7 @@ HRESULT CALLBACK notification_cb(const PRJ_CALLBACK_DATA* data, BOOLEAN isDirect
 
     case PRJ_NOTIFICATION_FILE_RENAMED:
         rename_mask();
-        if (!st->allowWrites) return S_OK;
+        if (FAILED(reject_readonly_mutation())) return reject_readonly_mutation();
         // If an item moved in from outside the root, upload/create it now.
         if ((path.empty() || path == "/") && !dest.empty()) return status_to_hresult(sync_local_file_to_remote(st, dest));
         return S_OK;
@@ -519,18 +525,18 @@ HRESULT CALLBACK notification_cb(const PRJ_CALLBACK_DATA* data, BOOLEAN isDirect
         return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
 
     case PRJ_NOTIFICATION_HARDLINK_CREATED:
-        return S_OK;
+        return reject_readonly_mutation();
 
     case PRJ_NOTIFICATION_FILE_PRE_CONVERT_TO_FULL:
         return deny_write();
 
     case PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_MODIFIED:
-        if (!st->allowWrites) return S_OK;
+        if (FAILED(reject_readonly_mutation())) return reject_readonly_mutation();
         if (dir) return S_OK;
         return status_to_hresult(sync_local_file_to_remote(st, path));
 
     case PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_DELETED:
-        return S_OK; // PRE_DELETE already propagated and can veto failures.
+        return reject_readonly_mutation(); // PRE_DELETE already propagated when writable.
 
     default:
         return S_OK;

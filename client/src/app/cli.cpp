@@ -175,7 +175,7 @@ int cli_connect(const Args& a) {
         webClient = std::make_unique<WebRtcRemoteClient>();
         if (webClient->connect(a.positional, e)) {
             label = "Web share";
-            if (!mount.start(webClient.get(), "", label, true, e)) {
+            if (!mount.start(webClient.get(), "", label, webClient->canWrite(), e)) {
                 webClient->disconnect();
                 webClient.reset();
             } else {

@@ -38,6 +38,7 @@ public:
     bool connect(const std::string& webCodeOrRoom, std::string& err);
     void disconnect();
     bool connected() const override;
+    bool canWrite() const;
     int request(uint16_t op, const std::vector<uint8_t>& payload,
                 std::vector<uint8_t>& resp) override;
 

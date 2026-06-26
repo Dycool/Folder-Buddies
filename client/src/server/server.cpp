@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 
@@ -38,6 +39,7 @@ static bool fill_attr(const std::string& path, WireAttr& a) {
 #ifdef _WIN32
     WIN32_FILE_ATTRIBUTE_DATA d;
     if (!::GetFileAttributesExW(widen(path).c_str(), GetFileExInfoStandard, &d)) return false;
+    if (d.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) return false;
     bool dir = d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
     uint64_t size = (static_cast<uint64_t>(d.nFileSizeHigh) << 32) | d.nFileSizeLow;
     a.size = size;
@@ -52,6 +54,7 @@ static bool fill_attr(const std::string& path, WireAttr& a) {
 #else
     struct stat st;
     if (::lstat(path.c_str(), &st) != 0) return false;
+    if (S_ISLNK(st.st_mode)) return false;
     a.ino = st.st_ino;
     a.size = static_cast<uint64_t>(st.st_size);
     a.blocks = static_cast<uint64_t>(st.st_blocks);
@@ -66,6 +69,42 @@ static bool fill_attr(const std::string& path, WireAttr& a) {
 #endif
 }
 
+static std::string path_key(const fs::path& p) {
+    std::string s = p.lexically_normal().string();
+#ifdef _WIN32
+    std::replace(s.begin(), s.end(), '\\', '/');
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+#endif
+    while (s.size() > 1 && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+    return s;
+}
+
+static bool path_within(const fs::path& root, const fs::path& candidate) {
+    std::string r = path_key(root);
+    std::string c = path_key(candidate);
+    if (c == r) return true;
+    if (r.empty()) return false;
+    if (r == "/") return !c.empty() && c.front() == '/';
+    char sep = '/';
+#ifndef _WIN32
+    sep = fs::path::preferred_separator;
+#endif
+    return c.size() > r.size() && c.rfind(r, 0) == 0 &&
+           (c[r.size()] == '/' || c[r.size()] == '\\' || c[r.size()] == sep);
+}
+
+static bool is_boundary_reparse_point(const fs::path& p) {
+#ifdef _WIN32
+    DWORD attrs = ::GetFileAttributesW(widen(p.string()).c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+    std::error_code ec;
+    return fs::is_symlink(fs::symlink_status(p, ec));
+#endif
+}
+
 bool Server::resolve(const std::string& rel, std::string& abs) {
     fs::path base(root_);
     std::string r = rel;
@@ -76,7 +115,20 @@ bool Server::resolve(const std::string& rel, std::string& abs) {
         if (s.empty() || s == ".") continue;
         if (s == "..") return false; // refuse to escape the share
         p /= s;
+        std::error_code ec;
+        if (fs::exists(p, ec)) {
+            // Do not serve symlinks, junctions, OneDrive placeholders, or ProjFS
+            // backing roots. They can escape the share or mirror a mounted share
+            // back into itself on Windows.
+            if (is_boundary_reparse_point(p)) return false;
+            fs::path canon = fs::weakly_canonical(p, ec);
+            if (ec || !path_within(base, canon)) return false;
+            p = std::move(canon);
+        } else if (ec) {
+            return false;
+        }
     }
+    if (!path_within(base, p)) return false;
     abs = p.string();
     return true;
 }
@@ -90,6 +142,10 @@ int Server::clientCount() {
 
 bool Server::start(const std::string& folder, int port, std::string& err) {
     net_startup();
+    if (is_boundary_reparse_point(fs::path(folder))) {
+        err = "Cannot host a symlink, junction, or projected filesystem root";
+        return false;
+    }
     root_ = fs::weakly_canonical(fs::path(folder)).string();
     if (!fs::is_directory(root_)) { err = "Not a directory: " + folder; return false; }
     shareName = fs::path(root_).filename().string();
@@ -476,6 +532,7 @@ void Server::handleConn(socket_t s) {
             uint32_t mode;
             r.str(path);
             r.pod(mode);
+            if (!allowWrites && (mode & 2u)) { status = EROFS; break; }
             if (!resolve(path, abs)) { status = EACCES; break; }
             if (!fs::exists(abs)) status = ENOENT;
             break;

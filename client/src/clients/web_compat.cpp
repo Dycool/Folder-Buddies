@@ -29,11 +29,23 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+
+#ifndef EROFS
+#  define EROFS EACCES
+#endif
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
 
 #ifdef FB_HAVE_LIBDATACHANNEL
 #  include <rtc/rtc.hpp>
@@ -84,6 +96,38 @@ std::string basename(const std::string& path) {
     if (path == "/") return "";
     auto pos = path.find_last_of('/');
     return pos == std::string::npos ? path : path.substr(pos + 1);
+}
+
+std::string path_key(const fs::path& p) {
+    std::string s = p.lexically_normal().string();
+#ifdef _WIN32
+    std::replace(s.begin(), s.end(), '\\', '/');
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+#endif
+    while (s.size() > 1 && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+    return s;
+}
+
+bool path_within(const fs::path& root, const fs::path& candidate) {
+    std::string r = path_key(root);
+    std::string c = path_key(candidate);
+    if (c == r) return true;
+    if (r.empty()) return false;
+    if (r == "/") return !c.empty() && c.front() == '/';
+    return c.size() > r.size() && c.rfind(r, 0) == 0 &&
+           (c[r.size()] == '/' || c[r.size()] == '\\');
+}
+
+bool is_boundary_reparse_point(const fs::path& p) {
+#ifdef _WIN32
+    DWORD attrs = ::GetFileAttributesW(p.wstring().c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+    std::error_code ec;
+    return fs::is_symlink(fs::symlink_status(p, ec));
+#endif
 }
 
 uint64_t fnv1a(const std::string& s) {
@@ -539,64 +583,47 @@ struct WebRtcCompatHost::Impl {
     std::unordered_map<uint32_t, std::ofstream> uploads;
     std::atomic<bool> live{false};
 
-    bool resolve(const std::string& rel, fs::path& out) {
-        std::string norm;
-        if (!normalize_rel(rel, norm)) return false;
-        std::error_code ec;
-        fs::path rootPath = fs::weakly_canonical(root, ec);
-        if (ec) return false;
-        fs::path raw = rootPath / fs::path(norm.substr(1));
-        fs::path candidate;
-        if (fs::exists(raw, ec)) candidate = fs::weakly_canonical(raw, ec);
-        else {
-            fs::path parent = fs::weakly_canonical(raw.parent_path(), ec);
-            if (ec) parent = rootPath;
-            candidate = parent / raw.filename();
-        }
-        std::string rp = rootPath.string();
-        std::string cp = candidate.lexically_normal().string();
-        if (cp.rfind(rp, 0) != 0) return false;
-        out = candidate;
-        return true;
-    }
-
-    bool resolve_write(const std::string& rel, fs::path& out) {
+    bool resolve_common(const std::string& rel, fs::path& out) {
         std::string norm;
         if (!normalize_rel(rel, norm)) return false;
         std::error_code ec;
         fs::path rootPath = fs::weakly_canonical(root, ec);
         if (ec) return false;
 
-        fs::path parent = rootPath;
+        fs::path current = rootPath;
         fs::path tail;
         bool missing = false;
         for (const auto& partPath : fs::path(norm.substr(1))) {
-            const fs::path part = partPath.filename();
+            fs::path part = partPath.filename();
             if (part.empty()) continue;
             if (missing) {
                 tail /= part;
                 continue;
             }
 
-            fs::path next = parent / part;
+            fs::path next = current / part;
             if (fs::exists(next, ec)) {
-                parent = fs::weakly_canonical(next, ec);
-                if (ec) return false;
-                std::string rp = rootPath.string();
-                std::string pp = parent.lexically_normal().string();
-                if (pp.rfind(rp, 0) != 0) return false;
+                if (is_boundary_reparse_point(next)) return false;
+                current = fs::weakly_canonical(next, ec);
+                if (ec || !path_within(rootPath, current)) return false;
+            } else if (ec) {
+                return false;
             } else {
                 missing = true;
                 tail /= part;
             }
         }
 
-        fs::path candidate = (parent / tail).lexically_normal();
-        std::string rp = rootPath.string();
-        std::string cp = candidate.string();
-        if (cp.rfind(rp, 0) != 0) return false;
+        fs::path candidate = (current / tail).lexically_normal();
+        if (!path_within(rootPath, candidate)) return false;
         out = candidate;
         return true;
+    }
+
+    bool resolve(const std::string& rel, fs::path& out) { return resolve_common(rel, out); }
+
+    bool resolve_write(const std::string& rel, fs::path& out) {
+        return resolve_common(rel, out);
     }
 
     void send_error(const std::shared_ptr<rtc::DataChannel>& dc, int id, const std::string& e) {
@@ -617,6 +644,7 @@ struct WebRtcCompatHost::Impl {
                 if (!resolve(path, abs) || !fs::is_directory(abs)) throw std::runtime_error("Not a directory");
                 QJsonArray entries;
                 for (auto& de : fs::directory_iterator(abs)) {
+                    if (is_boundary_reparse_point(de.path())) continue;
                     const std::string name = de.path().filename().string();
                     QJsonObject e;
                     e["name"] = QString::fromStdString(name);
@@ -761,25 +789,38 @@ struct WebRtcRemoteClient::Impl {
     std::shared_ptr<rtc::PeerConnection> pc;
     std::shared_ptr<rtc::DataChannel> dc;
     std::string peerId;
+    std::mutex sendMtx;
     std::mutex mtx;
+    std::mutex fsMtx;
     std::condition_variable cv;
-    bool open = false;
-    bool dead = false;
+    std::atomic<bool> open{false};
+    std::atomic<bool> dead{false};
     std::unordered_map<uint32_t, QJsonObject> replies;
     std::unordered_map<uint32_t, std::vector<uint8_t>> downloads;
-    struct Fh { std::string path; std::vector<uint8_t> data; bool dirty = false; };
+    struct Fh {
+        std::string path;
+        std::vector<uint8_t> data;
+        bool loaded = false;
+        bool dirty = false;
+    };
     std::unordered_map<uint64_t, Fh> fhs;
     uint64_t nextFh = 1;
     uint32_t nextId = 100;
-    bool canWrite = false;
+    std::atomic<bool> canWrite{false};
 
     uint32_t send_json_wait(QJsonObject obj, QJsonObject& out, int timeoutMs = 30000) {
-        uint32_t id = obj.value("id").toInt(0);
-        if (!id) id = nextId++;
-        obj["id"] = static_cast<int>(id);
-        dc->send(json_compact(obj).toStdString());
+        uint32_t id = 0;
+        {
+            std::lock_guard<std::mutex> slk(sendMtx);
+            id = static_cast<uint32_t>(obj.value("id").toInt(0));
+            if (!id) id = nextId++;
+            obj["id"] = static_cast<int>(id);
+            if (!dc) return 0;
+            try { dc->send(json_compact(obj).toStdString()); }
+            catch (...) { return 0; }
+        }
         std::unique_lock<std::mutex> lk(mtx);
-        cv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&]{ return replies.count(id) || dead; });
+        cv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&]{ return replies.count(id) || dead.load(); });
         auto it = replies.find(id);
         if (it == replies.end()) return 0;
         out = it->second;
@@ -788,9 +829,15 @@ struct WebRtcRemoteClient::Impl {
     }
     bool wait_file(uint32_t id, std::vector<uint8_t>& out, int timeoutMs = 120000) {
         std::unique_lock<std::mutex> lk(mtx);
-        cv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&]{ return replies.count(id) || dead; });
-        if (!replies.count(id)) return false;
-        replies.erase(id);
+        cv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&]{ return replies.count(id) || dead.load(); });
+        auto replyIt = replies.find(id);
+        if (replyIt == replies.end()) return false;
+        bool ok = replyIt->second.value("t").toString() == "fileEnd";
+        replies.erase(replyIt);
+        if (!ok) {
+            downloads.erase(id);
+            return false;
+        }
         out = std::move(downloads[id]);
         downloads.erase(id);
         return true;
@@ -798,7 +845,7 @@ struct WebRtcRemoteClient::Impl {
     void on_json(const QJsonObject& o) {
         std::lock_guard<std::mutex> lk(mtx);
         QString t = o.value("t").toString();
-        if (t == "listResult") canWrite = o.value("write").toBool(canWrite);
+        if (t == "listResult") canWrite = o.value("write").toBool(canWrite.load());
         // A download emits fileStart, binary chunks, then fileEnd. Only fileEnd
         // completes the synchronous request; otherwise native reads can return
         // before the browser has sent the file bytes.
@@ -826,25 +873,51 @@ struct WebRtcRemoteClient::Impl {
         return 0;
     }
     int fetch_file(const std::string& path, std::vector<uint8_t>& data) {
-        uint32_t id = nextId++;
-        QJsonObject req; req["t"] = "download"; req["id"] = static_cast<int>(id); req["path"] = QString::fromStdString(path);
-        dc->send(json_compact(req).toStdString());
+        uint32_t id = 0;
+        QJsonObject req; req["t"] = "download"; req["path"] = QString::fromStdString(path);
+        {
+            std::lock_guard<std::mutex> slk(sendMtx);
+            id = nextId++;
+            req["id"] = static_cast<int>(id);
+            if (!dc) return EIO;
+            try { dc->send(json_compact(req).toStdString()); }
+            catch (...) { return EIO; }
+        }
         return wait_file(id, data) ? 0 : EIO;
     }
     int upload_file(const std::string& path, const std::vector<uint8_t>& data) {
-        uint32_t id = nextId++;
+        uint32_t id = 0;
+        {
+            std::lock_guard<std::mutex> slk(sendMtx);
+            id = nextId++;
+        }
         QJsonObject start; start["t"] = "uploadStart"; start["id"] = static_cast<int>(id); start["path"] = QString::fromStdString(path); start["size"] = static_cast<double>(data.size());
         QJsonObject reply;
         if (!send_json_wait(start, reply) || json_error(reply)) return EIO;
         size_t off = 0;
         while (off < data.size()) {
             size_t n = std::min(kWebChunk, data.size() - off);
-            send_bin(dc, id, data.data() + off, n);
+            {
+                std::lock_guard<std::mutex> slk(sendMtx);
+                if (!dc) return EIO;
+                try { send_bin(dc, id, data.data() + off, n); }
+                catch (...) { return EIO; }
+            }
             off += n;
         }
         QJsonObject end; end["t"] = "uploadEnd"; end["id"] = static_cast<int>(id);
         if (!send_json_wait(end, reply, 60000) || json_error(reply)) return EIO;
         return 0;
+    }
+    bool refresh_capabilities(std::string& err) {
+        QJsonObject req; req["t"] = "list"; req["path"] = "/";
+        QJsonObject reply;
+        if (!send_json_wait(req, reply, 30000) || json_error(reply) ||
+            reply.value("t").toString() != "listResult") {
+            err = "WebRTC compatibility connected, but the host did not return the folder listing";
+            return false;
+        }
+        return true;
     }
 };
 
@@ -853,6 +926,10 @@ WebRtcCompatHost::~WebRtcCompatHost() { stop(); }
 
 bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomCode, bool allowWrites, std::string& err) {
     if (!looks_like_room_code(roomCode)) { err = "WebRTC compatibility needs a 6- or 16-character room code"; return false; }
+    if (is_boundary_reparse_point(fs::path(folder))) {
+        err = "Cannot host a symlink, junction, or projected filesystem root";
+        return false;
+    }
     impl_->root = fs::weakly_canonical(folder).string();
     impl_->allowWrites = allowWrites;
     impl_->wsClosed = false;
@@ -871,7 +948,7 @@ bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomC
         catch (const std::exception& e) { cloudErr = e.what(); }
         if (cloudErr.empty()) {
             std::unique_lock<std::mutex> lk(impl_->mtx);
-            impl_->cv.wait_for(lk, std::chrono::seconds(4), [this]{ return impl_->live.load() || impl_->wsClosed.load() || !impl_->wsError.empty(); });
+            impl_->cv.wait_for(lk, std::chrono::seconds(12), [this]{ return impl_->live.load() || impl_->wsClosed.load() || !impl_->wsError.empty(); });
             if (impl_->live.load()) return true;
             cloudErr = impl_->wsError.empty() ? "Cloudflare WebRTC compatibility signaling did not become ready" : impl_->wsError;
         }
@@ -905,11 +982,32 @@ WebRtcRemoteClient::~WebRtcRemoteClient() { disconnect(); }
 bool WebRtcRemoteClient::connect(const std::string& webCodeOrRoom, std::string& err) {
     std::string code;
     if (!extract_web_room(webCodeOrRoom, code)) { err = "not a web-compatible room code"; return false; }
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        impl_->open = false;
+        impl_->dead = false;
+        impl_->canWrite = false;
+        impl_->replies.clear();
+        impl_->downloads.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(impl_->fsMtx);
+        impl_->fhs.clear();
+        impl_->nextFh = 1;
+    }
+    {
+        std::lock_guard<std::mutex> lk(impl_->sendMtx);
+        impl_->dc.reset();
+        impl_->nextId = 100;
+    }
     rtc::Configuration cfg;
     cfg.iceServers.emplace_back("stun:stun.l.google.com:19302");
     impl_->pc = std::make_shared<rtc::PeerConnection>(cfg);
     impl_->pc->onDataChannel([this](std::shared_ptr<rtc::DataChannel> dc) {
-        impl_->dc = dc;
+        {
+            std::lock_guard<std::mutex> lk(impl_->sendMtx);
+            impl_->dc = dc;
+        }
         dc->onOpen([this]() { std::lock_guard<std::mutex> lk(impl_->mtx); impl_->open = true; impl_->cv.notify_all(); });
         dc->onClosed([this]() { std::lock_guard<std::mutex> lk(impl_->mtx); impl_->dead = true; impl_->open = false; impl_->cv.notify_all(); });
         dc->onMessage([this](std::variant<rtc::binary, rtc::string> msg) {
@@ -969,8 +1067,13 @@ bool WebRtcRemoteClient::connect(const std::string& webCodeOrRoom, std::string& 
         catch (const std::exception& e) { cloudErr = e.what(); }
         if (cloudErr.empty()) {
             std::unique_lock<std::mutex> lk(impl_->mtx);
-            impl_->cv.wait_for(lk, std::chrono::seconds(20), [&]{ return impl_->open || impl_->dead; });
-            if (impl_->open) return true;
+            impl_->cv.wait_for(lk, std::chrono::seconds(20), [&]{ return impl_->open.load() || impl_->dead.load(); });
+            if (impl_->open.load()) {
+                lk.unlock();
+                if (impl_->refresh_capabilities(err)) return true;
+                disconnect();
+                return false;
+            }
             cloudErr = "Cloudflare WebRTC compatibility connection timed out";
         }
         try { if (impl_->ws) impl_->ws->close(); } catch (...) {}
@@ -992,8 +1095,13 @@ bool WebRtcRemoteClient::connect(const std::string& webCodeOrRoom, std::string& 
             return false;
         }
         std::unique_lock<std::mutex> lk(impl_->mtx);
-        impl_->cv.wait_for(lk, std::chrono::seconds(20), [&]{ return impl_->open || impl_->dead; });
-        if (impl_->open) return true;
+        impl_->cv.wait_for(lk, std::chrono::seconds(20), [&]{ return impl_->open.load() || impl_->dead.load(); });
+        if (impl_->open.load()) {
+            lk.unlock();
+            if (impl_->refresh_capabilities(err)) return true;
+            disconnect();
+            return false;
+        }
         err = cloudErr + "; Firebase WebRTC compatibility connection timed out";
         return false;
     }
@@ -1002,10 +1110,17 @@ bool WebRtcRemoteClient::connect(const std::string& webCodeOrRoom, std::string& 
     return false;
 }
 void WebRtcRemoteClient::disconnect() { if (!impl_) return; { std::lock_guard<std::mutex> lk(impl_->mtx); impl_->dead = true; impl_->open = false; impl_->cv.notify_all(); } if (impl_->ws) impl_->ws->close(); if (impl_->fbRelay) impl_->fbRelay->close(); if (impl_->pc) impl_->pc->close(); }
-bool WebRtcRemoteClient::connected() const { return impl_ && impl_->open; }
+bool WebRtcRemoteClient::connected() const { return impl_ && impl_->open.load(); }
+bool WebRtcRemoteClient::canWrite() const { return impl_ && impl_->canWrite.load(); }
 
 int WebRtcRemoteClient::request(uint16_t op, const std::vector<uint8_t>& payload, std::vector<uint8_t>& resp) {
-    if (!impl_ || !impl_->open || !impl_->dc) return EIO;
+    if (!impl_ || !impl_->open.load()) return EIO;
+    if (!impl_->canWrite.load() &&
+        (op == OP_WRITE || op == OP_CREATE || op == OP_MKDIR || op == OP_UNLINK ||
+         op == OP_RMDIR || op == OP_RENAME || op == OP_TRUNCATE || op == OP_CHMOD ||
+         op == OP_UTIMENS)) {
+        return EROFS;
+    }
     Reader r(payload.data(), payload.size());
     try {
         if (op == OP_GETATTR) {
@@ -1029,27 +1144,126 @@ int WebRtcRemoteClient::request(uint16_t op, const std::vector<uint8_t>& payload
         }
         if (op == OP_OPEN || op == OP_CREATE) {
             std::string path; int32_t flags; uint32_t mode; r.str(path); r.pod(flags); r.pod(mode);
-            uint64_t fh = impl_->nextFh++;
-            WebRtcRemoteClient::Impl::Fh f; f.path = path;
-            if (op == OP_CREATE || (flags & (FB_O_CREAT | FB_O_TRUNC))) { f.dirty = true; }
-            impl_->fhs[fh] = std::move(f); Writer w; w.pod(fh); resp = std::move(w.b); return 0;
+            const bool writeIntent = op == OP_CREATE ||
+                                      ((flags & FB_O_ACCMODE) == FB_O_WRONLY) ||
+                                      ((flags & FB_O_ACCMODE) == FB_O_RDWR) ||
+                                      (flags & (FB_O_CREAT | FB_O_TRUNC | FB_O_APPEND));
+            if (writeIntent && !impl_->canWrite.load()) return EROFS;
+            uint64_t fh = 0;
+            {
+                std::lock_guard<std::mutex> lk(impl_->fsMtx);
+                fh = impl_->nextFh++;
+                WebRtcRemoteClient::Impl::Fh f; f.path = path;
+                if (op == OP_CREATE || (flags & (FB_O_CREAT | FB_O_TRUNC))) {
+                    f.loaded = true;
+                    f.dirty = true;
+                }
+                impl_->fhs[fh] = std::move(f);
+            }
+            Writer w; w.pod(fh); resp = std::move(w.b); return 0;
         }
         if (op == OP_READ) {
-            uint64_t fh, off; uint32_t size; r.pod(fh); r.pod(off); r.pod(size); auto it = impl_->fhs.find(fh); if (it == impl_->fhs.end()) return EBADF;
-            if (it->second.data.empty()) { int st = impl_->fetch_file(it->second.path, it->second.data); if (st) return st; }
+            uint64_t fh, off; uint32_t size; r.pod(fh); r.pod(off); r.pod(size);
+            std::string path;
+            bool loaded = false;
+            {
+                std::lock_guard<std::mutex> lk(impl_->fsMtx);
+                auto it = impl_->fhs.find(fh);
+                if (it == impl_->fhs.end()) return EBADF;
+                path = it->second.path;
+                loaded = it->second.loaded;
+            }
+            if (!loaded) {
+                std::vector<uint8_t> data;
+                int st = impl_->fetch_file(path, data);
+                if (st) return st;
+                std::lock_guard<std::mutex> lk(impl_->fsMtx);
+                auto it = impl_->fhs.find(fh);
+                if (it == impl_->fhs.end()) return EBADF;
+                if (!it->second.loaded) {
+                    it->second.data = std::move(data);
+                    it->second.loaded = true;
+                }
+            }
+            std::lock_guard<std::mutex> lk(impl_->fsMtx);
+            auto it = impl_->fhs.find(fh);
+            if (it == impl_->fhs.end()) return EBADF;
             if (off >= it->second.data.size()) { resp.clear(); return 0; }
-            size_t n = std::min<size_t>(size, it->second.data.size() - static_cast<size_t>(off));
-            resp.assign(it->second.data.begin() + static_cast<size_t>(off), it->second.data.begin() + static_cast<size_t>(off) + n); bytesRead += n; return 0;
+            size_t pos = static_cast<size_t>(off);
+            size_t n = std::min<size_t>(size, it->second.data.size() - pos);
+            resp.assign(it->second.data.begin() + pos, it->second.data.begin() + pos + n); bytesRead += n; return 0;
         }
         if (op == OP_WRITE) {
-            uint64_t fh, off; r.pod(fh); r.pod(off); auto it = impl_->fhs.find(fh); if (it == impl_->fhs.end()) return EBADF;
-            size_t n = static_cast<size_t>(r.e - r.p); if (it->second.data.size() < off + n) it->second.data.resize(static_cast<size_t>(off + n)); std::memcpy(it->second.data.data() + off, r.p, n); it->second.dirty = true; bytesWritten += n; Writer w; uint32_t written = static_cast<uint32_t>(n); w.pod(written); resp = std::move(w.b); return 0;
+            if (!impl_->canWrite.load()) return EROFS;
+            uint64_t fh, off; r.pod(fh); r.pod(off);
+            std::string path;
+            bool loaded = false;
+            {
+                std::lock_guard<std::mutex> lk(impl_->fsMtx);
+                auto it = impl_->fhs.find(fh);
+                if (it == impl_->fhs.end()) return EBADF;
+                path = it->second.path;
+                loaded = it->second.loaded;
+            }
+            if (!loaded) {
+                std::vector<uint8_t> data;
+                int st = impl_->fetch_file(path, data);
+                if (st) return st;
+                std::lock_guard<std::mutex> lk(impl_->fsMtx);
+                auto it = impl_->fhs.find(fh);
+                if (it == impl_->fhs.end()) return EBADF;
+                if (!it->second.loaded) {
+                    it->second.data = std::move(data);
+                    it->second.loaded = true;
+                }
+            }
+            size_t n = static_cast<size_t>(r.e - r.p);
+            if (off > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) - n) return EIO;
+            std::lock_guard<std::mutex> lk(impl_->fsMtx);
+            auto it = impl_->fhs.find(fh);
+            if (it == impl_->fhs.end()) return EBADF;
+            size_t pos = static_cast<size_t>(off);
+            if (it->second.data.size() < pos + n) it->second.data.resize(pos + n);
+            std::memcpy(it->second.data.data() + pos, r.p, n); it->second.dirty = true; it->second.loaded = true; bytesWritten += n; Writer w; uint32_t written = static_cast<uint32_t>(n); w.pod(written); resp = std::move(w.b); return 0;
         }
         if (op == OP_RELEASE) {
-            uint64_t fh; r.pod(fh); auto it = impl_->fhs.find(fh); if (it == impl_->fhs.end()) return 0; int st = 0; if (it->second.dirty) st = impl_->upload_file(it->second.path, it->second.data); impl_->fhs.erase(it); return st;
+            uint64_t fh; r.pod(fh);
+            WebRtcRemoteClient::Impl::Fh file;
+            {
+                std::lock_guard<std::mutex> lk(impl_->fsMtx);
+                auto it = impl_->fhs.find(fh);
+                if (it == impl_->fhs.end()) return 0;
+                file = std::move(it->second);
+                impl_->fhs.erase(it);
+            }
+            return file.dirty ? impl_->upload_file(file.path, file.data) : 0;
         }
         if (op == OP_UNLINK || op == OP_RMDIR) {
+            if (!impl_->canWrite.load()) return EROFS;
             std::string path; r.str(path); QJsonObject req; req["t"] = "delete"; req["path"] = QString::fromStdString(path); QJsonObject reply; if (!impl_->send_json_wait(req, reply) || impl_->json_error(reply)) return EIO; return 0;
+        }
+        if (op == OP_MKDIR) {
+            if (!impl_->canWrite.load()) return EROFS;
+            std::string path; uint32_t mode; r.str(path); r.pod(mode); (void)mode;
+            QJsonObject req; req["t"] = "mkdir"; req["path"] = QString::fromStdString(path);
+            QJsonObject reply; if (!impl_->send_json_wait(req, reply) || impl_->json_error(reply)) return EIO; return 0;
+        }
+        if (op == OP_TRUNCATE) {
+            if (!impl_->canWrite.load()) return EROFS;
+            std::string path; uint64_t size; r.str(path); r.pod(size);
+            if (size > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) return EIO;
+            std::vector<uint8_t> data;
+            int st = impl_->fetch_file(path, data);
+            if (st) return st;
+            data.resize(static_cast<size_t>(size));
+            return impl_->upload_file(path, data);
+        }
+        if (op == OP_ACCESS) {
+            std::string path; uint32_t mode; r.str(path); r.pod(mode);
+            if (!impl_->canWrite.load() && (mode & 2u)) return EROFS;
+            Writer w; w.str(path);
+            std::vector<uint8_t> attr;
+            return request(OP_GETATTR, w.b, attr);
         }
         if (op == OP_FLUSH || op == OP_FSYNC) return 0;
         if (op == OP_STATFS) { WireStatvfs s{}; s.bsize = s.frsize = 4096; s.blocks = s.bfree = s.bavail = 1024ull * 1024 * 1024; s.namemax = 255; Writer w; w.pod(s); resp = std::move(w.b); return 0; }
@@ -1072,6 +1286,7 @@ WebRtcRemoteClient::~WebRtcRemoteClient() = default;
 bool WebRtcRemoteClient::connect(const std::string&, std::string& err) { err = "libdatachannel support was not built"; return false; }
 void WebRtcRemoteClient::disconnect() {}
 bool WebRtcRemoteClient::connected() const { return false; }
+bool WebRtcRemoteClient::canWrite() const { return false; }
 int WebRtcRemoteClient::request(uint16_t, const std::vector<uint8_t>&, std::vector<uint8_t>&) { return EIO; }
 #endif
 
