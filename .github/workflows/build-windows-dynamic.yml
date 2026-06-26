@@ -98,21 +98,25 @@ jobs:
           ctest --test-dir build --output-on-failure -C $env:BUILD_TYPE --timeout 120
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Deploy Qt DLLs
-        shell: pwsh
-        run: |
-          $qtBin = "${{ github.workspace }}\qt\${{ env.QT_VERSION }}\msvc2022_64\bin"
-          & "$qtBin\windeployqt.exe" build/folderbuddies.exe
-
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path package -Force
           Copy-Item build/folderbuddies.exe package/
+          # vcpkg (x64-windows) app-local deps such as miniupnpc.dll / libsodium.dll
+          # are placed next to the exe in build/ by CMake; carry them over.
           if (Test-Path build/*.dll) { Copy-Item build/*.dll package/ }
-          if (Test-Path build/platforms) { Copy-Item -Recurse build/platforms package/ }
-          if (Test-Path build/styles) { Copy-Item -Recurse build/styles package/ }
-          if (Test-Path build/imageformats) { Copy-Item -Recurse build/imageformats package/ }
+          # Deploy the Qt runtime (Qt6Core/Gui/Widgets/Network + plugins) straight
+          # into the package directory. Running windeployqt on the packaged exe and
+          # checking the exit code ensures a failure here fails the job instead of
+          # silently shipping an archive missing the Qt DLLs.
+          $qtBin = "${{ github.workspace }}\qt\${{ env.QT_VERSION }}\msvc2022_64\bin"
+          & "$qtBin\windeployqt.exe" --release --no-translations --compiler-runtime package/folderbuddies.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Sanity check: the four Qt modules the app links must be present.
+          foreach ($dll in 'Qt6Core.dll','Qt6Gui.dll','Qt6Widgets.dll','Qt6Network.dll') {
+            if (-not (Test-Path "package/$dll")) { Write-Error "Missing $dll in package"; exit 1 }
+          }
           Compress-Archive -Path package\* -DestinationPath folderbuddies-windows-dynamic.zip
 
       - uses: actions/upload-artifact@v4
