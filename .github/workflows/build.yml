@@ -215,10 +215,13 @@ jobs:
           macdeployqt "${deploy_args[@]}"
 
       - name: Codesign
-        if: env.MACOS_CODESIGN_IDENTITY != ''
         run: |
-          codesign --force --deep --options runtime --timestamp \
-            --sign "$MACOS_CODESIGN_IDENTITY" build/folderbuddies.app
+          if [ -n "$MACOS_CODESIGN_IDENTITY" ]; then
+            codesign --force --deep --options runtime --timestamp \
+              --sign "$MACOS_CODESIGN_IDENTITY" build/folderbuddies.app
+          else
+            codesign --force --deep --sign - build/folderbuddies.app
+          fi
           codesign --verify --deep --strict --verbose=2 build/folderbuddies.app
 
       - name: Notarize and staple
