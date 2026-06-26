@@ -141,7 +141,7 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          brew install cmake ninja pkg-config qtbase miniupnpc imagemagick libdatachannel
+          brew install cmake ninja pkg-config qtbase miniupnpc imagemagick openssl@3
           brew tap macos-fuse-t/homebrew-cask || true
           brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t
           echo "$(brew --prefix qtbase)/bin" >> "$GITHUB_PATH"
@@ -150,6 +150,26 @@ jobs:
           # by default on Apple Silicon).
           echo "CMAKE_PREFIX_PATH=$(brew --prefix qtbase):$(brew --prefix):${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+          # openssl@3 is keg-only; point CMake's FindOpenSSL at it so both the
+          # libdatachannel build and any find_dependency(OpenSSL) can locate it.
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      - name: Build libdatachannel (native<->browser WebRTC bridge)
+        run: |
+          # Not available as a Homebrew formula, so build the WebRTC transport
+          # from source. OpenSSL backend + bundled libjuice (no GnuTLS / libnice).
+          # Installed under /usr/local, which CMake's find_package searches by
+          # default on macOS.
+          git clone --depth 1 --branch v0.24.5 --recurse-submodules \
+            https://github.com/paullouisageneau/libdatachannel.git _deps/libdatachannel
+          cmake -G Ninja -S _deps/libdatachannel -B _deps/libdatachannel/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_GNUTLS=OFF -DUSE_NICE=OFF \
+            -DNO_EXAMPLES=ON -DNO_TESTS=ON \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
+            -DCMAKE_INSTALL_PREFIX=/usr/local
+          cmake --build _deps/libdatachannel/build --parallel
+          sudo cmake --install _deps/libdatachannel/build
 
       - name: Generate app icons
         run: |

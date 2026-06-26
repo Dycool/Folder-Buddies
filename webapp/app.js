@@ -271,6 +271,14 @@ import { argon2id } from "./vendor/noble/argon2.js";
     state.toastTimer = setTimeout(() => els.toast.classList.remove("show"), 2400);
   }
 
+  // The File System Access pickers (showDirectoryPicker / showSaveFilePicker)
+  // reject with an AbortError when the user simply dismisses the dialog. That is
+  // a normal cancellation, not a failure, so callers swallow it instead of
+  // surfacing a confusing "The user aborted a request." toast.
+  function isAbortError(e) {
+    return e && e.name === "AbortError";
+  }
+
   function clean(value) {
     return String(value || "").trim();
   }
@@ -1663,16 +1671,25 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return !!els.allowWrites?.checked;
   }
 
+  // Returns true if a folder was chosen, false if the user cancelled the dialog.
   async function pickFolder() {
     if (!supportsHosting()) throw new Error("Hosting is not supported in this browser");
-    state.rootHandle = await window.showDirectoryPicker({ mode: wantsWriteAccess() ? "readwrite" : "read" });
+    let handle;
+    try {
+      handle = await window.showDirectoryPicker({ mode: wantsWriteAccess() ? "readwrite" : "read" });
+    } catch (e) {
+      if (isAbortError(e)) return false; // user dismissed the picker — not an error
+      throw e;
+    }
+    state.rootHandle = handle;
     els.folderInput.value = state.rootHandle.name;
+    return true;
   }
 
   async function startHost() {
     if (!supportsHosting()) throw new Error("Hosting is not supported in this browser");
     if (isMobile()) throw new Error("Hosting is not available on mobile browsers");
-    if (!state.rootHandle) await pickFolder();
+    if (!state.rootHandle && !(await pickFolder())) return; // user cancelled the folder chooser
     setShareStatus("Starting…");
     els.shareToggle.disabled = true;
     state.allowWrites = wantsWriteAccess();
@@ -2074,7 +2091,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
         const saveHandle = await window.showSaveFilePicker({ suggestedName: entry.name });
         writer = await saveHandle.createWritable();
       } catch (e) {
-        if (e?.name === "AbortError") throw e;
+        if (isAbortError(e)) return; // user cancelled the save dialog — abort silently
         writer = null; // direct links may not have user activation; fall back to browser download
       }
     }
@@ -2194,7 +2211,13 @@ import { argon2id } from "./vendor/noble/argon2.js";
   async function uploadPickedFolder() {
     if (!state.clientCanWrite) throw new Error("The host has writes disabled");
     if (window.showDirectoryPicker) {
-      const handle = await window.showDirectoryPicker({ mode: "read" });
+      let handle;
+      try {
+        handle = await window.showDirectoryPicker({ mode: "read" });
+      } catch (e) {
+        if (isAbortError(e)) return; // user dismissed the picker — not an error
+        throw e;
+      }
       await uploadDirectoryHandle(handle);
       await listRemote(state.currentPath);
       toast("Folder uploaded");

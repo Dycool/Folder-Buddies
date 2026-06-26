@@ -336,7 +336,7 @@ public:
         live_ = true;
         poller_ = std::thread([this] { pollHost(); });
         QJsonObject ready; ready["kind"] = "ready"; ready["role"] = "host"; ready["room"] = QString::fromStdString(lookup_);
-        emit(ready);
+        emitMessage(ready);
         return true;
     }
 
@@ -365,7 +365,7 @@ public:
         live_ = true;
         poller_ = std::thread([this] { pollClient(); });
         QJsonObject ready; ready["kind"] = "ready"; ready["role"] = "client"; ready["room"] = QString::fromStdString(lookup_); ready["peerId"] = QString::fromStdString(peerId_);
-        emit(ready);
+        emitMessage(ready);
         return true;
     }
 
@@ -393,7 +393,7 @@ public:
     }
 
 private:
-    void emit(const QJsonObject& obj) {
+    void emitMessage(const QJsonObject& obj) {
         if (onMessage_) {
             try { onMessage_(obj); } catch (...) { /* callback owns errors */ }
         }
@@ -412,28 +412,28 @@ private:
                     if (!seenClients_.count(peer)) {
                         seenClients_.insert(peer);
                         QJsonObject joined; joined["kind"] = "client-joined"; joined["peerId"] = QString::fromStdString(peer);
-                        emit(joined);
+                        emitMessage(joined);
                     }
                 }
                 for (auto it = seenClients_.begin(); it != seenClients_.end(); ) {
                     if (!now.count(*it)) {
                         QJsonObject left; left["kind"] = "client-left"; left["peerId"] = QString::fromStdString(*it);
-                        emit(left);
+                        emitMessage(left);
                         it = seenClients_.erase(it);
                     } else ++it;
                 }
             }
 
-            QJsonValue signals;
-            if (firebase_get_value(path_ + "/signalsToHost", signals, err) && signals.isObject()) {
-                const QJsonObject obj = signals.toObject();
+            QJsonValue sigs;
+            if (firebase_get_value(path_ + "/signalsToHost", sigs, err) && sigs.isObject()) {
+                const QJsonObject obj = sigs.toObject();
                 for (auto it = obj.begin(); it != obj.end(); ++it) {
                     if (seenSignals_.count(it.key().toStdString())) continue;
                     seenSignals_.insert(it.key().toStdString());
                     QJsonObject v = it.value().toObject();
                     if (v.value("peerId").isString() && v.value("ciphertext").isString()) {
                         QJsonObject msg; msg["kind"] = "signal"; msg["peerId"] = v.value("peerId").toString(); msg["ciphertext"] = v.value("ciphertext").toString();
-                        emit(msg);
+                        emitMessage(msg);
                     }
                     std::string delErr;
                     firebase_delete_path(path_ + "/signalsToHost/" + it.key().toStdString(), delErr);
@@ -448,18 +448,18 @@ private:
             std::string err;
             QJsonValue room;
             if (firebase_get_value(path_, room, err) && (room.isUndefined() || room.isNull())) {
-                QJsonObject msg; msg["kind"] = "host-left"; emit(msg); live_ = false; break;
+                QJsonObject msg; msg["kind"] = "host-left"; emitMessage(msg); live_ = false; break;
             }
-            QJsonValue signals;
-            if (firebase_get_value(path_ + "/signalsToClient/" + peerId_, signals, err) && signals.isObject()) {
-                const QJsonObject obj = signals.toObject();
+            QJsonValue sigs;
+            if (firebase_get_value(path_ + "/signalsToClient/" + peerId_, sigs, err) && sigs.isObject()) {
+                const QJsonObject obj = sigs.toObject();
                 for (auto it = obj.begin(); it != obj.end(); ++it) {
                     if (seenSignals_.count(it.key().toStdString())) continue;
                     seenSignals_.insert(it.key().toStdString());
                     QJsonObject v = it.value().toObject();
                     if (v.value("ciphertext").isString()) {
                         QJsonObject msg; msg["kind"] = "signal"; msg["peerId"] = QString::fromStdString(peerId_); msg["ciphertext"] = v.value("ciphertext").toString();
-                        emit(msg);
+                        emitMessage(msg);
                     }
                     std::string delErr;
                     firebase_delete_path(path_ + "/signalsToClient/" + peerId_ + "/" + it.key().toStdString(), delErr);
