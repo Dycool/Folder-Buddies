@@ -196,14 +196,26 @@ jobs:
             deploy_args+=("-libpath=$libdir")
           }
 
+          fuse_t_dylib=""
+          remember_fuse_t_dylib() {
+            local dylib="$1"
+            if [ -z "$fuse_t_dylib" ] && [ -f "$dylib" ]; then
+              fuse_t_dylib="$dylib"
+            fi
+          }
+
           fuse_libdir="$(pkg-config --variable=libdir fuse-t 2>/dev/null || true)"
           add_deploy_libpath "$fuse_libdir"
+          remember_fuse_t_dylib "$fuse_libdir/libfuse-t.dylib"
 
           for token in $(pkg-config --libs-only-L fuse-t 2>/dev/null || true); do
-            add_deploy_libpath "${token#-L}"
+            libdir="${token#-L}"
+            add_deploy_libpath "$libdir"
+            remember_fuse_t_dylib "$libdir/libfuse-t.dylib"
           done
 
           while IFS= read -r fuse_lib; do
+            remember_fuse_t_dylib "$fuse_lib"
             add_deploy_libpath "${fuse_lib%/*}"
           done < <(find /opt/homebrew /usr/local /Library -name libfuse-t.dylib -print 2>/dev/null)
 
@@ -236,6 +248,14 @@ jobs:
           printf '  %s\n' "${deploy_args[@]}"
 
           macdeployqt "${deploy_args[@]}"
+
+          if [ -z "$fuse_t_dylib" ]; then
+            echo 'Could not locate libfuse-t.dylib for bundling.' >&2
+            exit 1
+          fi
+          echo "Bundling FUSE-T runtime: $fuse_t_dylib"
+          cp "$fuse_t_dylib" build/folderbuddies.app/Contents/Frameworks/libfuse-t.dylib
+          test -f build/folderbuddies.app/Contents/Frameworks/libfuse-t.dylib
 
       - name: Codesign
         run: |
