@@ -15,6 +15,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   const BIN_MAGIC = 0x4642494e; // FBIN
   const CHUNK_SIZE = 64 * 1024;
   const ICE_TIMEOUT_MS = 8000;
+  const CLIENT_FALLBACK_DELAY_MS = 11000;
   const STATS_INTERVAL_MS = 500;
   const DEFAULT_ICE = [{ urls: "stun:stun.l.google.com:19302" }];
   const TEXT_PREVIEW_MAX = 4 * 1024 * 1024;
@@ -99,6 +100,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     pending: new Map(),
     downloads: new Map(),
     uploads: new Map(),
+    clientFallbackTimer: 0,
     nextReqId: 1,
     turnstileWidgetId: null,
     turnstileResolver: null,
@@ -287,6 +289,15 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function clientDataChannelOpen() {
     return state.dataChannel?.readyState === "open";
+  }
+
+  function clientHasOfferOrChannel() {
+    return !!(state.dataChannel || state.clientPeer?.pc);
+  }
+
+  function clearClientFallbackTimer() {
+    clearTimeout(state.clientFallbackTimer);
+    state.clientFallbackTimer = 0;
   }
 
   function describeClientDisconnect(base) {
@@ -1102,6 +1113,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     state.dataChannel = dc;
     dc.binaryType = "arraybuffer";
     dc.onopen = () => {
+      clearClientFallbackTimer();
       setConnectStatus("Connected.");
       CACHE.clear(); // fresh session: never carry cache across connections
       els.explorer.hidden = false;
@@ -1131,6 +1143,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       state.refreshTimer = setInterval(() => { pollCurrentDir().catch(() => {}); }, 4000);
     };
     dc.onclose = () => {
+      clearClientFallbackTimer();
       clearInterval(state.refreshTimer);
       state.refreshTimer = null;
       if (state.dataChannel !== dc) return;
@@ -1624,6 +1637,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   async function acceptOffer(peerId, offerSdp, sendAnswer) {
+    clearClientFallbackTimer();
     const pc = makePeer("Remote folder");
     state.clientPeer = { peerId, pc };
     pc.ondatachannel = (event) => setupClientChannel(event.channel);
@@ -1754,6 +1768,51 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return !!(state.clientWs || state.dataChannel || state.clientPeer || state.manualClient);
   }
 
+  function handleClientSignalClose(relay, event) {
+    if (state.clientWs !== relay) return;
+    state.lastSignalCloseReason = signalCloseReason(relay.provider, event);
+    if (clientDataChannelOpen()) {
+      setConnectStatus(`Connected. ${state.lastSignalCloseReason}; file session still active.`);
+    } else {
+      setClientDisconnected(state.lastSignalCloseReason);
+    }
+  }
+
+  function attachFirebaseClientSignal(relay) {
+    state.clientWs = relay;
+    relay.onmessage = (event) => {
+      try { handleClientSignal(JSON.parse(event.data)).catch((err) => toast(err.message)); }
+      catch { /* ignore */ }
+    };
+    relay.onclose = (event) => handleClientSignalClose(relay, event);
+    return relay;
+  }
+
+  function scheduleCloudflareClientFallback(cloudWs) {
+    clearClientFallbackTimer();
+    state.clientFallbackTimer = setTimeout(async () => {
+      state.clientFallbackTimer = 0;
+      if (state.clientWs !== cloudWs || clientHasOfferOrChannel()) return;
+      setConnectStatus("Still waiting for host. Trying Firebase fallback…");
+      let relay;
+      try {
+        relay = await openFirebaseClientSignal(state.lookup);
+      } catch {
+        if (state.clientWs === cloudWs && !clientHasOfferOrChannel()) setConnectStatus("Waiting for host…");
+        return;
+      }
+      if (state.clientWs !== cloudWs || clientHasOfferOrChannel()) {
+        try { relay.close(); } catch { /* ignore */ }
+        return;
+      }
+      state.clientWs = null;
+      try { cloudWs.close(); } catch { /* ignore */ }
+      attachFirebaseClientSignal(relay);
+      setConnectStatus("Waiting for host through Firebase fallback…");
+      toast("Cloudflare had no host; using Firebase fallback.");
+    }, CLIENT_FALLBACK_DELAY_MS);
+  }
+
   async function connect() {
     const rawInput = clean(els.connectInput.value);
     const pendingToken = clean(state.pendingConnectToken);
@@ -1768,6 +1827,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
     state.lastSignalCloseReason = "";
     state.lastPeerState = "";
+    clearClientFallbackTimer();
     setConnectStatus("Connecting…");
     state.code = resolved.code;
     state.lookup = resolved.lookup;
@@ -1778,24 +1838,11 @@ import { argon2id } from "./vendor/noble/argon2.js";
     try {
       const token = await turnstileToken();
       state.clientWs = await openSignal("client", state.lookup, (msg) => handleClientSignal(msg).catch((e) => toast(e.message)), token);
+      scheduleCloudflareClientFallback(state.clientWs);
     } catch (e) {
       cloudError = e?.message || String(e);
       try {
-        const relay = await openFirebaseClientSignal(state.lookup);
-        state.clientWs = relay;
-        relay.onmessage = (event) => {
-          try { handleClientSignal(JSON.parse(event.data)).catch((err) => toast(err.message)); }
-          catch { /* ignore */ }
-        };
-        relay.onclose = (event) => {
-          if (state.clientWs !== relay) return;
-          state.lastSignalCloseReason = signalCloseReason(relay.provider, event);
-          if (clientDataChannelOpen()) {
-            setConnectStatus(`Connected. ${state.lastSignalCloseReason}; file session still active.`);
-          } else {
-            setClientDisconnected(state.lastSignalCloseReason);
-          }
-        };
+        attachFirebaseClientSignal(await openFirebaseClientSignal(state.lookup));
         toast(`Cloudflare failed; using Firebase fallback. ${cloudError}`);
       } catch (fb) {
         if (fb?.code === "room_not_found") throw new Error("Host not found");
@@ -1834,6 +1881,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   function disconnectClient() {
+    clearClientFallbackTimer();
     clearInterval(state.refreshTimer);
     state.refreshTimer = null;
     state.renderedSig = "";
@@ -2024,8 +2072,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return isTextPreview(name, mime) || mime.startsWith("image/") || mime.startsWith("audio/") || mime.startsWith("video/") || mime === "application/pdf";
   }
 
-  function makeTransfer(entry, verb) {
-    const id = nextId();
+  function makeTransfer(entry, verb, id = nextId()) {
     const transfer = document.createElement("div");
     transfer.className = "transfer";
     const label = document.createElement("div");
@@ -2034,7 +2081,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
     progress.max = entry.size || 1;
     progress.value = 0;
     transfer.append(label, progress);
-    els.transfers.prepend(transfer);
+    els.transfers.textContent = "";
+    els.transfers.appendChild(transfer);
     return { id, label, progress };
   }
 
@@ -2111,6 +2159,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
       const textarea = document.createElement("textarea");
       textarea.className = "text-editor";
       textarea.spellcheck = false;
+      textarea.readOnly = !state.clientCanWrite;
+      textarea.setAttribute("aria-readonly", textarea.readOnly ? "true" : "false");
       textarea.value = await blob.text();
       els.previewBody.appendChild(textarea);
       if (state.clientCanWrite) {
@@ -2217,17 +2267,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (!state.dataChannel || state.dataChannel.readyState !== "open") throw new Error("Not connected");
     const name = safeEntryName(file.name);
     const path = targetPath ? normalizePath(targetPath) : joinPath(state.currentPath, name);
-    const id = nextId();
-
-    const transfer = document.createElement("div");
-    transfer.className = "transfer";
-    const label = document.createElement("div");
-    label.textContent = `${name} — uploading`;
-    const progress = document.createElement("progress");
-    progress.max = file.size || 1;
-    progress.value = 0;
-    transfer.append(label, progress);
-    els.transfers.prepend(transfer);
+    const { id, label, progress } = makeTransfer({ name, size: file.size }, "uploading");
 
     const ready = expectResponse(id, 30000);
     safeSendJson(state.dataChannel, { t: "uploadStart", id, path, size: file.size, mtime: file.lastModified });
@@ -2277,6 +2317,15 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (els.dropzone) {
       els.dropzone.hidden = !state.clientCanWrite;
       els.dropzone.textContent = state.clientCanWrite ? "Drop files here to upload to this folder" : "";
+    }
+    const editor = els.previewBody?.querySelector?.(".text-editor");
+    if (editor) {
+      editor.readOnly = !state.clientCanWrite;
+      editor.setAttribute("aria-readonly", editor.readOnly ? "true" : "false");
+      if (!state.clientCanWrite && els.savePreview) {
+        els.savePreview.hidden = true;
+        els.savePreview.onclick = null;
+      }
     }
   }
 
