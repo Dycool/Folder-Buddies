@@ -220,6 +220,11 @@ td.name {
   white-space: nowrap;
 }
 tr.dir td.name, tr.file td.name { color: var(--accent); cursor: pointer; }
+tr.target {
+  background: #fff7d6;
+  outline: 2px solid #d8a600;
+  outline-offset: -2px;
+}
 td.actions {
   display: flex;
   gap: 6px;

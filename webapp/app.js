@@ -81,6 +81,9 @@ import { argon2id } from "./vendor/noble/argon2.js";
     directFileConsumed: false,
     directFolderPath: "",
     directFolderConsumed: false,
+    focusPath: "",
+    lastSignalCloseReason: "",
+    lastPeerState: "",
     hostWs: null,
     clientWs: null,
     hostPeers: new Map(),
@@ -270,6 +273,34 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function clean(value) {
     return String(value || "").trim();
+  }
+
+  function signalCloseReason(provider, event) {
+    const label = provider === "firebase" ? "Firebase signaling" : "Cloudflare signaling";
+    const code = Number(event?.code || 0);
+    const reason = clean(event?.reason);
+    if (code && reason) return `${label} closed (${code}: ${reason})`;
+    if (code) return `${label} closed (${code})`;
+    if (reason) return `${label} closed (${reason})`;
+    return `${label} closed`;
+  }
+
+  function clientDataChannelOpen() {
+    return state.dataChannel?.readyState === "open";
+  }
+
+  function describeClientDisconnect(base) {
+    const parts = [base];
+    const peerState = state.lastPeerState || state.clientPeer?.pc?.connectionState || "";
+    if (peerState) parts.push(`peer: ${peerState}`);
+    if (state.lastSignalCloseReason) parts.push(`last relay: ${state.lastSignalCloseReason}`);
+    return parts.join("; ");
+  }
+
+  function setClientDisconnected(reason) {
+    const detail = clean(reason) || "connection closed";
+    setConnectStatus(`Disconnected: ${detail}.`);
+    try { console.warn("Folder Buddies disconnected:", detail); } catch { /* ignore */ }
   }
 
   function config() {
@@ -516,14 +547,24 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   function shareLink(code, path = "", kind = "file") {
+    const token = clean(code);
+    if (!token) throw new Error("No share code available");
     const params = new URLSearchParams();
-    params.set("r", code);
+    params.set(isWebOfflineOffer(token) ? "o" : "r", token);
     if (path) params.set(kind === "folder" ? "p" : "f", normalizePath(path));
     return `${siteUrl()}#${params.toString()}`;
   }
 
   function activeShareToken() {
     return state.connectToken || state.code;
+  }
+
+  function hostShareLink() {
+    return shareLink(clean(els.connectCode?.value) || activeShareToken());
+  }
+
+  function clientShareLink(path = state.currentPath || "/", kind = "folder") {
+    return shareLink(activeShareToken(), path, kind);
   }
 
   function hashFragmentFrom(text) {
@@ -539,6 +580,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const params = new URLSearchParams(frag);
     return {
       room: params.get("r") || "",
+      offer: params.get("o") || "",
       file: params.get("f") || "",
       folder: params.get("p") || params.get("d") || "",
     };
@@ -547,14 +589,15 @@ import { argon2id } from "./vendor/noble/argon2.js";
   function parseJoinInput(raw, options = {}) {
     const text = clean(raw);
     const fromHash = (frag) => {
-      const { room, file, folder } = shareParamsFromFragment(frag);
+      const { room, offer, file, folder } = shareParamsFromFragment(frag);
       const directFile = file ? normalizePath(file) : "";
       const directFolder = folder ? normalizePath(folder) : "";
       state.directFilePath = directFile && directFile !== "/" ? directFile : "";
       state.directFolderPath = !state.directFilePath && directFolder ? directFolder : "";
       state.directFileConsumed = false;
       state.directFolderConsumed = false;
-      return room;
+      state.focusPath = state.directFilePath;
+      return offer || room;
     };
     try {
       const url = new URL(text);
@@ -564,7 +607,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const hashAt = text.indexOf("#");
     if (hashAt >= 0) {
       const frag = text.slice(hashAt + 1);
-      if (shareParamsFromFragment(frag).room) {
+      const params = shareParamsFromFragment(frag);
+      if (params.room || params.offer) {
         const r = fromHash(frag);
         if (r) return r;
       }
@@ -574,6 +618,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       state.directFileConsumed = false;
       state.directFolderPath = "";
       state.directFolderConsumed = false;
+      state.focusPath = "";
     }
     return text;
   }
@@ -581,16 +626,18 @@ import { argon2id } from "./vendor/noble/argon2.js";
   function applyHash() {
     const frag = currentHashFragment();
     if (!frag) return false;
-    const { room, file, folder } = shareParamsFromFragment(frag);
-    if (looksLikeRoom(room)) {
-      state.pendingConnectToken = room;
+    const { room, offer, file, folder } = shareParamsFromFragment(frag);
+    const token = isWebOfflineOffer(offer) ? offer : room;
+    if (isWebOfflineOffer(token) || looksLikeRoom(token)) {
+      state.pendingConnectToken = token;
       const directFile = file ? normalizePath(file) : "";
       const directFolder = folder ? normalizePath(folder) : "";
       state.directFilePath = directFile && directFile !== "/" ? directFile : "";
       state.directFolderPath = !state.directFilePath && directFolder ? directFolder : "";
       state.directFileConsumed = false;
       state.directFolderConsumed = false;
-      els.connectInput.value = room;
+      state.focusPath = state.directFilePath;
+      els.connectInput.value = token;
       selectTab("connect");
       return true;
     }
@@ -691,10 +738,17 @@ import { argon2id } from "./vendor/noble/argon2.js";
         resolve(ws);
       };
       ws.onerror = () => fail("Cloudflare signaling failed");
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (!settled) fail("Cloudflare signaling closed before it was ready");
         if (role === "host" && state.hostWs === ws) setShareStatus("Not hosting.");
-        if (role === "client" && state.clientWs === ws) setConnectStatus("Disconnected.");
+        if (role === "client" && state.clientWs === ws) {
+          state.lastSignalCloseReason = signalCloseReason(ws.provider, event);
+          if (clientDataChannelOpen()) {
+            setConnectStatus(`Connected. ${state.lastSignalCloseReason}; file session still active.`);
+          } else {
+            setClientDisconnected(state.lastSignalCloseReason);
+          }
+        }
       };
       ws.onmessage = (event) => {
         try { onMessage(JSON.parse(event.data)); }
@@ -993,6 +1047,16 @@ import { argon2id } from "./vendor/noble/argon2.js";
   function makePeer(label) {
     const pc = new RTCPeerConnection({ iceServers: iceServers() });
     pc.onconnectionstatechange = () => {
+      if (pc === state.clientPeer?.pc) {
+        state.lastPeerState = pc.connectionState || "";
+        if (pc.connectionState === "disconnected") {
+          setConnectStatus("Connection interrupted; trying to recover…");
+        } else if (pc.connectionState === "failed") {
+          setClientDisconnected(describeClientDisconnect("peer connection failed"));
+        } else if (pc.connectionState === "connected") {
+          setConnectStatus("Connected.");
+        }
+      }
       if (pc.connectionState === "failed") toast(`${label} connection failed`);
     };
     return pc;
@@ -1015,7 +1079,14 @@ import { argon2id } from "./vendor/noble/argon2.js";
   function setupHostChannel(peerId, dc) {
     dc.binaryType = "arraybuffer";
     dc.onopen = () => renderShareStatus();
-    dc.onclose = () => renderShareStatus();
+    dc.onclose = () => {
+      const peer = state.hostPeers.get(peerId);
+      if (peer?.dc === dc) {
+        peer.pc.close();
+        state.hostPeers.delete(peerId);
+      }
+      renderShareStatus();
+    };
     dc.onmessage = (event) => {
       if (typeof event.data !== "string") {
         handleHostBinary(dc, event.data);
@@ -1037,8 +1108,13 @@ import { argon2id } from "./vendor/noble/argon2.js";
       if (state.directFilePath && !state.directFileConsumed) {
         state.directFileConsumed = true;
         const filePath = state.directFilePath;
-        setConnectStatus("Connected. Downloading…");
-        downloadRemote({ name: basename(filePath), path: filePath, kind: "file" }, { browserDownload: true, direct: true })
+        state.focusPath = filePath;
+        setConnectStatus("Connected. Opening file location…");
+        listRemote(parentPath(filePath))
+          .then(() => {
+            setConnectStatus("Connected. Downloading…");
+            return downloadRemote({ name: basename(filePath), path: filePath, kind: "file" }, { browserDownload: true, direct: true });
+          })
           .then(() => toast("Download started"))
           .catch((e) => toast(e.message));
       } else if (state.directFolderPath && !state.directFolderConsumed) {
@@ -1057,9 +1133,22 @@ import { argon2id } from "./vendor/noble/argon2.js";
     dc.onclose = () => {
       clearInterval(state.refreshTimer);
       state.refreshTimer = null;
-      setConnectStatus("Disconnected.");
+      if (state.dataChannel !== dc) return;
+      const relay = state.clientWs;
+      const pc = state.clientPeer?.pc;
+      if (!state.lastPeerState && pc?.connectionState) state.lastPeerState = pc.connectionState;
+      state.dataChannel = null;
+      state.clientWs = null;
+      state.clientPeer = null;
+      try { relay?.close?.(); } catch { /* ignore */ }
+      try { pc?.close?.(); } catch { /* ignore */ }
+      setConnected(false);
+      setClientDisconnected(describeClientDisconnect("data channel closed"));
     };
-    dc.onerror = () => toast("Connection error");
+    dc.onerror = () => {
+      toast("Connection error");
+      if (state.dataChannel === dc) setClientDisconnected(describeClientDisconnect("data channel error"));
+    };
     dc.onmessage = (event) => {
       if (typeof event.data === "string") handleClientJson(event.data);
       else handleClientBinary(event.data);
@@ -1619,6 +1708,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       state.rootBase = await deriveRootBase(state.code);
       state.hostWs = null;
       const offerCode = await createManualHostOffer();
+      state.connectToken = offerCode;
       els.connectCode.value = offerCode;
       toast(`Cloudflare/Firebase failed; using offline web code. ${cloudError}`);
     } finally {
@@ -1676,6 +1766,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (isWebOfflineOffer(resolved.token)) return connectManualOffer(resolved.token);
     if (!looksLikeRoom(resolved.code)) throw new Error("The browser client accepts 6- or 16-character web room codes/share links or FBW2O offline web offer codes. Native IP/port blobs are for the native app.");
 
+    state.lastSignalCloseReason = "";
+    state.lastPeerState = "";
     setConnectStatus("Connecting…");
     state.code = resolved.code;
     state.lookup = resolved.lookup;
@@ -1689,10 +1781,20 @@ import { argon2id } from "./vendor/noble/argon2.js";
     } catch (e) {
       cloudError = e?.message || String(e);
       try {
-        state.clientWs = await openFirebaseClientSignal(state.lookup);
-        state.clientWs.onmessage = (event) => {
+        const relay = await openFirebaseClientSignal(state.lookup);
+        state.clientWs = relay;
+        relay.onmessage = (event) => {
           try { handleClientSignal(JSON.parse(event.data)).catch((err) => toast(err.message)); }
           catch { /* ignore */ }
+        };
+        relay.onclose = (event) => {
+          if (state.clientWs !== relay) return;
+          state.lastSignalCloseReason = signalCloseReason(relay.provider, event);
+          if (clientDataChannelOpen()) {
+            setConnectStatus(`Connected. ${state.lastSignalCloseReason}; file session still active.`);
+          } else {
+            setClientDisconnected(state.lastSignalCloseReason);
+          }
         };
         toast(`Cloudflare failed; using Firebase fallback. ${cloudError}`);
       } catch (fb) {
@@ -1707,11 +1809,14 @@ import { argon2id } from "./vendor/noble/argon2.js";
   async function connectManualOffer(text) {
     const offer = decodeWebOffline(WEB_OFFLINE_OFFER_PREFIX, text);
     if (offer.v !== 1 || offer.type !== "web-offline-offer" || !looksLikeRoom(offer.code)) throw new Error("Invalid offline web offer");
+    state.lastSignalCloseReason = "";
+    state.lastPeerState = "";
     setConnectStatus("Creating offline answer…");
     state.manualClient = true;
     state.code = offer.code;
     state.lookup = offer.lookup || lookupOf(offer.code);
     state.secureSecret = typeof offer.secret === "string" ? offer.secret : "";
+    state.connectToken = clean(text);
     state.rootBase = await deriveRootBase(state.code, state.secureSecret);
     await acceptOffer("manual", offer.sdp, async (answer) => {
       const answerCode = encodeWebOffline(WEB_OFFLINE_ANSWER_PREFIX, {
@@ -1744,6 +1849,9 @@ import { argon2id } from "./vendor/noble/argon2.js";
     state.directFileConsumed = false;
     state.directFolderPath = "";
     state.directFolderConsumed = false;
+    state.focusPath = "";
+    state.lastSignalCloseReason = "";
+    state.lastPeerState = "";
     CACHE.clear(); // drop all cached listings/previews on disconnect
     setConnected(false);
     els.explorer.hidden = true;
@@ -1851,7 +1959,10 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
     for (const e of entries) {
       const tr = document.createElement("tr");
-      tr.className = e.kind === "directory" ? "dir" : "file";
+      const rowPath = normalizePath(e.path || e.name);
+      const focused = !!state.focusPath && rowPath === state.focusPath;
+      tr.className = `${e.kind === "directory" ? "dir" : "file"}${focused ? " target" : ""}`;
+      if (focused) tr.setAttribute("aria-current", "true");
       const name = document.createElement("td");
       name.className = "name";
       name.textContent = e.kind === "directory" ? `📁 ${e.name}` : `📄 ${e.name}`;
@@ -1866,12 +1977,13 @@ import { argon2id } from "./vendor/noble/argon2.js";
         btn.textContent = "Download";
         btn.onclick = () => downloadRemote(e).catch((err) => toast(err.message));
         action.appendChild(btn);
-
-        const share = document.createElement("button");
-        share.textContent = "Share link";
-        share.onclick = () => copy(shareLink(activeShareToken(), e.path)).then(() => toast("File link copied")).catch((err) => toast(err.message));
-        action.appendChild(share);
       }
+      const share = document.createElement("button");
+      share.textContent = "Share link";
+      share.onclick = () => copy(clientShareLink(e.path, e.kind === "directory" ? "folder" : "file"))
+        .then(() => toast(e.kind === "directory" ? "Folder link copied" : "File link copied"))
+        .catch((err) => toast(err.message));
+      action.appendChild(share);
       if (state.clientCanWrite) {
         const del = document.createElement("button");
         del.textContent = "Delete";
@@ -1881,6 +1993,9 @@ import { argon2id } from "./vendor/noble/argon2.js";
       }
       tr.append(name, size, action);
       els.fileRows.appendChild(tr);
+      if (focused && typeof tr.scrollIntoView === "function") {
+        setTimeout(() => tr.scrollIntoView({ block: "nearest" }), 0);
+      }
     }
   }
 
@@ -2233,7 +2348,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     };
 
     els.copyAll.onclick = () => copy(copyShareDetails()).then(() => toast("Code copied")).catch((e) => toast(e.message));
-    els.copyShareLink.onclick = () => copy(shareLink(activeShareToken())).then(() => toast("Share link copied")).catch((e) => toast(e.message));
+    els.copyShareLink.onclick = () => copy(hostShareLink()).then(() => toast("Share link copied")).catch((e) => toast(e.message));
 
     els.connectInput.oninput = () => {
       state.pendingConnectToken = "";
@@ -2241,6 +2356,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
       state.directFileConsumed = false;
       state.directFolderPath = "";
       state.directFolderConsumed = false;
+      state.focusPath = "";
     };
 
     if (els.applyOfflineAnswer) {
@@ -2264,7 +2380,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
     if (els.shareFolderButton) {
       els.shareFolderButton.onclick = () => {
-        const link = shareLink(activeShareToken(), state.currentPath || "/", "folder");
+        const link = clientShareLink(state.currentPath || "/", "folder");
         copy(link).then(() => toast("Folder link copied")).catch((e) => toast(e.message));
       };
     }
