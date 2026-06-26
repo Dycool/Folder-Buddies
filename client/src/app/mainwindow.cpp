@@ -75,13 +75,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setCentralWidget(central);
 
     statsLabel_ = new QLabel("Idle");
+    statsLabel_->setContentsMargins(0, 0, 6, 0);
     statusBar()->addPermanentWidget(statsLabel_);
+    statusBar()->setSizeGripEnabled(false);
 
     statsTimer_ = new QTimer(this);
     connect(statsTimer_, &QTimer::timeout, this, &MainWindow::refreshStats);
     statsTimer_->start(500);
 
-    setFixedSize(560, 460);
+    setFixedWidth(560);
+    adjustSize();
+    setFixedSize(560, height());
 
     setStyleSheet(R"(
         QMainWindow {

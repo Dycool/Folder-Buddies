@@ -8,8 +8,6 @@ SRC="${1:-$CANONICAL_ICON}"
 OUT_DIR="$SCRIPT_DIR"
 SIZE=1024
 FILL=900
-# Transparent artwork master used for the Windows .ico (white background only
-# belongs on macOS/Linux). Falls back to SRC if the master is absent.
 ICON_SOURCE="$SCRIPT_DIR/icon-source.png"
 [ -f "$ICON_SOURCE" ] || ICON_SOURCE="$SRC"
 
@@ -35,7 +33,7 @@ if [ ${#IM[@]} -gt 0 ]; then
   "${IM[@]}" "$SRC" \
     -background white \
     -trim -fuzz 2% \
-    -resize "${SIZE}x${SIZE}^" \
+    -resize "${FILL}x${FILL}" \
     -gravity center \
     -extent "${SIZE}x${SIZE}" \
     -density "${DPI}x${DPI}" \
@@ -77,8 +75,7 @@ else
   echo "wrote src/icons/icon.png (copy)"
 fi
 
-# Windows .ico (multi-resolution) — transparent background, same framing as
-# the macOS icon (artwork trimmed and scaled to fill the canvas).
+# Windows .ico (multi-resolution, transparent background).
 if [ ${#IM[@]} -gt 0 ]; then
   "${IM[@]}" "$ICON_SOURCE" \
     -background none \
