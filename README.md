@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="client/src/icons/icon.png" alt="Icon" width="128" height="128">
+  <img src="icon.png" alt="Icon" width="128" height="128">
 </p>
 
 # Folder Buddies

@@ -1,5 +1,7 @@
 <RCC>
   <qresource prefix="/">
-    <file alias="icon.png">src/icons/icon.png</file>
+    <!-- Window/taskbar icon: the fully transparent folder (not the white macOS
+         "squircle" icon.png, which is only for the macOS .icns and Linux launcher). -->
+    <file alias="icon.png">src/icons/icon-app.png</file>
   </qresource>
 </RCC>

@@ -52,6 +52,26 @@ canvas.save(dst, dpi=(72, 72))
 print('wrote src/icons/icon.png (squircle)')
 PY
 
+# In-app window/taskbar icon (icon-app.png) — the folder on a FULLY TRANSPARENT
+# background (no white squircle). This is what QIcon(":/icon.png") loads, so the
+# Windows title-bar/taskbar icon has no white box. Trimmed and centered to match
+# the .ico framing.
+python3 - "$ICON_SOURCE" "$OUT_DIR/icon-app.png" "$SIZE" "$FILL" <<'PY'
+import sys
+from PIL import Image
+src_path, dst, size, fill = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+img = Image.open(src_path).convert('RGBA')
+bbox = img.getbbox()
+if bbox:
+    img = img.crop(bbox)
+ratio = min(fill / img.width, fill / img.height)
+folder = img.resize((round(img.width * ratio), round(img.height * ratio)), Image.LANCZOS)
+canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+canvas.alpha_composite(folder, ((size - folder.width) // 2, (size - folder.height) // 2))
+canvas.save(dst, dpi=(72, 72))
+print('wrote src/icons/icon-app.png (transparent)')
+PY
+
 # Windows .ico (multi-resolution, transparent background).
 if [ ${#IM[@]} -gt 0 ]; then
   "${IM[@]}" "$ICON_SOURCE" \

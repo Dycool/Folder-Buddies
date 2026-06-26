@@ -46,8 +46,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: _cache/vcpkg-bincache
-          key: vcpkg-windows-dynamic-miniupnpc-libsodium-${{ env.VCPKG_COMMIT }}
+          key: vcpkg-windows-dynamic-miniupnpc-libsodium-libdatachannel-${{ env.VCPKG_COMMIT }}
           restore-keys: |
+            vcpkg-windows-dynamic-miniupnpc-libsodium-libdatachannel-
             vcpkg-windows-dynamic-miniupnpc-libsodium-
 
       - name: Bootstrap vcpkg
@@ -67,6 +68,7 @@ jobs:
           .\_deps\vcpkg\vcpkg.exe install `
             "miniupnpc:x64-windows" `
             "libsodium:x64-windows" `
+            "libdatachannel:x64-windows" `
             --clean-after-build
 
       - name: Configure
@@ -104,8 +106,19 @@ jobs:
           New-Item -ItemType Directory -Path package -Force
           Copy-Item build/folderbuddies.exe package/
           # vcpkg (x64-windows) app-local deps such as miniupnpc.dll / libsodium.dll
-          # are placed next to the exe in build/ by CMake; carry them over.
+          # and now datachannel.dll (+ OpenSSL) are placed next to the exe in build/
+          # by CMake's vcpkg integration; carry them over.
           if (Test-Path build/*.dll) { Copy-Item build/*.dll package/ }
+          # Fallback: ensure the libdatachannel runtime and its OpenSSL deps are
+          # present even if app-local deployment missed them, copying from the
+          # vcpkg install tree. Without these the exe fails to start.
+          $vcpkgBin = "_deps/vcpkg/installed/x64-windows/bin"
+          foreach ($dll in 'datachannel.dll','libcrypto-3-x64.dll','libssl-3-x64.dll') {
+            if (-not (Test-Path "package/$dll") -and (Test-Path "$vcpkgBin/$dll")) {
+              Copy-Item "$vcpkgBin/$dll" package/
+            }
+          }
+          if (-not (Test-Path "package/datachannel.dll")) { Write-Error "Missing datachannel.dll in package"; exit 1 }
           # Deploy the Qt runtime (Qt6Core/Gui/Widgets/Network + plugins) straight
           # into the package directory. Running windeployqt on the packaged exe and
           # checking the exit code ensures a failure here fails the job instead of
