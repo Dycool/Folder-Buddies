@@ -13,8 +13,6 @@ endif()
 find_package(Threads REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 
-# Headers live in role-based subfolders mirroring src/. Sources include them by
-# bare name (e.g. #include "common.h"), so every subfolder is on the search path.
 set(FB_INCLUDE_DIRS
   include
   include/app
@@ -51,50 +49,22 @@ else()
   list(APPEND FB_COMMON_SOURCES src/fs/fuse_fs.cpp)
 endif()
 
-# Use qt_add_executable (not plain add_executable) so the target is finalized and
-# the Qt plugins the app needs are imported into the binary. This matters for the
-# STATIC Windows build: without the plugins it falls back to a basic style (rough
-# text, checkboxes with no tick marks) and loses image-format handlers used for
-# icons. Dynamic builds get these as separate DLLs via windeployqt, which is why
-# only the static build looked broken.
 qt_add_executable(folderbuddies WIN32 MACOSX_BUNDLE ${FB_COMMON_SOURCES})
 
 target_include_directories(folderbuddies PRIVATE ${FB_INCLUDE_DIRS})
 target_compile_definitions(folderbuddies PRIVATE _FILE_OFFSET_BITS=64)
 target_link_libraries(folderbuddies PRIVATE Qt6::Widgets Qt6::Network Threads::Threads)
 
-# For STATIC Qt only: in a static build the Qt plugins are not separate DLLs
-# loaded at runtime — every plugin the app needs (platform integration, the
-# native Windows style, image-format handlers) must be linked in at build time
-# via Q_IMPORT_PLUGIN. qt_add_executable's automatic import covers the platform
-# plugin (the app starts) but NOT the native style, which is why the static build
-# rendered with the basic Fusion/common style: rough text, checkboxes with no
-# tick marks. Rather than guess the style plugin's target name (it varies across
-# Qt versions and packagings), import every plugin Qt exposes for the Gui and
-# Widgets modules — Qt populates these lists for us. We also print them so the CI
-# configure log shows exactly what was imported instead of failing silently.
-# Guarded to static Qt so the (working) dynamic Windows build is left untouched.
 if(WIN32)
   get_target_property(_fb_qt_core_type Qt6::Core TYPE)
   if(_fb_qt_core_type STREQUAL "STATIC_LIBRARY")
     message(STATUS "Static Qt detected; locating plugin targets to import.")
-    # The Qt6Gui_PLUGINS / Qt6Widgets_PLUGINS lists come up empty with vcpkg's
-    # static qtbase, so enumerate the imported targets directly instead: every
-    # Qt plugin is an imported target whose name ends in "Plugin"
-    # (Qt6::QWindowsIntegrationPlugin, Qt6::QModernWindowsStylePlugin,
-    # Qt6::QICOPlugin, ...). This is version- and packaging-agnostic. We import
-    # all of them so the native style and image-format handlers are linked in,
-    # and print the list so the CI configure log is conclusive.
     get_property(_fb_imported_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
                  PROPERTY IMPORTED_TARGETS)
     set(_fb_plugin_targets "")
     set(_fb_style_plugins "")
     foreach(_t ${_fb_imported_targets})
       if(_t MATCHES "Plugin$")
-        # Skip redundant platform plugins: QWindowsDirect2DIntegrationPlugin
-        # redefines all the same symbols as QWindowsIntegrationPlugin, causing
-        # LNK2005 multiply-defined errors in a static link. Keep the primary
-        # integration plugin (qwindows) but discard the Direct2D variant.
         if(_t MATCHES "Direct2DIntegration")
           continue()
         endif()
@@ -104,10 +74,6 @@ if(WIN32)
         endif()
       endif()
     endforeach()
-    # Hard requirement: if there are no plugin targets at all, the static build
-    # cannot link in the platform/style/image plugins. Crash instead of silently
-    # shipping a broken binary, and dump every imported target so we can see the
-    # real names.
     if(NOT _fb_plugin_targets)
       message(FATAL_ERROR
         "No Qt *Plugin imported targets are defined for the static build, so no "
@@ -116,10 +82,6 @@ if(WIN32)
     endif()
     qt6_import_plugins(folderbuddies INCLUDE ${_fb_plugin_targets})
     message(STATUS "  Imported plugin targets: ${_fb_plugin_targets}")
-    # The whole point of this block: guarantee the native Windows style plugin
-    # (Qt6::QModernWindowsStylePlugin / Qt6::QWindowsVistaStylePlugin) is one of
-    # them. Without it the static build renders with the basic style (rough text,
-    # unchecked checkboxes). Refuse to produce that binary.
     if(NOT _fb_style_plugins)
       message(FATAL_ERROR
         "No native Qt style plugin was found among the imported plugin targets, "
@@ -135,25 +97,16 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   target_compile_options(folderbuddies PRIVATE -Wno-stringop-overflow)
 endif()
 
-# Hardcode your Worker endpoint at build time, e.g.
-#   -DFB_SIGNALING_URL="https://folderbuddies-signaling.<subdomain>.workers.dev"
 set(FB_SIGNALING_URL "" CACHE STRING "Hardcoded Cloudflare Worker base URL")
 if(FB_SIGNALING_URL)
   target_compile_definitions(folderbuddies PRIVATE FB_SIGNALING_URL="${FB_SIGNALING_URL}")
 endif()
 
-# Optional native Firebase Realtime Database fallback. Runtime env
-# FOLDERBUDDIES_FIREBASE_DATABASE_URL overrides this build-time value.
 set(FB_FIREBASE_DATABASE_URL "" CACHE STRING "Hardcoded Firebase Realtime Database URL")
 if(FB_FIREBASE_DATABASE_URL)
   target_compile_definitions(folderbuddies PRIVATE FB_FIREBASE_DATABASE_URL="${FB_FIREBASE_DATABASE_URL}")
 endif()
 
-
-# ---- WebRTC compatibility transport (REQUIRED) -----------------------------
-# Native↔native runs on TCP; native↔browser uses RTCDataChannel via
-# libdatachannel. This is a hard requirement: a build without it silently loses
-# webapp interop, so fail loudly instead.
 find_package(LibDataChannel CONFIG QUIET)
 if(NOT LibDataChannel_FOUND)
   find_package(libdatachannel CONFIG QUIET)
@@ -164,10 +117,6 @@ if(NOT (LibDataChannel_FOUND OR libdatachannel_FOUND))
     "  Windows (vcpkg): vcpkg install libdatachannel:<triplet>\n"
     "  macOS/Linux:     build from source (see .github/workflows/build.yml)")
 endif()
-# The imported target name varies between upstream, vcpkg, and Homebrew
-# packagings (datachannel / datachannel-static / LibDataChannel::LibDataChannel).
-# Pick the first that actually exists so we never define FB_HAVE_LIBDATACHANNEL
-# without an accompanying link (which would fail at the linker).
 set(_fb_dc_target "")
 foreach(_cand
     LibDataChannel::LibDataChannel
@@ -189,20 +138,10 @@ target_compile_definitions(folderbuddies PRIVATE FB_HAVE_LIBDATACHANNEL)
 target_link_libraries(folderbuddies PRIVATE ${_fb_dc_target})
 message(STATUS "WebRTC compatibility: enabled (libdatachannel target ${_fb_dc_target})")
 
-# ---- Mount backend (per platform) -----------------------------------------
 if(WIN32)
-  # Windows now uses Microsoft's native Projected File System (ProjFS), not WinFsp.
-  # ProjectedFSLib.h ships with the Windows SDK. At runtime projfs_loader.cpp loads
-  # ProjectedFSLib.dll dynamically via LoadLibrary+GetProcAddress, so the app can
-  # start without it. fuse_backend.cpp then enables the optional feature with DISM.
   target_compile_definitions(folderbuddies PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-  # gdi32/user32: GetDIBits/LoadImageW etc. used to load the embedded .ico for the
-  # window icon (see src/app/main.cpp).
   target_link_libraries(folderbuddies PRIVATE ws2_32 iphlpapi shell32 advapi32 Rpcrt4 gdi32 user32)
 elseif(APPLE)
-  # FUSE-T/macFUSE installers do not always expose a stable fuse3.pc on macOS.
-  # Prefer pkg-config when present, but fall back to the well-known installer
-  # locations so CI and clean user Macs do not fail at configure time.
   find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)
     pkg_check_modules(FUSE QUIET IMPORTED_TARGET fuse3)
@@ -253,7 +192,6 @@ else()
   target_link_libraries(folderbuddies PRIVATE PkgConfig::FUSE)
 endif()
 
-# ---- Code signing (macOS) ---------------------------------------------------
 if(APPLE)
   set(FB_CODESIGN_IDENTITY "" CACHE STRING "Developer ID Application identity for signing the .app")
   if(FB_CODESIGN_IDENTITY)
@@ -265,17 +203,11 @@ if(APPLE)
   endif()
 endif()
 
-# ---- App icon (all platforms) ---------------------------------------------
-# src/icons/icon.png is the single canonical source image. The generated per-OS files in
-# src/icons are derived from it by src/icons/make-icons.sh.
 set(FB_ICON_PNG "${CMAKE_SOURCE_DIR}/src/icons/icon.png")
 set(FB_ICON_ICNS "${CMAKE_SOURCE_DIR}/src/icons/icon.icns")
 set(FB_ICON_ICO "${CMAKE_SOURCE_DIR}/src/icons/icon.ico")
 
 if(APPLE)
-  # A custom Info.plist carries the TCC folder usage-description strings macOS
-  # needs to prompt for (rather than silently deny) access to the user's
-  # Desktop/Documents/Downloads/external volumes when hosting or mounting.
   set_target_properties(folderbuddies PROPERTIES
     MACOSX_BUNDLE_BUNDLE_NAME "Folder Buddies"
     MACOSX_BUNDLE_GUI_IDENTIFIER "dev.folderbuddies.app"
@@ -288,12 +220,10 @@ if(APPLE)
     set_target_properties(folderbuddies PROPERTIES MACOSX_BUNDLE_ICON_FILE icon.icns)
   endif()
 elseif(WIN32 AND EXISTS "${FB_ICON_ICO}")
-  # Ensure the resource file is properly configured and embedded
   configure_file(${CMAKE_SOURCE_DIR}/src/icons/appicon.rc.in ${CMAKE_BINARY_DIR}/appicon.rc @ONLY)
   target_sources(folderbuddies PRIVATE ${CMAKE_BINARY_DIR}/appicon.rc)
 endif()
 
-# ---- UPnP (optional) ------------------------------------------------------
 find_package(miniupnpc CONFIG QUIET)
 if(miniupnpc_FOUND)
   target_link_libraries(folderbuddies PRIVATE miniupnpc::miniupnpc)
@@ -319,7 +249,6 @@ else()
   endif()
 endif()
 
-# ---- libsodium (Argon2id hardening for the short share code) --------------
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
   pkg_check_modules(SODIUM IMPORTED_TARGET libsodium)
@@ -345,7 +274,6 @@ install(FILES src/icons/icon.png DESTINATION share/icons/hicolor/1024x1024/apps 
 install(FILES src/folderbuddies.desktop DESTINATION share/applications)
 install(FILES src/dev.folderbuddies.app.metainfo.xml DESTINATION share/metainfo)
 
-# ---- Crypto/Base91 self-test (no external deps; runs in CI) ---------------
 option(FB_BUILD_TESTS "Build the crypto self-test" ON)
 if(FB_BUILD_TESTS)
   enable_testing()
@@ -357,7 +285,6 @@ if(FB_BUILD_TESTS)
   endif()
   add_test(NAME crypto_selftest COMMAND fb_crypto_selftest)
 
-  # Round-trips the share-code sealing (offline blob + Cloudflare record).
   add_executable(fb_signaling_selftest src/net/signaling.cpp src/crypto/crypto.cpp src/crypto/base91.cpp src/crypto/token.cpp)
   target_include_directories(fb_signaling_selftest PRIVATE ${FB_INCLUDE_DIRS})
   target_compile_definitions(fb_signaling_selftest PRIVATE FB_SIGNALING_SELFTEST)
