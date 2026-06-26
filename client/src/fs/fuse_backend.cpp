@@ -75,12 +75,21 @@ namespace {
 namespace fs = std::filesystem;
 
 bool backend_present() {
+    // At runtime the app may use a bundled libfuse3.dylib, so do not require a
+    // global libfuse3 install path here. What must exist system-wide is the
+    // FUSE-T/macFUSE support layer that performs the actual macOS mount.
+    const char* markers[] = {
+        "/Library/Frameworks/fuse_t.framework",
+        "/Library/Application Support/fuse-t",
+        "/Library/Filesystems/fuse-t.fs",
+        "/Library/Frameworks/macFUSE.framework",
+        "/Library/Filesystems/macfuse.fs",
+    };
     std::error_code ec;
-    bool libPresent = fs::exists("/usr/local/lib/libfuse3.dylib", ec) ||
-                      fs::exists("/Library/Application Support/fuse-t/lib/libfuse3.4.dylib", ec);
-    bool supportPresent = fs::exists("/Library/Frameworks/fuse_t.framework", ec) ||
-                          fs::exists("/Library/Application Support/fuse-t", ec);
-    return libPresent && supportPresent;
+    for (const char* marker : markers) {
+        if (fs::exists(marker, ec)) return true;
+    }
+    return false;
 }
 
 std::string shell_quote(const std::string& s) {

@@ -105,6 +105,54 @@ if(WIN32)
   # if ProjectedFSLib.dll is not available yet.
   target_compile_definitions(folderbuddies PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(folderbuddies PRIVATE ProjectedFSLib ws2_32 iphlpapi shell32 advapi32 Rpcrt4)
+elseif(APPLE)
+  # FUSE-T/macFUSE installers do not always expose a stable fuse3.pc on macOS.
+  # Prefer pkg-config when present, but fall back to the well-known installer
+  # locations so CI and clean user Macs do not fail at configure time.
+  find_package(PkgConfig QUIET)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(FUSE QUIET IMPORTED_TARGET fuse3)
+  endif()
+
+  if(FUSE_FOUND)
+    target_link_libraries(folderbuddies PRIVATE PkgConfig::FUSE)
+    message(STATUS "macOS FUSE3: using pkg-config module fuse3")
+  else()
+    set(FB_MACOS_FUSE_HINTS
+      "$ENV{HOMEBREW_PREFIX}"
+      /opt/homebrew
+      /usr/local
+      "/Library/Application Support/fuse-t"
+      /Library/Filesystems/fuse-t.fs/Contents/Resources
+      /Library/Filesystems/macfuse.fs/Contents/Resources
+      /Library/Frameworks/fuse_t.framework/Versions/Current
+      /Library/Frameworks/fuse_t.framework/Versions/A
+      /Library/Frameworks/macFUSE.framework/Versions/Current
+      /Library/Frameworks/macFUSE.framework/Versions/A
+    )
+    find_path(FB_FUSE3_INCLUDE_DIR
+      NAMES fuse.h
+      HINTS ${FB_MACOS_FUSE_HINTS}
+      PATH_SUFFIXES include/fuse3 include Headers
+    )
+    find_library(FB_FUSE3_LIBRARY
+      NAMES fuse3 fuse3.4
+      HINTS ${FB_MACOS_FUSE_HINTS}
+      PATH_SUFFIXES lib Resources/lib Resources
+    )
+
+    if(NOT FB_FUSE3_INCLUDE_DIR OR NOT FB_FUSE3_LIBRARY)
+      message(FATAL_ERROR
+        "FUSE3 was not found on macOS. Install FUSE-T, then reconfigure from a clean build directory:\n"
+        "  brew install --cask fuse-t\n"
+        "Looked for fuse.h and libfuse3/libfuse3.4 in Homebrew, FUSE-T, and macFUSE locations.")
+    endif()
+
+    target_include_directories(folderbuddies PRIVATE ${FB_FUSE3_INCLUDE_DIR})
+    target_link_libraries(folderbuddies PRIVATE ${FB_FUSE3_LIBRARY})
+    message(STATUS "macOS FUSE3: include=${FB_FUSE3_INCLUDE_DIR}")
+    message(STATUS "macOS FUSE3: library=${FB_FUSE3_LIBRARY}")
+  endif()
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(FUSE REQUIRED IMPORTED_TARGET fuse3)
