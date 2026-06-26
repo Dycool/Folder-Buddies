@@ -59,6 +59,10 @@ endif()
 # only the static build looked broken.
 qt_add_executable(folderbuddies WIN32 MACOSX_BUNDLE ${FB_COMMON_SOURCES})
 
+target_include_directories(folderbuddies PRIVATE ${FB_INCLUDE_DIRS})
+target_compile_definitions(folderbuddies PRIVATE _FILE_OFFSET_BITS=64)
+target_link_libraries(folderbuddies PRIVATE Qt6::Widgets Qt6::Network Threads::Threads)
+
 # For STATIC Qt only: in a static build the Qt plugins are not separate DLLs
 # loaded at runtime — every plugin the app needs (platform integration, the
 # native Windows style, image-format handlers) must be linked in at build time
@@ -130,10 +134,6 @@ endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   target_compile_options(folderbuddies PRIVATE -Wno-stringop-overflow)
 endif()
-
-target_include_directories(folderbuddies PRIVATE ${FB_INCLUDE_DIRS})
-target_compile_definitions(folderbuddies PRIVATE _FILE_OFFSET_BITS=64)
-target_link_libraries(folderbuddies PRIVATE Qt6::Widgets Qt6::Network Threads::Threads)
 
 # Hardcode your Worker endpoint at build time, e.g.
 #   -DFB_SIGNALING_URL="https://folderbuddies-signaling.<subdomain>.workers.dev"

@@ -4,8 +4,12 @@
 
 #include <QApplication>
 #include <QIcon>
+#include <QStyleFactory>
+#include <QStringList>
+#include <QStyle>
 
 #include <csignal>
+#include <cstring>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -58,6 +62,39 @@ static QIcon appWindowIcon() {
     return QIcon(":/icon.png");
 }
 
+#ifdef _WIN32
+static bool userRequestedQtStyle(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (!argv[i]) continue;
+        if (std::strcmp(argv[i], "-style") == 0 ||
+            std::strcmp(argv[i], "--style") == 0 ||
+            std::strncmp(argv[i], "-style=", 7) == 0 ||
+            std::strncmp(argv[i], "--style=", 8) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void applyBundledWindowsQtStyle() {
+    const QStringList available = QStyleFactory::keys();
+
+    // qmodernwindowsstyle exposes these keys when the Qt Windows style plugin is
+    // available. In a static build, importing/linking the plugin is not enough
+    // to guarantee Qt picks it as the default, so choose it explicitly.
+    for (const char* preferred : {"windows11", "windowsvista", "Windows", "Fusion"}) {
+        const QString wanted = QString::fromLatin1(preferred);
+        for (const QString& key : available) {
+            if (key.compare(wanted, Qt::CaseInsensitive) != 0) continue;
+            if (QStyle* style = QStyleFactory::create(key)) {
+                QApplication::setStyle(style);
+                return;
+            }
+        }
+    }
+}
+#endif
+
 int main(int argc, char** argv) {
 #ifndef _WIN32
     std::signal(SIGPIPE, SIG_IGN);
@@ -66,7 +103,14 @@ int main(int argc, char** argv) {
     // A recognised subcommand runs headless; a plain launch opens the GUI.
     if (fb::is_cli_invocation(argc, argv)) return fb::run_cli(argc, argv);
 
+#ifdef _WIN32
+    const bool explicitQtStyle = userRequestedQtStyle(argc, argv);
+#endif
+
     QApplication app(argc, argv);
+#ifdef _WIN32
+    if (!explicitQtStyle) applyBundledWindowsQtStyle();
+#endif
     QApplication::setApplicationName("Folder Buddies");
     QApplication::setOrganizationName("FolderBuddies");
 
