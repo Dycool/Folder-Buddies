@@ -100,43 +100,44 @@ if(FB_FIREBASE_DATABASE_URL)
 endif()
 
 
-# ---- WebRTC compatibility transport (optional) -----------------------------
-# Keeps native↔native on TCP while allowing native↔browser fallback via
-# RTCDataChannel when libdatachannel is available.
+# ---- WebRTC compatibility transport (REQUIRED) -----------------------------
+# Native↔native runs on TCP; native↔browser uses RTCDataChannel via
+# libdatachannel. This is a hard requirement: a build without it silently loses
+# webapp interop, so fail loudly instead.
 find_package(LibDataChannel CONFIG QUIET)
 if(NOT LibDataChannel_FOUND)
   find_package(libdatachannel CONFIG QUIET)
 endif()
-if(LibDataChannel_FOUND OR libdatachannel_FOUND)
-  # The imported target name varies between upstream, vcpkg, and Homebrew
-  # packagings (datachannel / datachannel-static / LibDataChannel::LibDataChannel).
-  # Pick the first that actually exists so we never define FB_HAVE_LIBDATACHANNEL
-  # without an accompanying link (which would fail at the linker).
-  set(_fb_dc_target "")
-  foreach(_cand
-      LibDataChannel::LibDataChannel
-      LibDataChannel::datachannel
-      LibDataChannel::datachannel-static
-      libdatachannel::libdatachannel
-      libdatachannel::datachannel
-      datachannel
-      datachannel-static)
-    if(TARGET ${_cand})
-      set(_fb_dc_target ${_cand})
-      break()
-    endif()
-  endforeach()
-  if(_fb_dc_target)
-    target_compile_definitions(folderbuddies PRIVATE FB_HAVE_LIBDATACHANNEL)
-    target_link_libraries(folderbuddies PRIVATE ${_fb_dc_target})
-    message(STATUS "WebRTC compatibility: enabled (libdatachannel target ${_fb_dc_target})")
-  else()
-    message(WARNING "libdatachannel package found but no known imported target was exposed; "
-                    "WebRTC (native<->browser) compatibility will be disabled.")
-  endif()
-else()
-  message(STATUS "WebRTC compatibility: disabled (libdatachannel not found)")
+if(NOT (LibDataChannel_FOUND OR libdatachannel_FOUND))
+  message(FATAL_ERROR
+    "libdatachannel is required (native<->browser WebRTC bridge) but was not found.\n"
+    "  Windows (vcpkg): vcpkg install libdatachannel:<triplet>\n"
+    "  macOS/Linux:     build from source (see .github/workflows/build.yml)")
 endif()
+# The imported target name varies between upstream, vcpkg, and Homebrew
+# packagings (datachannel / datachannel-static / LibDataChannel::LibDataChannel).
+# Pick the first that actually exists so we never define FB_HAVE_LIBDATACHANNEL
+# without an accompanying link (which would fail at the linker).
+set(_fb_dc_target "")
+foreach(_cand
+    LibDataChannel::LibDataChannel
+    LibDataChannel::datachannel
+    LibDataChannel::datachannel-static
+    libdatachannel::libdatachannel
+    libdatachannel::datachannel
+    datachannel
+    datachannel-static)
+  if(TARGET ${_cand})
+    set(_fb_dc_target ${_cand})
+    break()
+  endif()
+endforeach()
+if(NOT _fb_dc_target)
+  message(FATAL_ERROR "libdatachannel was found but no known imported target was exposed.")
+endif()
+target_compile_definitions(folderbuddies PRIVATE FB_HAVE_LIBDATACHANNEL)
+target_link_libraries(folderbuddies PRIVATE ${_fb_dc_target})
+message(STATUS "WebRTC compatibility: enabled (libdatachannel target ${_fb_dc_target})")
 
 # ---- Mount backend (per platform) -----------------------------------------
 if(WIN32)
@@ -145,7 +146,9 @@ if(WIN32)
   # ProjectedFSLib.dll dynamically via LoadLibrary+GetProcAddress, so the app can
   # start without it. fuse_backend.cpp then enables the optional feature with DISM.
   target_compile_definitions(folderbuddies PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_link_libraries(folderbuddies PRIVATE ws2_32 iphlpapi shell32 advapi32 Rpcrt4)
+  # gdi32/user32: GetDIBits/LoadImageW etc. used to load the embedded .ico for the
+  # window icon (see src/app/main.cpp).
+  target_link_libraries(folderbuddies PRIVATE ws2_32 iphlpapi shell32 advapi32 Rpcrt4 gdi32 user32)
 elseif(APPLE)
   # FUSE-T/macFUSE installers do not always expose a stable fuse3.pc on macOS.
   # Prefer pkg-config when present, but fall back to the well-known installer
@@ -258,7 +261,11 @@ else()
     endif()
     message(STATUS "UPnP support: enabled")
   else()
-    message(STATUS "UPnP support: disabled (miniupnpc not found)")
+    message(FATAL_ERROR
+      "miniupnpc is required (UPnP port mapping) but was not found.\n"
+      "  Windows (vcpkg): vcpkg install miniupnpc:<triplet>\n"
+      "  macOS:           brew install miniupnpc\n"
+      "  Linux:           apt-get install libminiupnpc-dev")
   endif()
 endif()
 

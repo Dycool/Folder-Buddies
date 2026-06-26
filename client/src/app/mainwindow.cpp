@@ -7,12 +7,10 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
-#include <QDebug>
 #include <QDesktopServices>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
-#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMetaObject>
@@ -63,13 +61,8 @@ static QLabel* hintLabel(const QString& text) {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Folder Buddies");
-    setWindowIcon(QIcon(":/icon.png"));
-
-    // Debug: Ensure window icon is loaded properly
-    QIcon currentIcon = windowIcon();
-    if (currentIcon.isNull()) {
-        qDebug() << "Warning: Window icon not loaded";
-    }
+    // The window inherits the application window icon set in main(), which on
+    // Windows comes from the embedded .ico (reliable in static builds).
 
     auto* tabs = new QTabWidget;
     tabs->setObjectName("modeTabs");
