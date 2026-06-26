@@ -2,6 +2,7 @@
 //   POST   /create                       store an opaque sealed record
 //   GET    /room?code=<lookup>           fetch the sealed record
 //   DELETE /room?code=<lookup>           delete (X-FB-Owner credential)
+//   GET    /file?code=<lookup>&p=<path>  stream one file from the live host
 //
 // The KV key is only the public "lookup" half of the share code; the secret
 // half never reaches Cloudflare, so the stored record is undecryptable here.
@@ -23,6 +24,13 @@ const MAX_SIGNAL_BYTES = 96 * 1024;
 const MAX_TURNSTILE_TOKEN_BYTES = 4096;
 const MAX_CLIENTS_PER_ROOM = 8;
 const MAX_WS_MESSAGES_PER_SOCKET = 250;
+
+const MAX_CONCURRENT_RELAYS = 4;
+const RELAY_WINDOW_CHUNKS = 64;
+const RELAY_MAX_QUEUED_CHUNKS = 256;
+const RELAY_HEAD_TIMEOUT_MS = 15000;
+const RELAY_MAX_PATH_LEN = 1024;
+const MAX_RELAY_FILE_BYTES = 2 * 1024 * 1024 * 1024;
 
 const SECURITY_CONTACT = "https://github.com/Dycool/Folder-Buddies/security/advisories/new";
 const SECURITY_POLICY = "https://github.com/Dycool/Folder-Buddies/blob/main/docs/SECURITY.md";
@@ -244,6 +252,15 @@ async function webSocketRoom(request, env, room) {
   return env.WEB_ROOMS.get(id).fetch(request);
 }
 
+async function fileDownload(request, env) {
+  const url = new URL(request.url);
+  const room = url.searchParams.get("code") || "";
+  if (!validRoom(room)) return json({ error: "bad_lookup" }, 400);
+  if (!(await rateLimit(env, request, "GET", room))) return json({ error: "rate_limited", waitSeconds: 60 }, 429);
+  const id = env.WEB_ROOMS.idFromName(room);
+  return env.WEB_ROOMS.get(id).fetch(request);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -255,6 +272,7 @@ export default {
     if (isAiBot(request)) return json({ error: "ai_bots_not_allowed" }, 403);
     if (!allowedOrigin(request, env)) return json({ error: "bad_origin" }, 403);
     if (request.method === "POST" && url.pathname === "/create") return create(request, env);
+    if (request.method === "GET" && url.pathname === "/file") return fileDownload(request, env);
     if ((request.method === "GET" || request.method === "DELETE") && url.pathname === "/room") {
       const room = url.searchParams.get("code") || "";
       if (!validRoom(room)) return json({ error: "bad_lookup" }, 400);
@@ -275,6 +293,8 @@ export class WebSignalingRoom {
     this.hostMax = 0; // host-configured client cap (0 = use MAX_CLIENTS_PER_ROOM)
     this.clients = new Map();
     this.messageCounts = new WeakMap();
+    this.relays = new Map();
+    this.nextReqId = 1;
   }
 
   async fetch(request) {
@@ -282,6 +302,7 @@ export class WebSignalingRoom {
     const room = url.searchParams.get("code") || "";
     const role = url.searchParams.get("role") || "";
     if (!validRoom(room)) return json({ error: "bad_lookup" }, 400);
+    if (url.pathname === "/file") return this.serveFile(url);
     if (request.headers.get("Upgrade") !== "websocket") return json({ error: "websocket_required" }, 426);
     if (role !== "host" && role !== "client") return json({ error: "bad_role" }, 400);
 
@@ -331,9 +352,130 @@ export class WebSignalingRoom {
   detachHost(ws) {
     if (this.host !== ws) return;
     this.host = null;
+    for (const relay of [...this.relays.values()]) {
+      relay.errored = relay.errored || "host_left";
+      if (relay.headResolve) { const r = relay.headResolve; relay.headResolve = null; r(null); }
+      else this.failRelay(relay);
+    }
+    this.relays.clear();
     for (const client of this.clients.values()) {
       safeSend(client, { kind: "host-left" });
     }
+  }
+
+  async serveFile(url) {
+    const path = url.searchParams.get("p") || "";
+    if (!path || path.length > RELAY_MAX_PATH_LEN) return json({ error: "bad_path" }, 400);
+    const enc = url.searchParams.get("enc") === "1";
+    const iv = url.searchParams.get("iv") || "";
+    if (enc && !/^[0-9a-fA-F]{32}$/.test(iv)) return json({ error: "bad_iv" }, 400);
+    if (!this.host) return json({ error: "host_offline" }, 503);
+    if (this.relays.size >= MAX_CONCURRENT_RELAYS) {
+      return json({ error: "too_busy" }, 429, { "retry-after": "30" });
+    }
+
+    const reqId = this.nextReqId;
+    this.nextReqId = (this.nextReqId + 1) >>> 0 || 1;
+    const relay = {
+      reqId, queue: [], queuedChunks: 0, demand: null, controller: null,
+      done: false, errored: null, cancelled: false, head: null, headResolve: null, headTimer: null,
+    };
+    this.relays.set(reqId, relay);
+
+    safeSend(this.host, { kind: "relay-req", reqId, path, window: RELAY_WINDOW_CHUNKS, maxBytes: MAX_RELAY_FILE_BYTES, enc, iv: enc ? iv : "" });
+
+    const head = await new Promise((resolve) => {
+      relay.headResolve = resolve;
+      relay.headTimer = setTimeout(() => resolve(null), RELAY_HEAD_TIMEOUT_MS);
+    });
+    relay.headResolve = null;
+    clearTimeout(relay.headTimer);
+
+    if (relay.errored) { this.relays.delete(reqId); return json({ error: relay.errored }, 404); }
+    if (!head) {
+      this.relays.delete(reqId);
+      safeSend(this.host, { kind: "relay-cancel", reqId });
+      return json({ error: "host_timeout" }, 504);
+    }
+
+    const self = this;
+    const stream = new ReadableStream({
+      pull(controller) {
+        relay.controller = controller;
+        if (relay.queue.length) {
+          relay.queuedChunks--;
+          controller.enqueue(relay.queue.shift());
+          safeSend(self.host, { kind: "relay-ack", reqId, n: 1 });
+          return;
+        }
+        if (relay.errored) { controller.error(new Error(relay.errored)); self.relays.delete(reqId); return; }
+        if (relay.done) { controller.close(); self.relays.delete(reqId); return; }
+        return new Promise((res) => { relay.demand = res; });
+      },
+      cancel() {
+        relay.cancelled = true;
+        safeSend(self.host, { kind: "relay-cancel", reqId });
+        self.relays.delete(reqId);
+      },
+    });
+
+    const name = head.name || "download";
+    const headers = {
+      ...CORS,
+      "content-type": head.mime || "application/octet-stream",
+      "content-disposition": `attachment; filename="${sanitizeFilename(name)}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    };
+    if (Number.isFinite(head.size) && head.size >= 0) headers["content-length"] = String(head.size);
+    return new Response(stream, { status: 200, headers });
+  }
+
+  onRelayBinary(buf) {
+    if (buf.byteLength < 4) return;
+    const reqId = new DataView(buf).getUint32(0, false);
+    this.onRelayChunk(reqId, new Uint8Array(buf, 4));
+  }
+
+  onRelayChunk(reqId, chunk) {
+    const relay = this.relays.get(reqId);
+    if (!relay || relay.cancelled || relay.errored) return;
+    relay.queue.push(chunk);
+    relay.queuedChunks++;
+    if (relay.queuedChunks > RELAY_MAX_QUEUED_CHUNKS) {
+      relay.errored = "relay_overflow";
+      this.failRelay(relay);
+      return;
+    }
+    if (relay.demand) { const d = relay.demand; relay.demand = null; d(); }
+  }
+
+  onRelayControl(msg) {
+    const relay = this.relays.get(msg.reqId);
+    if (!relay) return;
+    if (msg.kind === "relay-head") {
+      relay.head = { name: String(msg.name || ""), size: Number(msg.size), mime: typeof msg.mime === "string" ? msg.mime : "" };
+      if (relay.headResolve) { const r = relay.headResolve; relay.headResolve = null; r(relay.head); }
+      return;
+    }
+    if (msg.kind === "relay-err") {
+      relay.errored = typeof msg.error === "string" ? msg.error : "relay_failed";
+      if (relay.headResolve) { const r = relay.headResolve; relay.headResolve = null; r(null); return; }
+      this.failRelay(relay);
+      return;
+    }
+    if (msg.kind === "relay-end") {
+      relay.done = true;
+      if (relay.demand) { const d = relay.demand; relay.demand = null; d(); }
+    }
+  }
+
+  failRelay(relay) {
+    if (relay.controller) {
+      try { relay.controller.error(new Error(relay.errored || "relay_failed")); } catch { /* already closed */ }
+    }
+    if (relay.demand) { const d = relay.demand; relay.demand = null; d(); }
+    this.relays.delete(relay.reqId);
   }
 
   detachClient(peerId, ws) {
@@ -354,6 +496,9 @@ export class WebSignalingRoom {
 
   onHostMessage(ws, data) {
     if (this.host !== ws) return;
+    if (data instanceof ArrayBuffer) return this.onRelayBinary(data);
+    const relay = parseRelayControl(data);
+    if (relay) return this.onRelayControl(relay);
     if (!this.bumpMessage(ws)) return;
     const msg = parseSignal(data);
     if (!msg) return ws.close(4400, "bad message");
@@ -382,6 +527,19 @@ function parseSignal(data) {
 
 function safeSend(ws, msg) {
   try { ws.send(JSON.stringify(msg)); } catch { /* peer is gone */ }
+}
+
+function parseRelayControl(data) {
+  if (typeof data !== "string" || data.length > 4096) return null;
+  let msg;
+  try { msg = JSON.parse(data); } catch { return null; }
+  if (!msg || !Number.isInteger(msg.reqId)) return null;
+  if (msg.kind === "relay-head" || msg.kind === "relay-end" || msg.kind === "relay-err") return msg;
+  return null;
+}
+
+function sanitizeFilename(name) {
+  return String(name).replace(/[\r\n"\\\x00-\x1f]/g, "_").slice(0, 255) || "download";
 }
 
 // Host-supplied client cap, floored at the hard room limit. Returns 0 (unlimited
