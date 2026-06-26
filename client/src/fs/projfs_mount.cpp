@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
@@ -38,6 +39,12 @@ std::wstring widen(const std::string& s) {
     std::wstring w(n ? n - 1 : 0, L'\0');
     if (n) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
     return w;
+}
+
+std::string hresult_hex(HRESULT hr) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(hr));
+    return buf;
 }
 
 std::string narrow_raw(PCWSTR s) {
@@ -89,12 +96,16 @@ std::string free_drive_letter() {
 
 std::string dedupe_path(const std::string& base, const std::string& name) {
     namespace fs = std::filesystem;
+    // Always return a path that does not exist yet. We must NOT reuse an existing
+    // empty directory: a leftover ProjFS placeholder root from a previous (or
+    // crashed) session still reports as empty, but re-marking it as a placeholder
+    // fails with something other than ERROR_ALREADY_EXISTS — which is exactly the
+    // "MarkDirectoryAsPlaceholder failed" seen when mounting repeatedly on one machine.
     for (int n = 1; n < 1000; ++n) {
         std::string cand = n == 1 ? name : name + "-" + std::to_string(n);
         std::error_code ec;
         fs::path p = fs::path(base) / cand;
         if (!fs::exists(p, ec)) return p.string();
-        if (fs::is_directory(p, ec) && fs::is_empty(p, ec)) return p.string();
     }
     return (fs::path(base) / name).string();
 }
@@ -562,7 +573,7 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) {
         delete state;
         cache_.reset();
-        err = "fb::projfs::MarkDirectoryAsPlaceholder failed";
+        err = "MarkDirectoryAsPlaceholder failed (" + hresult_hex(hr) + ") for " + backingRoot;
         return false;
     }
     PRJ_NOTIFICATION_MAPPING mapping{};
@@ -575,7 +586,7 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     if (FAILED(hr)) {
         delete state;
         cache_.reset();
-        err = "fb::projfs::StartVirtualizing failed";
+        err = "StartVirtualizing failed (" + hresult_hex(hr) + ") for " + backingRoot;
         return false;
     }
 
@@ -636,7 +647,15 @@ void Mount::stop() {
     if (backend_) {
         auto* state = static_cast<ProjfsState*>(backend_);
         if (state->ctx) fb::projfs::StopVirtualizing(state->ctx);
+        // Remove the backing placeholder root (internal scratch dir under
+        // LOCALAPPDATA, never the user's real folder) so it is not left behind as
+        // a stale placeholder that would break the next mount on this machine.
+        std::filesystem::path backing = state->root;
         delete state;
+        if (!backing.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(backing, ec);
+        }
     }
     backend_ = nullptr;
     driveName_.clear();

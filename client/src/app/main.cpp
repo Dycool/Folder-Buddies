@@ -17,6 +17,14 @@ int main(int argc, char** argv) {
     if (fb::is_cli_invocation(argc, argv)) return fb::run_cli(argc, argv);
 
     QApplication app(argc, argv);
+
+    // Force the compiled-in Qt resources (icon.png) to register. In static
+    // builds the linker (/OPT:REF) can otherwise drop the auto-generated
+    // resource initializer, leaving QIcon(":/icon.png") empty — which is why the
+    // static Windows build showed no taskbar/title-bar icon while the dynamic
+    // build did. Harmless (idempotent) when the resource is already registered.
+    Q_INIT_RESOURCE(resources);
+
     QApplication::setApplicationName("Folder Buddies");
     QApplication::setOrganizationName("FolderBuddies");
     QApplication::setWindowIcon(QIcon(":/icon.png"));

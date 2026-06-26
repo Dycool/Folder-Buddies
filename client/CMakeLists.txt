@@ -51,7 +51,31 @@ else()
   list(APPEND FB_COMMON_SOURCES src/fs/fuse_fs.cpp)
 endif()
 
-add_executable(folderbuddies WIN32 MACOSX_BUNDLE ${FB_COMMON_SOURCES})
+# Use qt_add_executable (not plain add_executable) so the target is finalized and
+# the Qt plugins the app needs are imported into the binary. This matters for the
+# STATIC Windows build: without the plugins it falls back to a basic style (rough
+# text, checkboxes with no tick marks) and loses image-format handlers used for
+# icons. Dynamic builds get these as separate DLLs via windeployqt, which is why
+# only the static build looked broken.
+qt_add_executable(folderbuddies WIN32 MACOSX_BUNDLE ${FB_COMMON_SOURCES})
+
+# Belt-and-suspenders for STATIC Qt only: explicitly import the native Windows
+# style plugin so the static build never falls back to the basic style. The
+# target name differs across Qt versions (QModernWindowsStylePlugin in 6.7+,
+# QWindowsVistaStylePlugin earlier); include whichever exists. The platform and
+# image-format plugins are already covered by qt_add_executable's default import.
+# Guarded to static Qt so the (working) dynamic Windows build is left untouched.
+if(WIN32)
+  get_target_property(_fb_qt_core_type Qt6::Core TYPE)
+  if(_fb_qt_core_type STREQUAL "STATIC_LIBRARY")
+    foreach(_style_plugin Qt6::QModernWindowsStylePlugin Qt6::QWindowsVistaStylePlugin)
+      if(TARGET ${_style_plugin})
+        qt6_import_plugins(folderbuddies INCLUDE ${_style_plugin})
+        break()
+      endif()
+    endforeach()
+  endif()
+endif()
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   target_compile_options(folderbuddies PRIVATE -Wno-stringop-overflow)
