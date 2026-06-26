@@ -75,16 +75,12 @@ namespace fs = std::filesystem;
 
 bool backend_present() {
     const char* markers[] = {
+        // Classic FUSE kext (fuse-t ≤ 1.1, macFUSE)
         "/Library/Filesystems/fuse-t.fs",
-        "/Library/Frameworks/fuse_t.framework",
-        "/Library/Frameworks/fuse-t.framework",
-        "/usr/local/lib/libfuse-t.dylib",
-        "/opt/homebrew/lib/libfuse-t.dylib",
-        // Fallback markers for developer builds when explicitly configured.
         "/Library/Filesystems/macfuse.fs",
-        "/usr/local/lib/libfuse.dylib",     "/usr/local/lib/libfuse.2.dylib",
-        "/usr/local/lib/libosxfuse.dylib",
-        "/opt/homebrew/lib/libfuse.dylib",  "/opt/homebrew/lib/libfuse.2.dylib",
+        // Modern fuse-t (≥ 1.2) — framework + support files
+        "/Library/Frameworks/fuse_t.framework",
+        "/Library/Application Support/fuse-t",
     };
     std::error_code ec;
     for (const char* m : markers)
