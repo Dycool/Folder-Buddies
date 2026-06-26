@@ -184,6 +184,7 @@ if(APPLE AND EXISTS "${FB_ICON_ICNS}")
     MACOSX_BUNDLE_BUNDLE_NAME "Folder Buddies"
     MACOSX_BUNDLE_GUI_IDENTIFIER "dev.folderbuddies.app")
 elseif(WIN32 AND EXISTS "${FB_ICON_ICO}")
+  # Ensure the resource file is properly configured and embedded
   configure_file(${CMAKE_SOURCE_DIR}/src/icons/appicon.rc.in ${CMAKE_BINARY_DIR}/appicon.rc @ONLY)
   target_sources(folderbuddies PRIVATE ${CMAKE_BINARY_DIR}/appicon.rc)
 endif()

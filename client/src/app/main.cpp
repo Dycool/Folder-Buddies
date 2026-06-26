@@ -19,6 +19,12 @@ int main(int argc, char** argv) {
     QApplication::setApplicationName("Folder Buddies");
     QApplication::setOrganizationName("FolderBuddies");
     QApplication::setWindowIcon(QIcon(":/icon.png"));
+    
+    // Debug: Ensure icon is loaded properly
+    QIcon appIcon = QApplication::applicationIcon();
+    if (appIcon.isNull()) {
+        qDebug() << "Warning: Application icon not loaded";
+    }
 
     // On macOS, proactively check if the FUSE backend is installed.
     // If missing, the app will attempt to install it via Homebrew.

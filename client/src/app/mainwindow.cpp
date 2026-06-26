@@ -64,7 +64,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Folder Buddies");
     setWindowIcon(QIcon(":/icon.png"));
 
-    auto* tabs = new QTabWidget;
+    // Debug: Ensure window icon is loaded properly
+    QIcon windowIcon = windowIcon();
+    if (windowIcon.isNull()) {
+        qDebug() << "Warning: Window icon not loaded";
+    }
     tabs->setObjectName("modeTabs");
     tabs->tabBar()->setExpanding(false);
     tabs->addTab(buildShareTab(), "Host");
