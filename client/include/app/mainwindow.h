@@ -9,6 +9,7 @@
 
 #include <QMainWindow>
 #include <memory>
+#include <thread>
 
 class QLineEdit;
 class QPlainTextEdit;
@@ -68,6 +69,11 @@ private:
     std::unique_ptr<fb::WebRtcRemoteClient> webClient_;
     std::unique_ptr<fb::WebRtcCompatHost> webCompatHost_;
     fb::Mount mount_;
+
+    bool busyShare_ = false;
+    bool busyConnect_ = false;
+    std::thread shareWorker_;
+    std::thread connectWorker_;
 
     uint64_t lastOut_ = 0, lastIn_ = 0, lastRead_ = 0, lastWritten_ = 0;
 };

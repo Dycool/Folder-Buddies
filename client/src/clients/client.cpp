@@ -6,32 +6,115 @@
 #include <chrono>
 #include <cstring>
 
+#ifndef _WIN32
+#  include <fcntl.h>
+#  include <sys/select.h>
+#endif
+
 namespace fb {
+
+namespace {
+
+    constexpr int kConnectTimeoutMs = 5000;
+
+bool set_nonblocking(socket_t s, bool nonblocking) {
+#ifdef _WIN32
+    u_long mode = nonblocking ? 1u : 0u;
+    return ::ioctlsocket(s, FIONBIO, &mode) == 0;
+#else
+    int flags = ::fcntl(s, F_GETFL, 0);
+    if (flags < 0) return false;
+    flags = nonblocking ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+    return ::fcntl(s, F_SETFL, flags) == 0;
+#endif
+}
+
+bool connect_in_progress() {
+#ifdef _WIN32
+    int e = ::WSAGetLastError();
+    return e == WSAEWOULDBLOCK || e == WSAEINPROGRESS || e == WSAEALREADY;
+#else
+    return errno == EINPROGRESS;
+#endif
+}
+
+
+bool await_connect(socket_t s, int timeoutMs) {
+    fd_set wset, eset;
+    FD_ZERO(&wset); FD_SET(s, &wset);
+    FD_ZERO(&eset); FD_SET(s, &eset);
+    timeval tv{};
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+#ifdef _WIN32
+    int nfds = 0; // ignored by winsock
+#else
+    int nfds = static_cast<int>(s) + 1;
+#endif
+    int rc = ::select(nfds, nullptr, &wset, &eset, &tv);
+    if (rc <= 0) return false;             // 0 = timeout, <0 = select error
+    if (FD_ISSET(s, &eset)) return false;  // refused / unreachable
+    int soerr = 0;
+    socklen_t len = sizeof(soerr);
+    if (::getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soerr), &len) != 0)
+        return false;
+    return soerr == 0;
+}
+
+} // namespace
 
 static socket_t connect_socket(const std::string& ip, uint16_t port, std::string& err) {
     bool v6 = ip.find(':') != std::string::npos;
     socket_t s = ::socket(v6 ? AF_INET6 : AF_INET, SOCK_STREAM, 0);
     if (s == FB_BAD_SOCKET) { err = "socket() failed"; return FB_BAD_SOCKET; }
 
-    int rc;
+    sockaddr_storage ss{};
+    socklen_t slen;
     if (v6) {
-        sockaddr_in6 a{};
-        a.sin6_family = AF_INET6;
-        a.sin6_port = htons(port);
-        inet_pton(AF_INET6, ip.c_str(), &a.sin6_addr);
-        rc = ::connect(s, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+        auto* a = reinterpret_cast<sockaddr_in6*>(&ss);
+        a->sin6_family = AF_INET6;
+        a->sin6_port = htons(port);
+        if (inet_pton(AF_INET6, ip.c_str(), &a->sin6_addr) != 1) {
+            err = "invalid IPv6 address: " + ip;
+            close_socket(s);
+            return FB_BAD_SOCKET;
+        }
+        slen = sizeof(sockaddr_in6);
     } else {
-        sockaddr_in a{};
-        a.sin_family = AF_INET;
-        a.sin_port = htons(port);
-        inet_pton(AF_INET, ip.c_str(), &a.sin_addr);
-        rc = ::connect(s, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+        auto* a = reinterpret_cast<sockaddr_in*>(&ss);
+        a->sin_family = AF_INET;
+        a->sin_port = htons(port);
+        if (inet_pton(AF_INET, ip.c_str(), &a->sin_addr) != 1) {
+            err = "invalid IPv4 address: " + ip;
+            close_socket(s);
+            return FB_BAD_SOCKET;
+        }
+        slen = sizeof(sockaddr_in);
     }
-    if (rc != 0) {
-        err = "connect() to " + ip + ":" + std::to_string(port) + " failed";
+
+    if (!set_nonblocking(s, true)) {
+        err = "failed to set socket non-blocking";
         close_socket(s);
         return FB_BAD_SOCKET;
     }
+
+    int rc = ::connect(s, reinterpret_cast<sockaddr*>(&ss), slen);
+    if (rc != 0) {
+        if (!connect_in_progress() || !await_connect(s, kConnectTimeoutMs)) {
+            err = "connect() to " + ip + ":" + std::to_string(port) +
+                  " timed out or was refused";
+            close_socket(s);
+            return FB_BAD_SOCKET;
+        }
+    }
+
+    // Restore blocking mode: the rest of the protocol uses blocking recv/send.
+    if (!set_nonblocking(s, false)) {
+        err = "failed to restore blocking mode";
+        close_socket(s);
+        return FB_BAD_SOCKET;
+    }
+
     tune_socket(s);
     return s;
 }

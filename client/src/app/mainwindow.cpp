@@ -29,6 +29,32 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <memory>
+#include <thread>
+#include <utility>
+
+namespace {
+
+// Carried back from the connect worker thread to the GUI thread.
+struct ConnectResult {
+    std::unique_ptr<fb::Client> client;
+    std::unique_ptr<fb::WebRtcRemoteClient> webClient;
+    fb::Token tok;
+    bool ok = false;
+    std::string err;
+    std::string decodeErr;
+};
+
+// Carried back from the host worker thread to the GUI thread.
+struct HostResult {
+    fb::HostedShareTicket ticket;
+    std::unique_ptr<fb::WebRtcCompatHost> webCompatHost;
+    std::string webCompatWarning;
+    bool ok = false;
+    std::string err;
+};
+
+} // namespace
 
 static QString humanRate(double bytesPerSec) {
     const char* u[] = {"B/s", "KB/s", "MB/s", "GB/s"};
@@ -309,6 +335,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 MainWindow::~MainWindow() {
+    // Wait for any in-flight host/connect work so its worker stops touching our
+    // members before we tear them down. The workers only post results back via
+    // a queued invocation (which won't run once the event loop is gone), so
+    // joining here cannot deadlock.
+    if (connectWorker_.joinable()) connectWorker_.join();
+    if (shareWorker_.joinable()) shareWorker_.join();
+
     mount_.setEjectedCallback({});
     mount_.stop();
     if (client_) client_->disconnect();
@@ -445,20 +478,40 @@ void MainWindow::checkProjFS() {
 #endif
 
 void MainWindow::toggleShare() {
+    if (busyShare_) return;
+
     if (server_ && server_->running()) {
-        if (webCompatHost_) webCompatHost_->stop();
-        webCompatHost_.reset();
-        upnp_.unmap();
-        server_->stop();
-        server_.reset();
-        if (activeTicket_.cloudPublished) {
-            std::string derr;
-            fb::remove_published_room(activeTicket_, derr);
-        }
-        activeTicket_ = fb::HostedShareTicket{};
+        busyShare_ = true;
+        shareButton_->setEnabled(false);
+        shareButton_->setText("Stopping…");
+        shareStatus_->setText("Stopping…");
         tokenEdit_->clear();
-        shareStatus_->setText("Not hosting.");
-        setShareRunning(false);
+
+        auto srv = std::move(server_);
+        auto web = std::move(webCompatHost_);
+        auto ticket = std::make_shared<fb::HostedShareTicket>(activeTicket_);
+        activeTicket_ = fb::HostedShareTicket{};
+
+        if (shareWorker_.joinable()) shareWorker_.join();
+        shareWorker_ = std::thread(
+            [this, srv = std::move(srv), web = std::move(web), ticket]() mutable {
+                if (web) web->stop();
+                upnp_.unmap();
+                if (srv) srv->stop();
+                if (ticket->cloudPublished) {
+                    std::string derr;
+                    fb::remove_published_room(*ticket, derr);
+                }
+                // srv/web are destroyed here, off the GUI thread.
+                srv.reset();
+                web.reset();
+                QMetaObject::invokeMethod(this, [this] {
+                    busyShare_ = false;
+                    shareButton_->setEnabled(true);
+                    shareStatus_->setText("Not hosting.");
+                    setShareRunning(false);
+                }, Qt::QueuedConnection);
+            });
         return;
     }
 
@@ -472,35 +525,65 @@ void MainWindow::toggleShare() {
     server_->onClientsChanged = [this] {
         QMetaObject::invokeMethod(this, "onClientsChanged", Qt::QueuedConnection);
     };
-    std::string err;
-    fb::HostedShareTicket ticket;
-    if (!fb::start_hosting(*server_, upnp_, folder.toStdString(), 0,
-                           lanCheck_->isChecked(), writeCheck_->isChecked(), ticket, err)) {
-        QMessageBox::critical(this, "Folder Buddies", QString::fromStdString(err));
-        upnp_.unmap();
-        server_->stop();
-        server_.reset();
-        return;
-    }
 
-    activeTicket_ = ticket;
-    if (ticket.cloudPublished && fb::web_compat_available()) {
-        webCompatHost_ = std::make_unique<fb::WebRtcCompatHost>();
-        webCompatHost_->onClientsChanged = [this] {
-            QMetaObject::invokeMethod(this, "onClientsChanged", Qt::QueuedConnection);
-        };
-        std::string werr;
-        if (!webCompatHost_->start(folder.toStdString(), ticket.roomCode, writeCheck_->isChecked(), werr)) {
-            webCompatHost_.reset();
-            QMessageBox::warning(
-                this, "Browser Compatibility Unavailable",
-                QString("Native sharing is running, but browser clients cannot connect:\n\n") +
-                    QString::fromStdString(werr));
+    busyShare_ = true;
+    shareButton_->setEnabled(false);
+    shareButton_->setText("Starting…");
+    folderEdit_->setEnabled(false);
+    lanCheck_->setEnabled(false);
+    writeCheck_->setEnabled(false);
+    shareStatus_->setText("Starting…");
+
+    const std::string folderStd = folder.toStdString();
+    const bool lanOnly = lanCheck_->isChecked();
+    const bool allowWrites = writeCheck_->isChecked();
+
+    if (shareWorker_.joinable()) shareWorker_.join();
+    shareWorker_ = std::thread([this, folderStd, lanOnly, allowWrites] {
+        auto res = std::make_shared<HostResult>();
+        res->ok = fb::start_hosting(*server_, upnp_, folderStd, 0, lanOnly, allowWrites,
+                                    res->ticket, res->err);
+        if (res->ok && res->ticket.cloudPublished && fb::web_compat_available()) {
+            auto wch = std::make_unique<fb::WebRtcCompatHost>();
+            wch->onClientsChanged = [this] {
+                QMetaObject::invokeMethod(this, "onClientsChanged", Qt::QueuedConnection);
+            };
+            std::string werr;
+            if (wch->start(folderStd, res->ticket.roomCode, allowWrites, werr))
+                res->webCompatHost = std::move(wch);
+            else
+                res->webCompatWarning = werr;
         }
-    }
-    tokenEdit_->setPlainText(QString::fromStdString(ticket.connectCode));
-    refreshShareStatus();
-    setShareRunning(true);
+        if (!res->ok) {
+            // Undo any partial setup (UPnP map / bound socket) off the GUI thread.
+            upnp_.unmap();
+            if (server_) server_->stop();
+        }
+
+        QMetaObject::invokeMethod(this, [this, res] {
+            busyShare_ = false;
+            shareButton_->setEnabled(true);
+            if (!res->ok) {
+                server_.reset();
+                setShareRunning(false);
+                shareStatus_->setText("Not hosting.");
+                QMessageBox::critical(this, "Folder Buddies", QString::fromStdString(res->err));
+                return;
+            }
+            activeTicket_ = res->ticket;
+            if (res->webCompatHost) {
+                webCompatHost_ = std::move(res->webCompatHost);
+            } else if (!res->webCompatWarning.empty()) {
+                QMessageBox::warning(
+                    this, "Browser Compatibility Unavailable",
+                    QString("Native sharing is running, but browser clients cannot connect:\n\n") +
+                        QString::fromStdString(res->webCompatWarning));
+            }
+            tokenEdit_->setPlainText(QString::fromStdString(res->ticket.connectCode));
+            refreshShareStatus();
+            setShareRunning(true);
+        }, Qt::QueuedConnection);
+    });
 }
 
 void MainWindow::refreshShareStatus() {
@@ -536,6 +619,8 @@ void MainWindow::setConnected(bool connected) {
 }
 
 void MainWindow::toggleConnect() {
+    if (busyConnect_) return;
+
     if ((client_ && client_->connected()) || (webClient_ && webClient_->connected())) {
         mount_.stop();
         if (client_) client_->disconnect();
@@ -548,45 +633,102 @@ void MainWindow::toggleConnect() {
     }
 
     const std::string entered = tokenInput_->toPlainText().trimmed().toStdString();
-    fb::Token tok;
-    std::string decodeErr;
-    bool mounted = false;
-    std::string err, mountpoint;
-
-    if (fb::resolve_share_code(entered, tok, decodeErr)) {
-        client_ = std::make_unique<fb::Client>();
-        if (fb::start_mounting(*client_, mount_, tok, mountpoint, err)) {
-            mounted = true;
-        } else {
-            client_->disconnect();
-            client_.reset();
-        }
-    }
-
-    if (!mounted && fb::web_compat_available() && fb::looks_like_web_compat_code(entered)) {
-        webClient_ = std::make_unique<fb::WebRtcRemoteClient>();
-        if (webClient_->connect(entered, err)) {
-            std::string name = "Web share";
-            if (mount_.start(webClient_.get(), "", name, webClient_->canWrite(), err)) {
-                mountpoint = mount_.mountpoint();
-                mounted = true;
-            }
-        }
-        if (!mounted) { webClient_->disconnect(); webClient_.reset(); }
-    }
-
-    if (!mounted) {
-        QMessageBox::critical(this, "Folder Buddies", QString::fromStdString(err.empty() ? decodeErr : err));
+    if (entered.empty()) {
+        QMessageBox::warning(this, "Folder Buddies", "Paste a connect code first.");
         return;
     }
 
-    QString displayedMount = QString::fromStdString(mountpoint);
-    if (displayedMount.size() > 1 &&
-        (displayedMount.endsWith('/') || displayedMount.endsWith('\\'))) {
-        displayedMount.chop(1);
-    }
-    connectStatus_->setText(QString("Connected - Mounted in %1").arg(displayedMount));
-    setConnected(true);
+    busyConnect_ = true;
+    connectButton_->setEnabled(false);
+    connectButton_->setText("Connecting…");
+    tokenInput_->setEnabled(false);
+    connectStatus_->setText("Connecting…");
+
+    const bool tryWeb = fb::web_compat_available();
+    if (connectWorker_.joinable()) connectWorker_.join();
+    connectWorker_ = std::thread([this, entered, tryWeb] {
+        auto res = std::make_shared<ConnectResult>();
+        fb::Token tok;
+        std::string decodeErr;
+        if (fb::resolve_share_code(entered, tok, decodeErr)) {
+            auto client = std::make_unique<fb::Client>();
+            std::string err;
+            if (client->connect(tok, fb::kDefaultConns, err)) {
+                res->client = std::move(client);
+                res->tok = tok;
+                res->ok = true;
+            } else {
+                res->err = err; // client cleaned itself up on failure
+            }
+        } else {
+            res->decodeErr = decodeErr;
+        }
+
+        if (!res->ok && tryWeb && fb::looks_like_web_compat_code(entered)) {
+            auto webClient = std::make_unique<fb::WebRtcRemoteClient>();
+            std::string err;
+            if (webClient->connect(entered, err)) {
+                res->webClient = std::move(webClient);
+                res->ok = true;
+                res->err.clear();
+            } else {
+                webClient->disconnect();
+                if (res->err.empty()) res->err = err;
+            }
+        }
+
+        QMetaObject::invokeMethod(this, [this, res] {
+            busyConnect_ = false;
+            connectButton_->setEnabled(true);
+
+            if (!res->ok) {
+                setConnected(false);
+                connectStatus_->setText("Not connected.");
+                QMessageBox::critical(
+                    this, "Folder Buddies",
+                    QString::fromStdString(res->err.empty() ? res->decodeErr : res->err));
+                return;
+            }
+
+            std::string err, mountpoint;
+            bool mounted = false;
+            if (res->client) {
+                client_ = std::move(res->client);
+                if (mount_.start(client_.get(), "", res->tok.folder, res->tok.allowWrites, err)) {
+                    mountpoint = mount_.mountpoint();
+                    mounted = true;
+                } else {
+                    client_->disconnect();
+                    client_.reset();
+                }
+            } else if (res->webClient) {
+                webClient_ = std::move(res->webClient);
+                std::string name = "Web share";
+                if (mount_.start(webClient_.get(), "", name, webClient_->canWrite(), err)) {
+                    mountpoint = mount_.mountpoint();
+                    mounted = true;
+                } else {
+                    webClient_->disconnect();
+                    webClient_.reset();
+                }
+            }
+
+            if (!mounted) {
+                setConnected(false);
+                connectStatus_->setText("Not connected.");
+                QMessageBox::critical(this, "Folder Buddies", QString::fromStdString(err));
+                return;
+            }
+
+            QString displayedMount = QString::fromStdString(mountpoint);
+            if (displayedMount.size() > 1 &&
+                (displayedMount.endsWith('/') || displayedMount.endsWith('\\'))) {
+                displayedMount.chop(1);
+            }
+            connectStatus_->setText(QString("Connected - Mounted in %1").arg(displayedMount));
+            setConnected(true);
+        }, Qt::QueuedConnection);
+    });
 }
 
 void MainWindow::onMountEjected() {
