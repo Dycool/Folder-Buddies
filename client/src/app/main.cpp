@@ -15,6 +15,7 @@
 #include <cstdio>
 
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 
 #ifdef _WIN32
@@ -120,6 +121,24 @@ static bool wantsQtStyleDiagnostics(int argc, char** argv) {
     return false;
 }
 
+static bool wantsVerboseQtStyleDebug(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (!argv[i]) continue;
+        if (std::strcmp(argv[i], "--debug-qt-style") == 0 ||
+            std::strcmp(argv[i], "--verbose-qt-style") == 0) {
+            return true;
+        }
+    }
+
+    const char* env = std::getenv("FB_QT_STYLE_DEBUG");
+    if (!env || !*env) return false;
+
+    return std::strcmp(env, "0") != 0 &&
+           _stricmp(env, "false") != 0 &&
+           _stricmp(env, "off") != 0 &&
+           _stricmp(env, "no") != 0;
+}
+
 static QString qtStyleDiagnosticsText() {
     QString text;
     auto add = [&](const QString& line) { text += line + QLatin1Char('\n'); };
@@ -166,7 +185,8 @@ static int failMissingWindows11Style(const QString& reason) {
 
 static int diagnoseRequiredWindows11Style() {
     const QString key = findWindows11StyleKey();
-    winDiagLog(qtStyleDiagnosticsText());
+    winDiagLog(QStringLiteral("=== Qt style diagnostic before applying windows11 ===\n") +
+               qtStyleDiagnosticsText());
 
     if (key.isEmpty()) {
         winDiagLog("FATAL: required Qt style 'windows11' is missing from QStyleFactory::keys().");
@@ -181,6 +201,8 @@ static int diagnoseRequiredWindows11Style() {
 
     QApplication::setStyle(style);
     winDiagLog(QString("OK: required Qt style '%1' was created and applied.").arg(key));
+    winDiagLog(QStringLiteral("=== Qt style diagnostic after applying windows11 ===\n") +
+               qtStyleDiagnosticsText());
     return 0;
 }
 
@@ -208,11 +230,16 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     const bool explicitQtStyle = userRequestedQtStyle(argc, argv);
     const bool qtStyleDiagnostics = wantsQtStyleDiagnostics(argc, argv);
+    const bool verboseQtStyleDebug = wantsVerboseQtStyleDebug(argc, argv);
 #endif
 
     QApplication app(argc, argv);
 #ifdef _WIN32
     if (qtStyleDiagnostics) return diagnoseRequiredWindows11Style();
+    if (verboseQtStyleDebug) {
+        winDiagLog(QStringLiteral("=== Qt style debug before policy/style selection ===\n") +
+                   qtStyleDiagnosticsText());
+    }
 #  ifdef FB_STATIC_QT_REQUIRE_WINDOWS11_STYLE
     if (explicitQtStyle) {
         return failMissingWindows11Style(
@@ -225,8 +252,27 @@ int main(int argc, char** argv) {
             "but the style was not available/creatable at runtime.");
     }
 #  else
-    if (!explicitQtStyle) applyRequiredWindows11Style();
+    // Dynamic/shared Windows builds use the same Windows 11 style selection and
+    // diagnostics machinery as the static build, but they do not hard-fail.
+    // This lets CI or a local run compare the dynamic/static style state with:
+    //   folderbuddies.exe --debug-qt-style
+    // or:
+    //   $env:FB_QT_STYLE_DEBUG=1; ./folderbuddies.exe
+    if (!explicitQtStyle) {
+        if (!applyRequiredWindows11Style() && verboseQtStyleDebug) {
+            winDiagLog(QStringLiteral(
+                "WARNING: dynamic Windows build could not create Qt style 'windows11'. "
+                "Continuing with Qt's default style."));
+        }
+    } else if (verboseQtStyleDebug) {
+        winDiagLog(QStringLiteral(
+            "Qt style auto-selection skipped because the user supplied -style/--style."));
+    }
 #  endif
+    if (verboseQtStyleDebug) {
+        winDiagLog(QStringLiteral("=== Qt style debug after policy/style selection ===\n") +
+                   qtStyleDiagnosticsText());
+    }
 #endif
     QApplication::setApplicationName("Folder Buddies");
     QApplication::setOrganizationName("FolderBuddies");
