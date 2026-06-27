@@ -81,23 +81,40 @@ if(WIN32)
       endif()
     endforeach()
     list(REMOVE_DUPLICATES _fb_plugin_targets)
-    if(NOT TARGET Qt6::QModernWindowsStylePlugin)
-      message(FATAL_ERROR
-        "The static Windows build requires Qt6::QModernWindowsStylePlugin so it "
-        "can use the same windows11 style as the dynamic build.")
-    endif()
     if(NOT _fb_plugin_targets)
       message(FATAL_ERROR
         "No Qt *Plugin imported targets are defined for the static build, so no "
         "plugins (platform and image formats) can be linked in.\n"
         "All imported targets were:\n  ${_fb_imported_targets}")
     endif()
+
+    if(NOT TARGET Qt6::QModernWindowsStylePlugin)
+      message(FATAL_ERROR
+        "FATAL: static Windows build requires Qt6::QModernWindowsStylePlugin.\n"
+        "This is non-negotiable: Folder Buddies static Windows must use the Qt 'windows11' style.\n"
+        "If this target is missing, vcpkg/Qt did not expose the Windows 11 style plugin.\n"
+        "Triplet: ${VCPKG_TARGET_TRIPLET}\n"
+        "Qt6_DIR: ${Qt6_DIR}\n"
+        "Qt6Core_DIR: ${Qt6Core_DIR}\n"
+        "Qt6Widgets_DIR: ${Qt6Widgets_DIR}\n"
+        "Imported targets visible to client/CMakeLists.txt:\n  ${_fb_imported_targets}")
+    endif()
+
+    get_target_property(_fb_modern_style_type Qt6::QModernWindowsStylePlugin TYPE)
+    get_target_property(_fb_modern_style_location Qt6::QModernWindowsStylePlugin IMPORTED_LOCATION_RELEASE)
+    if(NOT _fb_modern_style_location)
+      get_target_property(_fb_modern_style_location Qt6::QModernWindowsStylePlugin IMPORTED_LOCATION)
+    endif()
+
     qt6_import_plugins(folderbuddies
       INCLUDE ${_fb_plugin_targets}
       INCLUDE_BY_TYPE styles Qt6::QModernWindowsStylePlugin)
-    target_compile_definitions(folderbuddies PRIVATE FB_STATIC_QT_WINDOWS11_STYLE)
+    target_compile_definitions(folderbuddies PRIVATE FB_STATIC_QT_REQUIRE_WINDOWS11_STYLE)
     message(STATUS "  Imported plugin targets: ${_fb_plugin_targets}")
-    message(STATUS "  Static Qt style: windows11 (Qt6::QModernWindowsStylePlugin)")
+    message(STATUS "  Required static Qt style plugin: Qt6::QModernWindowsStylePlugin")
+    message(STATUS "  Qt6::QModernWindowsStylePlugin TYPE: ${_fb_modern_style_type}")
+    message(STATUS "  Qt6::QModernWindowsStylePlugin LOCATION: ${_fb_modern_style_location}")
+    message(STATUS "  Runtime policy: application aborts unless QStyleFactory exposes 'windows11'")
   endif()
 endif()
 
