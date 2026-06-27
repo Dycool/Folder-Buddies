@@ -38,9 +38,6 @@ static socket_t connect_socket(const std::string& ip, uint16_t port, std::string
 
 bool Client::handshake(Conn& c, const Token& tok, std::string& err) {
     std::vector<uint8_t> nonceC = random_bytes(16);
-    // Send only a hash of the folder name, never the literal: the HELLO is the
-    // one pre-encryption frame, so a passive observer must not learn the share's
-    // display name from it. The server checks the same SHA-256 over its own name.
     QByteArray folderHash =
         QCryptographicHash::hash(QByteArray::fromStdString(tok.folder), QCryptographicHash::Sha256);
     Writer w;
@@ -166,10 +163,6 @@ int Client::request(uint16_t op, const std::vector<uint8_t>& payload, std::vecto
     auto p = std::make_shared<Pending>();
     {
         std::lock_guard<std::mutex> lk(c->pmtx);
-        // readerLoop sets alive=false before failing every pending request under
-        // pmtx. Re-checking alive inside this same lock closes the race where the
-        // reader already drained pending: a registration arriving afterwards would
-        // otherwise never be woken and wait() would block forever.
         if (!c->alive.load()) return EIO;
         c->pend[id] = p;
     }
@@ -186,8 +179,6 @@ int Client::request(uint16_t op, const std::vector<uint8_t>& payload, std::vecto
         return EIO;
     }
 
-    // Bounded wait: a peer that accepts the request but never answers must not
-    // wedge the caller (and, through it, the FUSE/ProjFS thread) forever.
     bool done;
     {
         std::unique_lock<std::mutex> lk(p->m);

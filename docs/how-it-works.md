@@ -138,7 +138,7 @@ All data sockets use `TCP_NODELAY` (no Nagle) and 4 MiB send/receive buffers for
 
 ### Linux — kernel FUSE
 
-Uses **libfuse3** (`FUSE_USE_VERSION 31`) with the high-level API. Multi-threaded with `fuse_loop_mt`. Kernel writeback cache and parallel directory operations are enabled when supported. Mounts prefer the normal desktop volume locations (`/media/$USER`, `/run/media/$USER`) and fall back to `$HOME/FolderBuddies`. If the user unmounts/ejects the volume, the FUSE loop exits and Folder Buddies disconnects.
+Uses **libfuse3** (`FUSE_USE_VERSION 31`) with the high-level API. Multi-threaded with `fuse_loop_mt`. Kernel writeback caching is deliberately disabled so writes only complete after the host acknowledges them; parallel directory operations are enabled when supported. Mounts prefer the normal desktop volume locations (`/media/$USER`, `/run/media/$USER`) and fall back to `$HOME/FolderBuddies`. If the user unmounts/ejects the volume, the FUSE loop exits and Folder Buddies disconnects.
 
 ### Windows — ProjFS
 

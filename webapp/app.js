@@ -4,11 +4,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
   "use strict";
 
   const BASE91 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+,-./:;<=>?@[]^_`{|}~";
-  // Connect codes come in two tiers, told apart purely by total length:
-  //   read-only (default): 4-char lookup + 2-char secret half  ( 6 total)
-  //   read-write:          8-char lookup + 8-char secret half  (16 total)
-  // The host issues the long tier exactly when it grants write access. The lookup
-  // is the public Durable Object room name; the secret half never reaches Cloudflare.
   const SHORT_LOOKUP_LEN = 4, SHORT_CODE_LEN = 6;
   const LONG_LOOKUP_LEN = 8, LONG_CODE_LEN = 16;
   const ARGON = { t: 3, m: 65536, p: 1, dkLen: 32 }; // matches libsodium in the native app
@@ -103,17 +98,30 @@ import { argon2id } from "./vendor/noble/argon2.js";
     turnstileWidgetId: null,
     turnstileResolver: null,
     toastTimer: 0,
-    bytesServed: 0,
-    bytesReceived: 0,
-    lastServed: 0,
-    lastReceived: 0,
+    hostBytesOut: 0,
+    hostBytesIn: 0,
+    clientBytesOut: 0,
+    clientBytesIn: 0,
+    lastHostOut: 0,
+    lastHostIn: 0,
+    lastClientOut: 0,
+    lastClientIn: 0,
   };
 
-  // ---- RAM-only client cache ------------------------------------------------
-  // Makes folder browsing and small previews feel instant without ever touching
-  // persistent browser storage. Everything here is plain JS memory: it vanishes
-  // on reload, tab close, or disconnect. No IndexedDB / CacheStorage / OPFS /
-  // localStorage / service-worker caching of remote file contents — ever.
+  function resetHostTrafficCounters() {
+    state.hostBytesOut = 0;
+    state.hostBytesIn = 0;
+    state.lastHostOut = 0;
+    state.lastHostIn = 0;
+  }
+
+  function resetClientTrafficCounters() {
+    state.clientBytesOut = 0;
+    state.clientBytesIn = 0;
+    state.lastClientOut = 0;
+    state.lastClientIn = 0;
+  }
+
   const CACHE = (() => {
     const DIR_TTL = 5000, META_TTL = 2000, NEG_TTL = 1000;
     const DIR_MAX = 256, META_MAX = 4096, NEG_MAX = 1024;
@@ -271,10 +279,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     state.toastTimer = setTimeout(() => els.toast.classList.remove("show"), 2400);
   }
 
-  // The File System Access pickers (showDirectoryPicker / showSaveFilePicker)
-  // reject with an AbortError when the user simply dismisses the dialog. That is
-  // a normal cancellation, not a failure, so callers swallow it instead of
-  // surfacing a confusing "The user aborted a request." toast.
   function isAbortError(e) {
     return e && e.name === "AbortError";
   }
@@ -401,9 +405,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const raw = room?.host?.createdAt ?? room?.createdAt;
     if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return 0;
 
-    // Backward compat:
-    // seconds timestamps are around 1,700,000,000
-    // ms timestamps are around 1,700,000,000,000
     return raw < 20_000_000_000 ? raw * 1000 : raw;
   }
 
@@ -454,9 +455,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   }
 
-  // Derive an HKDF base key from the secret half of the code via Argon2id. The
-  // salt is fixed per public half so host and client agree without exchanging it.
-  // The secret half never reaches Cloudflare, so the relayed signaling stays blind.
   async function deriveRootBase(code, secureSecret = "") {
     const secret = secureSecret || keyPartOf(code);
     const saltSeed = await sha256Bytes(te.encode("FolderBuddies-web-salt-v1\0" + lookupOf(code)));
@@ -513,7 +511,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (v >= 0) out.push((b | (v << n)) & 255);
     return new Uint8Array(out);
   }
-
 
   function encodeWebOffline(prefix, obj) {
     return prefix + base91Encode(te.encode(JSON.stringify(obj)));
@@ -679,8 +676,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
           }
         },
         "before-interactive-callback": () => {
-          // Safari (ITP/Private Relay) often forces an interactive challenge.
-          // Bring the otherwise-hidden widget on-screen so it can be solved.
           els.turnstileMount.classList.add("is-interactive");
         },
         "after-interactive-callback": () => {
@@ -1028,7 +1023,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
   }
 
-
   function base64UrlEncodeBytes(bytes) {
     let bin = "";
     for (const b of bytes) bin += String.fromCharCode(b);
@@ -1288,7 +1282,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (!d) return;
     const chunk = new Uint8Array(buf, 8);
     d.received += chunk.byteLength;
-    state.bytesReceived += chunk.byteLength;
+    state.clientBytesIn += chunk.byteLength;
     d.progress.value = d.received;
     d.label.textContent = `${d.name} — ${formatSize(d.received)} / ${formatSize(d.size || d.received)}`;
     if (d.writer) {
@@ -1411,6 +1405,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (!upload) return;
     const chunk = new Uint8Array(buf, 8);
     upload.received += chunk.byteLength;
+    state.hostBytesIn += chunk.byteLength;
     upload.writeQueue = upload.writeQueue.then(() => upload.writer.write(chunk));
     upload.writeQueue.catch((e) => {
       state.uploads.delete(id);
@@ -1425,7 +1420,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
         const { value, done } = await reader.read();
         if (done) break;
         for (let off = 0; off < value.byteLength; off += CHUNK_SIZE) {
-          await sendBinaryChunk(dc, id, value.slice(off, Math.min(off + CHUNK_SIZE, value.byteLength)));
+          await sendBinaryChunk(dc, id, value.slice(off, Math.min(off + CHUNK_SIZE, value.byteLength)), "hostOut");
         }
       }
     } finally {
@@ -1433,7 +1428,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     }
   }
 
-  async function sendBinaryChunk(dc, id, chunk) {
+  async function sendBinaryChunk(dc, id, chunk, counter = "clientOut") {
     while (dc.bufferedAmount > 8 * 1024 * 1024) {
       await new Promise((resolve) => {
         dc.bufferedAmountLowThreshold = 2 * 1024 * 1024;
@@ -1447,7 +1442,8 @@ import { argon2id } from "./vendor/noble/argon2.js";
     view.setUint32(4, id >>> 0, false);
     out.set(chunk, 8);
     dc.send(out);
-    state.bytesServed += chunk.byteLength;
+    if (counter === "hostOut") state.hostBytesOut += chunk.byteLength;
+    else state.clientBytesOut += chunk.byteLength;
   }
 
   function normalizePath(path) {
@@ -1549,7 +1545,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     await sendEncryptedSignal(state.hostWs, peerId, { type: "offer", sdp: pc.localDescription });
   }
 
-
   async function createManualHostOffer() {
     const peerId = "manual";
     const pc = makePeer("Offline web client");
@@ -1589,9 +1584,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
       return;
     }
     if (msg.kind === "client-joined") {
-      // Native compatibility clients announce themselves with a plain compat-hello
-      // first. Wait briefly so we can answer with plain SDP; browser clients get
-      // the normal encrypted signaling path after the grace period.
       setTimeout(() => {
         if (!state.hostPeers.has(msg.peerId)) {
           createHostPeer(msg.peerId, state.plainSignalPeers.has(msg.peerId)).then(renderShareStatus).catch((e) => toast(e.message));
@@ -1714,6 +1706,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (!supportsHosting()) throw new Error("Hosting is not supported in this browser");
     if (isMobile()) throw new Error("Hosting is not available on mobile browsers");
     if (!state.rootHandle && !(await pickFolder())) return; // user cancelled the folder chooser
+    resetHostTrafficCounters();
     setShareStatus("Starting…");
     els.shareToggle.disabled = true;
     state.allowWrites = wantsWriteAccess();
@@ -1770,6 +1763,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     state.secureSecret = "";
     state.connectToken = "";
     state.rootBase = null;
+    resetHostTrafficCounters();
     setShareRunning(false);
     setShareStatus("Not hosting.");
     toast("Stopped hosting");
@@ -1834,6 +1828,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   async function connect() {
+    resetClientTrafficCounters();
     const rawInput = clean(els.connectInput.value);
     const pendingToken = clean(state.pendingConnectToken);
     const raw = rawInput || pendingToken;
@@ -1874,6 +1869,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
   }
 
   async function connectManualOffer(text) {
+    resetClientTrafficCounters();
     const offer = decodeWebOffline(WEB_OFFLINE_OFFER_PREFIX, text);
     if (offer.v !== 1 || offer.type !== "web-offline-offer" || !looksLikeRoom(offer.code)) throw new Error("Invalid offline web offer");
     state.lastSignalCloseReason = "";
@@ -1928,6 +1924,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
     if (els.previewPanel) els.previewPanel.hidden = true;
     if (els.offlineAnswerOutRow) els.offlineAnswerOutRow.hidden = true;
     if (els.offlineAnswerOut) els.offlineAnswerOut.value = "";
+    resetClientTrafficCounters();
     setConnectStatus("Not connected.");
   }
 
@@ -1939,8 +1936,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
   async function listRemote(path) {
     if (!state.dataChannel || state.dataChannel.readyState !== "open") throw new Error("Not connected");
     const p = normalizePath(path);
-    // Serve a fresh cached listing instantly; otherwise fetch (de-duping
-    // simultaneous identical requests) and cache the result.
     let res = CACHE.dirGet(p);
     if (!res) {
       res = await CACHE.dedup(`list:${p}`, () => requestJson(state.dataChannel, { t: "list", path: p }));
@@ -2147,8 +2142,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
       toast("Text file is too large for the built-in editor; downloading instead");
       return downloadRemote(entry);
     }
-    // Reuse a small cached preview blob (keyed by path+size+mtime) if present;
-    // otherwise fetch once (de-duping concurrent opens) and cache when it fits.
     let blob = CACHE.previewGet(entry);
     if (!blob) {
       blob = await CACHE.dedup(`preview:${entry.path} ${entry.size ?? 0} ${entry.mtime ?? 0}`,
@@ -2307,7 +2300,7 @@ import { argon2id } from "./vendor/noble/argon2.js";
         if (done) break;
         for (let off = 0; off < value.byteLength; off += CHUNK_SIZE) {
           const chunk = value.slice(off, Math.min(off + CHUNK_SIZE, value.byteLength));
-          await sendBinaryChunk(state.dataChannel, id, chunk);
+          await sendBinaryChunk(state.dataChannel, id, chunk, "clientOut");
           sent += chunk.byteLength;
           progress.value = sent;
           label.textContent = `${name} — ${formatSize(sent)} / ${formatSize(file.size || sent)}`;
@@ -2320,8 +2313,6 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const done = expectResponse(id, Math.max(30000, Math.ceil((file.size || 0) / 1024)));
     safeSendJson(state.dataChannel, { t: "uploadEnd", id });
     await done;
-    // Host confirmed: only now drop the stale parent listing, metadata, and any
-    // cached preview for the overwritten/created path.
     CACHE.afterWrite(path);
     label.textContent = `${name} — uploaded`;
     progress.value = progress.max;
@@ -2374,12 +2365,18 @@ import { argon2id } from "./vendor/noble/argon2.js";
     const scale = 1000 / STATS_INTERVAL_MS;
     const parts = [];
     if (state.hostWs) {
-      parts.push(`Serve ↑${humanRate((state.bytesServed - state.lastServed) * scale)}`);
-      state.lastServed = state.bytesServed;
+      const out = (state.hostBytesOut - state.lastHostOut) * scale;
+      const input = (state.hostBytesIn - state.lastHostIn) * scale;
+      parts.push(`Serve ↑${humanRate(out)} ↓${humanRate(input)}`);
+      state.lastHostOut = state.hostBytesOut;
+      state.lastHostIn = state.hostBytesIn;
     }
     if (state.dataChannel) {
-      parts.push(`Mount ↓${humanRate((state.bytesReceived - state.lastReceived) * scale)}`);
-      state.lastReceived = state.bytesReceived;
+      const input = (state.clientBytesIn - state.lastClientIn) * scale;
+      const out = (state.clientBytesOut - state.lastClientOut) * scale;
+      parts.push(`Mount ↓${humanRate(input)} ↑${humanRate(out)}`);
+      state.lastClientIn = state.clientBytesIn;
+      state.lastClientOut = state.clientBytesOut;
     }
     els.statsLabel.textContent = parts.length ? parts.join("   |   ") : "Idle";
   }

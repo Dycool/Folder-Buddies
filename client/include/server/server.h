@@ -1,5 +1,3 @@
-// Folder Buddies — file server. Serves one folder over a pool of TCP
-// connections. Thread-per-connection; positioned I/O; path-confined to root.
 #pragma once
 
 #include "common.h"

@@ -95,11 +95,6 @@ std::string sanitize(const std::string& name) {
 
 std::string dedupe_path(const std::string& base, const std::string& name) {
     namespace fs = std::filesystem;
-    // Always return a path that does not exist yet. We must NOT reuse an existing
-    // empty directory: a leftover ProjFS placeholder root from a previous (or
-    // crashed) session still reports as empty, but re-marking it as a placeholder
-    // fails with something other than ERROR_ALREADY_EXISTS — which is exactly the
-    // "MarkDirectoryAsPlaceholder failed" seen when mounting repeatedly on one machine.
     for (int n = 1; n < 1000; ++n) {
         std::string cand = n == 1 ? name : name + "-" + std::to_string(n);
         std::error_code ec;
@@ -137,7 +132,6 @@ bool drive_mapping_exists(const std::wstring& driveName) {
 std::string windows_error(const char* what) {
     return std::string(what) + " (Windows error " + std::to_string(::GetLastError()) + ")";
 }
-
 
 std::wstring drive_icon_key(wchar_t letter) {
     return std::wstring(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\DriveIcons\\") + letter;
@@ -508,52 +502,49 @@ HRESULT CALLBACK placeholder_cb(const PRJ_CALLBACK_DATA* data) {
 
 HRESULT CALLBACK file_data_cb(const PRJ_CALLBACK_DATA* data, UINT64 byteOffset, UINT32 length) {
     auto* st = static_cast<ProjfsState*>(data->InstanceContext);
+
+    Writer ow;
+    ow.str(narrow(data->FilePathName));
+    int32_t flags = 0; // read-only
+    uint32_t mode = 0;
+    ow.pod(flags);
+    ow.pod(mode);
+    std::vector<uint8_t> openResp;
+    int rc = st->client->request(OP_OPEN, ow.b, openResp);
+    if (rc) return status_to_hresult(rc);
+    Reader ordr(openResp.data(), openResp.size());
+    uint64_t fh = 0;
+    if (!ordr.pod(fh)) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+
     uint64_t offset = byteOffset;
     uint32_t remaining = length;
+    HRESULT result = S_OK;
     while (remaining > 0) {
         uint32_t chunk = std::min<uint32_t>(remaining, kMaxIO);
-        Writer w;
-        uint64_t pseudoFh = 0;
-        w.pod(pseudoFh); // server OP_READ expects a file handle, so open first below
-        (void)w;
-
-        // Open/read/release keeps ProjFS stateless and avoids leaking handles.
-        Writer ow;
-        ow.str(narrow(data->FilePathName));
-        int32_t flags = 0; // read-only
-        uint32_t mode = 0;
-        ow.pod(flags);
-        ow.pod(mode);
-        std::vector<uint8_t> openResp;
-        int rc = st->client->request(OP_OPEN, ow.b, openResp);
-        if (rc) return status_to_hresult(rc);
-        Reader ordr(openResp.data(), openResp.size());
-        uint64_t fh = 0;
-        if (!ordr.pod(fh)) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-
         Writer rw;
         rw.pod(fh);
         rw.pod(offset);
         rw.pod(chunk);
         std::vector<uint8_t> readResp;
         rc = st->client->request(OP_READ, rw.b, readResp);
-
-        Writer rel;
-        rel.pod(fh);
-        std::vector<uint8_t> ignored;
-        st->client->request(OP_RELEASE, rel.b, ignored);
-
-        if (rc) return status_to_hresult(rc);
-        if (readResp.empty()) break;
-        HRESULT hr = fb::projfs::WriteFileData(st->ctx, &data->DataStreamId, readResp.data(), offset,
-                                      static_cast<UINT32>(readResp.size()));
-        if (FAILED(hr)) return hr;
+        if (rc) { result = status_to_hresult(rc); break; }
+        if (readResp.empty()) break; // EOF
+        if (readResp.size() > chunk) { result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA); break; }
+        result = fb::projfs::WriteFileData(st->ctx, &data->DataStreamId, readResp.data(), offset,
+                                           static_cast<UINT32>(readResp.size()));
+        if (FAILED(result)) break;
         offset += readResp.size();
         remaining -= static_cast<UINT32>(readResp.size());
-        if (readResp.size() < chunk) break;
+        if (readResp.size() < chunk) break; // short read => EOF
     }
+
+    Writer rel;
+    rel.pod(fh);
+    std::vector<uint8_t> ignored;
+    st->client->request(OP_RELEASE, rel.b, ignored);
+
     st->client->bytesRead += (length - remaining);
-    return S_OK;
+    return result;
 }
 
 HRESULT CALLBACK notification_cb(const PRJ_CALLBACK_DATA* data, BOOLEAN isDirectory,
@@ -588,8 +579,6 @@ HRESULT CALLBACK notification_cb(const PRJ_CALLBACK_DATA* data, BOOLEAN isDirect
         post_mask();
         if (FAILED(reject_readonly_mutation())) return reject_readonly_mutation();
         if (dir) return status_to_hresult(remote_mkdir(st, path));
-        // Create/truncate now so zero-byte files appear remotely even if no
-        // modified-close notification follows. Final contents are uploaded on close.
         return status_to_hresult(remote_create_empty_file(st, path));
 
     case PRJ_NOTIFICATION_FILE_OVERWRITTEN:
@@ -605,8 +594,6 @@ HRESULT CALLBACK notification_cb(const PRJ_CALLBACK_DATA* data, BOOLEAN isDirect
         if (FAILED(deny_write())) return deny_write();
         if (path == "/") return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
         if (dest.empty()) return status_to_hresult(remote_path_only(st, dir ? OP_RMDIR : OP_UNLINK, path));
-        // Empty source means an item is moving in from outside the virtualization
-        // root. It cannot be renamed remotely yet because no remote source exists.
         if (path.empty() || path == "/") return S_OK;
         return status_to_hresult(remote_rename(st, path, dest));
 
@@ -758,9 +745,6 @@ void Mount::stop() {
     if (backend_) {
         auto* state = static_cast<ProjfsState*>(backend_);
         if (state->ctx) fb::projfs::StopVirtualizing(state->ctx);
-        // Remove the backing placeholder root (internal scratch dir under
-        // LOCALAPPDATA, never the user's real folder) so it is not left behind as
-        // a stale placeholder that would break the next mount on this machine.
         std::filesystem::path backing = state->root;
         delete state;
         if (!backing.empty()) {

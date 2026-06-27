@@ -58,63 +58,34 @@ target_link_libraries(folderbuddies PRIVATE Qt6::Widgets Qt6::Network Threads::T
 if(WIN32)
   get_target_property(_fb_qt_core_type Qt6::Core TYPE)
   if(_fb_qt_core_type STREQUAL "STATIC_LIBRARY")
-    message(STATUS "Static Qt detected; locating plugin targets to import.")
-    get_property(_fb_imported_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-                 PROPERTY IMPORTED_TARGETS)
-    set(_fb_plugin_targets "")
-    foreach(_t ${_fb_imported_targets})
-      if(_t MATCHES "Plugin$")
-        if(_t MATCHES "Direct2DIntegration" OR _t MATCHES "StylePlugin$")
-          continue()
-        endif()
-        list(APPEND _fb_plugin_targets ${_t})
+    foreach(_required_plugin
+        Qt6::QWindowsIntegrationPlugin
+        Qt6::QModernWindowsStylePlugin)
+      if(NOT TARGET ${_required_plugin})
+        message(FATAL_ERROR "Static Windows Qt build is missing ${_required_plugin}")
       endif()
     endforeach()
-    foreach(_known
-        Qt6::QWindowsIntegrationPlugin
+
+    set(_fb_static_qt_plugins
+      Qt6::QWindowsIntegrationPlugin
+      Qt6::QModernWindowsStylePlugin)
+
+    foreach(_optional_plugin
         Qt6::QICOPlugin
         Qt6::QGifPlugin
         Qt6::QJpegPlugin
-        Qt6::QSvgPlugin)
-      if(TARGET ${_known})
-        list(APPEND _fb_plugin_targets ${_known})
+        Qt6::QNLMNIPlugin
+        Qt6::QSchannelBackendPlugin
+        Qt6::QTlsBackendCertOnlyPlugin
+        Qt6::QTuioTouchPlugin)
+      if(TARGET ${_optional_plugin})
+        list(APPEND _fb_static_qt_plugins ${_optional_plugin})
       endif()
     endforeach()
-    list(REMOVE_DUPLICATES _fb_plugin_targets)
-    if(NOT _fb_plugin_targets)
-      message(FATAL_ERROR
-        "No Qt *Plugin imported targets are defined for the static build, so no "
-        "plugins (platform and image formats) can be linked in.\n"
-        "All imported targets were:\n  ${_fb_imported_targets}")
-    endif()
 
-    if(NOT TARGET Qt6::QModernWindowsStylePlugin)
-      message(FATAL_ERROR
-        "FATAL: static Windows build requires Qt6::QModernWindowsStylePlugin.\n"
-        "This is non-negotiable: Folder Buddies static Windows must use the Qt 'windows11' style.\n"
-        "If this target is missing, vcpkg/Qt did not expose the Windows 11 style plugin.\n"
-        "Triplet: ${VCPKG_TARGET_TRIPLET}\n"
-        "Qt6_DIR: ${Qt6_DIR}\n"
-        "Qt6Core_DIR: ${Qt6Core_DIR}\n"
-        "Qt6Widgets_DIR: ${Qt6Widgets_DIR}\n"
-        "Imported targets visible to client/CMakeLists.txt:\n  ${_fb_imported_targets}")
-    endif()
-
-    get_target_property(_fb_modern_style_type Qt6::QModernWindowsStylePlugin TYPE)
-    get_target_property(_fb_modern_style_location Qt6::QModernWindowsStylePlugin IMPORTED_LOCATION_RELEASE)
-    if(NOT _fb_modern_style_location)
-      get_target_property(_fb_modern_style_location Qt6::QModernWindowsStylePlugin IMPORTED_LOCATION)
-    endif()
-
-    qt6_import_plugins(folderbuddies
-      INCLUDE ${_fb_plugin_targets}
-      INCLUDE_BY_TYPE styles Qt6::QModernWindowsStylePlugin)
-    target_compile_definitions(folderbuddies PRIVATE FB_STATIC_QT_REQUIRE_WINDOWS11_STYLE)
-    message(STATUS "  Imported plugin targets: ${_fb_plugin_targets}")
-    message(STATUS "  Required static Qt style plugin: Qt6::QModernWindowsStylePlugin")
-    message(STATUS "  Qt6::QModernWindowsStylePlugin TYPE: ${_fb_modern_style_type}")
-    message(STATUS "  Qt6::QModernWindowsStylePlugin LOCATION: ${_fb_modern_style_location}")
-    message(STATUS "  Runtime policy: application aborts unless QStyleFactory exposes 'windows11'")
+    list(REMOVE_DUPLICATES _fb_static_qt_plugins)
+    qt6_import_plugins(folderbuddies INCLUDE ${_fb_static_qt_plugins})
+    message(STATUS "Static Qt plugins: ${_fb_static_qt_plugins}")
   endif()
 endif()
 

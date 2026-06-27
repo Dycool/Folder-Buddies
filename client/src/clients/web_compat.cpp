@@ -586,6 +586,23 @@ struct WebRtcCompatHost::Impl {
     std::unordered_map<std::string, std::shared_ptr<rtc::DataChannel>> channels;
     std::unordered_map<uint32_t, std::ofstream> uploads;
     std::atomic<bool> live{false};
+    std::atomic<uint64_t>* bytesOut = nullptr;
+    std::atomic<uint64_t>* bytesIn = nullptr;
+    std::function<void()> notifyClientsChanged;
+
+    void notifyClients() {
+        if (notifyClientsChanged) {
+            try { notifyClientsChanged(); } catch (...) { /* UI owns callback errors */ }
+        }
+    }
+
+    void addBytesOut(uint64_t n) {
+        if (bytesOut && n) bytesOut->fetch_add(n, std::memory_order_relaxed);
+    }
+
+    void addBytesIn(uint64_t n) {
+        if (bytesIn && n) bytesIn->fetch_add(n, std::memory_order_relaxed);
+    }
 
     bool resolve_common(const std::string& rel, fs::path& out) {
         std::string norm;
@@ -674,7 +691,11 @@ struct WebRtcCompatHost::Impl {
                 while (f) {
                     f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
                     std::streamsize got = f.gcount();
-                    if (got > 0) send_bin(dc, static_cast<uint32_t>(id), buf.data(), static_cast<size_t>(got));
+                    if (got > 0) {
+                        const auto n = static_cast<size_t>(got);
+                        send_bin(dc, static_cast<uint32_t>(id), buf.data(), n);
+                        addBytesOut(static_cast<uint64_t>(n));
+                    }
                 }
                 QJsonObject end; end["t"] = "fileEnd"; end["id"] = id; dc->send(json_compact(end).toStdString());
                 return;
@@ -728,6 +749,8 @@ struct WebRtcCompatHost::Impl {
         std::lock_guard<std::mutex> lk(mtx);
         auto it = uploads.find(id);
         if (it == uploads.end()) return;
+        const uint64_t payloadBytes = static_cast<uint64_t>(b.size() - 8);
+        addBytesIn(payloadBytes);
         for (size_t i = 8; i < b.size(); ++i) {
             char c = static_cast<char>(static_cast<uint8_t>(b[i]));
             it->second.write(&c, 1);
@@ -741,7 +764,6 @@ struct WebRtcCompatHost::Impl {
 
     void create_peer(const std::string& peerId) {
         compat_dbg("host create_peer peer=" + peerId);
-        std::lock_guard<std::mutex> lk(mtx);
         rtc::Configuration cfg;
         cfg.iceServers.emplace_back("stun:stun.l.google.com:19302");
         auto pc = std::make_shared<rtc::PeerConnection>(cfg);
@@ -765,13 +787,32 @@ struct WebRtcCompatHost::Impl {
         });
 
         auto dc = pc->createDataChannel("folderbuddies-files");
-        pcs[peerId] = pc;
-        channels[peerId] = dc;
         dc->onMessage([this, peerId, dc](std::variant<rtc::binary, rtc::string> message) {
             if (std::holds_alternative<rtc::string>(message)) on_json(peerId, dc, parse_json_obj(std::get<rtc::string>(message)));
             else on_binary(std::get<rtc::binary>(message));
         });
-        dc->onOpen([peerId] { compat_dbg("host datachannel OPEN peer=" + peerId); });
+        dc->onOpen([this, peerId] {
+            compat_dbg("host datachannel OPEN peer=" + peerId);
+            notifyClients();
+        });
+        dc->onClosed([this, peerId] {
+            bool changed = false;
+            {
+                std::lock_guard<std::mutex> lk(mtx);
+                changed = channels.erase(peerId) > 0;
+                pcs.erase(peerId);
+            }
+            if (changed) notifyClients();
+        });
+
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            changed = !channels.count(peerId);
+            pcs[peerId] = pc;
+            channels[peerId] = dc;
+        }
+        if (changed) notifyClients();
     }
 
     void on_signal(const QJsonObject& msg) {
@@ -781,7 +822,17 @@ struct WebRtcCompatHost::Impl {
         if (kind == "ready") { live = true; cv.notify_all(); return; }
         if (kind == "error") { std::lock_guard<std::mutex> lk(mtx); wsError = msg.value("error").toString("signaling error").toStdString(); wsClosed = true; cv.notify_all(); return; }
         if (kind == "client-joined") { create_peer(msg.value("peerId").toString().toStdString()); return; }
-        if (kind == "client-left") { std::lock_guard<std::mutex> lk(mtx); pcs.erase(msg.value("peerId").toString().toStdString()); channels.erase(msg.value("peerId").toString().toStdString()); return; }
+        if (kind == "client-left") {
+            bool changed = false;
+            {
+                std::lock_guard<std::mutex> lk(mtx);
+                const std::string peer = msg.value("peerId").toString().toStdString();
+                pcs.erase(peer);
+                changed = channels.erase(peer) > 0;
+            }
+            if (changed) notifyClients();
+            return;
+        }
         if (kind != "signal") return;
         std::string peerId = msg.value("peerId").toString().toStdString();
         QJsonObject sig = unb64url_json(msg.value("ciphertext").toString().toStdString());
@@ -862,9 +913,6 @@ struct WebRtcRemoteClient::Impl {
         std::lock_guard<std::mutex> lk(mtx);
         QString t = o.value("t").toString();
         if (t == "listResult") canWrite = o.value("write").toBool(canWrite.load());
-        // A download emits fileStart, binary chunks, then fileEnd. Only fileEnd
-        // completes the synchronous request; otherwise native reads can return
-        // before the browser has sent the file bytes.
         if (t == "fileStart") return;
         replies[static_cast<uint32_t>(o.value("id").toInt())] = o;
         cv.notify_all();
@@ -937,7 +985,11 @@ struct WebRtcRemoteClient::Impl {
     }
 };
 
-WebRtcCompatHost::WebRtcCompatHost() : impl_(new Impl) {}
+WebRtcCompatHost::WebRtcCompatHost() : impl_(new Impl) {
+    impl_->bytesOut = &bytesOut;
+    impl_->bytesIn = &bytesIn;
+    impl_->notifyClientsChanged = [this] { if (onClientsChanged) onClientsChanged(); };
+}
 WebRtcCompatHost::~WebRtcCompatHost() { stop(); }
 
 bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomCode, bool allowWrites, std::string& err) {
@@ -948,6 +1000,8 @@ bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomC
     }
     impl_->root = fs::weakly_canonical(folder).string();
     impl_->allowWrites = allowWrites;
+    bytesOut = 0;
+    bytesIn = 0;
     impl_->wsClosed = false;
     { std::lock_guard<std::mutex> lk(impl_->mtx); impl_->wsError.clear(); }
 
@@ -993,7 +1047,21 @@ bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomC
     err = cloudErr + "; Firebase fallback URL is not configured for WebRTC compatibility";
     return false;
 }
-void WebRtcCompatHost::stop() { if (!impl_) return; impl_->live = false; if (impl_->ws) impl_->ws->close(); if (impl_->fbRelay) impl_->fbRelay->close(); std::lock_guard<std::mutex> lk(impl_->mtx); impl_->pcs.clear(); impl_->channels.clear(); impl_->uploads.clear(); }
+void WebRtcCompatHost::stop() {
+    if (!impl_) return;
+    impl_->live = false;
+    if (impl_->ws) impl_->ws->close();
+    if (impl_->fbRelay) impl_->fbRelay->close();
+    bool hadClients = false;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        hadClients = !impl_->channels.empty();
+        impl_->pcs.clear();
+        impl_->channels.clear();
+        impl_->uploads.clear();
+    }
+    if (hadClients) impl_->notifyClients();
+}
 bool WebRtcCompatHost::running() const { return impl_ && impl_->live.load(); }
 int WebRtcCompatHost::clientCount() const { if (!impl_) return 0; std::lock_guard<std::mutex> lk(impl_->mtx); return static_cast<int>(impl_->channels.size()); }
 

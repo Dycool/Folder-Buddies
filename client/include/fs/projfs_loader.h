@@ -7,8 +7,6 @@
 namespace fb {
 namespace projfs {
 
-// Loads ProjectedFSLib.dll and resolves all function pointers.
-// Must be called before any ProjFs* function. Safe to call multiple times.
 bool ensure_loaded();
 
 // Function pointer typedefs matching the SDK signatures

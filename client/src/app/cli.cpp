@@ -100,10 +100,23 @@ int cli_host(const Args& a) {
 
     Server server;
     Upnp upnp;
-    server.onClientsChanged = [&server] {
-        out() << "[clients: " << server.clientCount() << "]\n";
+    std::unique_ptr<WebRtcCompatHost> webCompat;
+
+    auto printClientCount = [&server, &webCompat] {
+        const int nativeClients = server.clientCount();
+        const int browserClients = webCompat ? webCompat->clientCount() : 0;
+        const int totalClients = nativeClients + browserClients;
+
+        out() << "[clients: " << totalClients;
+        if (browserClients > 0) {
+            out() << " (" << nativeClients << " native, "
+                  << browserClients << " browser)";
+        }
+        out() << "]\n";
         out().flush();
     };
+
+    server.onClientsChanged = printClientCount;
 
     HostedShareTicket ticket;
     std::string e;
@@ -114,9 +127,9 @@ int cli_host(const Args& a) {
         return 1;
     }
 
-    std::unique_ptr<WebRtcCompatHost> webCompat;
     if (ticket.cloudPublished && web_compat_available()) {
         webCompat = std::make_unique<WebRtcCompatHost>();
+        webCompat->onClientsChanged = printClientCount;
         std::string werr;
         if (!webCompat->start(a.positional, ticket.roomCode, a.has("--write"), werr)) {
             out() << "  WebRTC compatibility disabled: " << QString::fromStdString(werr) << "\n";

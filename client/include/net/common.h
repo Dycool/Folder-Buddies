@@ -31,10 +31,6 @@ constexpr uint32_t kProtocolVersion = 2; // v2: post-handshake ChaCha20-Poly1305
 constexpr uint32_t kMaxIO = 1u << 20;   // 1 MiB read/write chunk
 constexpr int kDefaultConns = 8;        // automatic parallel TCP streams per client
 
-// Upper bound for an unauthenticated, plaintext handshake frame. recv_message()
-// is only used before the SecureChannel is active (HELLO/CHALLENGE/AUTH), all of
-// which are well under 1 KiB. Capping the advertised length stops an unauthed
-// peer from triggering a multi-gigabyte allocation with a single forged header.
 constexpr uint32_t kMaxHandshakeMsg = 64u * 1024;
 
 // Operation codes. Auth ops < 10, filesystem ops >= 10.

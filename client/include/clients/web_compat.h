@@ -1,14 +1,10 @@
-// Folder Buddies — native/browser WebRTC compatibility transport.
-//
-// Native↔native remains the fast TCP transport. This layer exists only so the
-// native app can interoperate with the browser app over RTCDataChannel when one
-// side is a browser, or when TCP publishing failed and a WebRTC route exists.
 #pragma once
 
 #include "remote_fs.h"
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,6 +20,10 @@ public:
     void stop();
     bool running() const;
     int clientCount() const;
+
+    std::atomic<uint64_t> bytesOut{0};
+    std::atomic<uint64_t> bytesIn{0};
+    std::function<void()> onClientsChanged;
 
 private:
     struct Impl;

@@ -1,10 +1,5 @@
 #include "fuse_backend.h"
 
-// ===========================================================================
-// Windows: native ProjFS availability check and enable function (DISM).
-// The startup dialog in MainWindow handles the user-facing prompt — these
-// functions only perform the check / operation, no auto-enable.
-// ===========================================================================
 #ifdef _WIN32
 
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -58,8 +53,6 @@ bool enable_fuse_backend(std::string& err) {
     return run_dism_enable_projfs(err);
 }
 
-// ensure_fuse_backend checks availability only — no auto-enable. The caller
-// (Mount::start or the startup dialog) determines whether to offer enablement.
 bool ensure_fuse_backend(std::string& err) {
     if (projfs_dll_present()) return true;
     err = "Projected File System (ProjFS) is not enabled.\n\n"
@@ -72,10 +65,6 @@ bool ensure_fuse_backend(std::string& err) {
 
 } // namespace fb
 
-// ===========================================================================
-// macOS: libfuse3 provider. Release builds currently install FUSE-T as that
-// provider, but the mount implementation stays on the FUSE3 API only.
-// ===========================================================================
 #elif defined(__APPLE__)
 
 #  include <cstdio>
@@ -89,9 +78,6 @@ namespace {
 namespace fs = std::filesystem;
 
 bool backend_present() {
-    // At runtime the app may use a bundled libfuse3.dylib, so do not require a
-    // global libfuse3 install path here. What must exist system-wide is the
-    // FUSE-T/macFUSE support layer that performs the actual macOS mount.
     const char* markers[] = {
         "/Library/Frameworks/fuse_t.framework",
         "/Library/Application Support/fuse-t",
@@ -256,10 +242,6 @@ bool ensure_fuse_backend(std::string& err) {
 
 } // namespace fb
 
-// ===========================================================================
-// Linux: libfuse3/kernel FUSE is the prerequisite; packaging still needs the
-// AppImage runtime compatibility FUSE package on CI.
-// ===========================================================================
 #else
 
 namespace fb {

@@ -117,9 +117,6 @@ bool Server::resolve(const std::string& rel, std::string& abs) {
         p /= s;
         std::error_code ec;
         if (fs::exists(p, ec)) {
-            // Do not serve symlinks, junctions, OneDrive placeholders, or ProjFS
-            // backing roots. They can escape the share or mirror a mounted share
-            // back into itself on Windows.
             if (is_boundary_reparse_point(p)) return false;
             fs::path canon = fs::weakly_canonical(p, ec);
             if (ec || !path_within(base, canon)) return false;
@@ -154,8 +151,6 @@ bool Server::start(const std::string& folder, int port, std::string& err) {
     secret = random_bytes(kSecretBytes);
     authKey_ = derive_key(secret);
 
-    // Dual-stack IPv6 socket (IPV6_V6ONLY off) accepts IPv6 and IPv4-mapped
-    // clients; fall back to plain IPv4 when IPv6 is unavailable.
     bool v6 = true;
     listen_ = ::socket(AF_INET6, SOCK_STREAM, 0);
     if (listen_ == FB_BAD_SOCKET) {
@@ -171,8 +166,6 @@ bool Server::start(const std::string& folder, int port, std::string& err) {
                      sizeof(off));
     }
 
-    // Port 0 lets the OS pick a free port; a specific busy port scans upward.
-    // The bound port is read back and baked into the share code.
     sockaddr_storage ss{};
     socklen_t addrlen;
     auto set_port = [&](uint16_t p) {
@@ -228,8 +221,6 @@ void Server::stop() {
     }
     if (acceptThread_.joinable()) acceptThread_.join();
     {
-        // Connection threads are detached; wait for every one to drain so the
-        // maps they touch are safe to clear below.
         std::unique_lock<std::mutex> lk(connMtx_);
         connCv_.wait(lk, [this] { return connCount_ == 0; });
     }
@@ -256,9 +247,6 @@ void Server::acceptLoop() {
             activeSocks_.insert(s);
             ++connCount_;
         }
-        // Detached: finished connections free their own resources immediately
-        // instead of piling up thread handles until stop(). stop() blocks on
-        // connCount_ reaching zero, so shutdown still waits for them.
         std::thread([this, s] { handleConn(s); }).detach();
     }
 }
@@ -276,8 +264,6 @@ bool Server::handshake(socket_t s, std::string& clientId, SecureChannel& chan) {
     uint8_t folderHash[32];
     uint8_t nonceC[16];
     if (!r.pod(version) || !r.raw(cid, 16) || !r.raw(folderHash, 32) || !r.raw(nonceC, 16)) return false;
-    // The client sends SHA-256 of the folder name rather than the name itself, so
-    // the cleartext HELLO never carries the share's display name. Compare hashes.
     QByteArray expectFolder =
         QCryptographicHash::hash(QByteArray::fromStdString(shareName), QCryptographicHash::Sha256);
     if (version != kProtocolVersion || expectFolder.size() != 32 ||

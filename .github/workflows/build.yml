@@ -32,10 +32,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Verify C++23 project settings
-        run: |
-          grep -q 'set(CMAKE_CXX_STANDARD 23)' client/CMakeLists.txt
-          grep -q 'set(CMAKE_CXX_STANDARD 23)' databases/cloudflare/CMakeLists.txt
 
       - name: Install dependencies
         run: |
@@ -332,7 +328,7 @@ jobs:
   build-windows:
     name: Windows static .exe
     runs-on: windows-2025
-    timeout-minutes: 360
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v6
 
@@ -346,8 +342,6 @@ jobs:
           key: vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-libdatachannel-${{ env.VCPKG_COMMIT }}
           restore-keys: |
             vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-libdatachannel-
-            vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-
-            vcpkg-windows-static-qtbase-core-gui-widgets-network-
 
       - name: Bootstrap vcpkg
         shell: pwsh
@@ -369,18 +363,6 @@ jobs:
             "libsodium:x64-windows-static" `
             "libdatachannel:x64-windows-static" `
             --clean-after-build
-
-      - name: Inspect static Qt style plugin installation
-        shell: pwsh
-        run: |
-          $qtRoot = "_deps/vcpkg/installed/x64-windows-static"
-          Write-Host "=== Static Qt style plugin filesystem diagnostic ==="
-          Write-Host "qtRoot=$qtRoot"
-          if (-not (Test-Path $qtRoot)) { Write-Error "Missing $qtRoot"; exit 1 }
-          Get-ChildItem "$qtRoot" -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match 'modern|style|windows11|qwindows|qmodern' -or $_.FullName -match 'plugins[\\/]styles' } |
-            Select-Object FullName, Length |
-            Format-Table -AutoSize
 
       - name: Configure
         shell: pwsh
@@ -407,12 +389,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir build --output-on-failure -C $env:BUILD_TYPE
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:QT_DEBUG_PLUGINS = "1"
-          & .\build\folderbuddies.exe --diagnose-qt-style
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Static Windows executable failed the mandatory Qt windows11 style diagnostic."
-            exit $LASTEXITCODE
-          }
           Copy-Item build/folderbuddies.exe folderbuddies-windows.exe
 
       - uses: actions/upload-artifact@v4

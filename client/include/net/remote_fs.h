@@ -1,6 +1,3 @@
-// Folder Buddies — abstract remote filesystem transport.
-// TCP native and WebRTC compatibility clients both expose this request/response
-// interface so the OS mount layer does not care which transport is underneath.
 #pragma once
 
 #include <atomic>

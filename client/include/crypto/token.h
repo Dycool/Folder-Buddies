@@ -1,10 +1,3 @@
-// Folder Buddies — connection metadata carried inside the encrypted room payload.
-//
-// A Token is the plaintext the host shares with a client: the address/port to
-// connect to, the auto-generated data-path secret, and the folder display name.
-// It is never serialized as human-readable text; signaling.cpp serializes it to
-// a binary blob, seals it (ChaCha20-Poly1305), and Base91-encodes the result as
-// either the Cloudflare room payload or the offline fallback blob.
 #pragma once
 
 #include <cstddef>

@@ -315,10 +315,6 @@ bool SecureChannel::recv(socket_t s, MsgHeader& h, std::vector<uint8_t>& payload
 
 } // namespace fb
 
-// ---------------------------------------------------------------------------
-// Self-test: compile this file with -DFB_CRYPTO_SELFTEST to get a `main` that
-// checks the AEAD against the RFC 8439 §2.8.2 vector. Used in CI / locally; not
-// part of the app build.
 #ifdef FB_CRYPTO_SELFTEST
 #  include <cstdio>
 int main() {

@@ -96,8 +96,6 @@ RamInfo detect_ram() {
         // freeram excludes reclaimable page cache, so treat buffers as available too.
         r.avail = static_cast<uint64_t>(si.freeram + si.bufferram) * unit;
     }
-    // Prefer the kernel's MemAvailable estimate (accounts for reclaimable page
-    // cache and slab); fall back to freeram+bufferram above if it's unreadable.
     if (FILE* f = std::fopen("/proc/meminfo", "r")) {
         char line[256];
         while (std::fgets(line, sizeof(line), f)) {
@@ -116,8 +114,6 @@ RamInfo detect_ram() {
     return r;
 }
 
-// Block-cache byte budget from total/available RAM. Returns 0 when memory is so
-// tight that only the tiny metadata/directory caches should remain.
 uint64_t compute_block_budget(const RamInfo& r) {
     uint64_t cap;
     if (r.total <= 4 * kGiB) cap = 256 * kMiB;
@@ -167,8 +163,6 @@ public:
         for (auto& t : threads_)
             if (t.joinable()) t.join();
     }
-    // Drops the job (returns false) if the queue is already saturated, so a slow
-    // network can never make read-ahead pile up unbounded memory.
     bool submit(std::function<void()> job) {
         std::lock_guard<std::mutex> lk(m_);
         if (!running_ || q_.size() >= kPrefetchQueueMax) return false;
@@ -370,8 +364,6 @@ struct RamCache::Impl {
         path = it->second.path;
         return true;
     }
-    // Claim the handle for one host read. Returns false if it's gone or closing,
-    // which keeps RELEASE from racing a background read-ahead onto a dead fh.
     bool fhBeginRead(uint64_t id) {
         std::lock_guard<std::mutex> lk(fhMtx);
         auto it = fh.find(id);
@@ -384,8 +376,6 @@ struct RamCache::Impl {
         auto it = fh.find(id);
         if (it != fh.end() && --it->second.activeReads <= 0) fhCv.notify_all();
     }
-    // Mark closing and block until every in-flight host read on this handle has
-    // finished, so OP_RELEASE is only forwarded once no read can still use the fh.
     void fhBeginClose(uint64_t id) {
         std::unique_lock<std::mutex> lk(fhMtx);
         auto it = fh.find(id);
@@ -396,8 +386,6 @@ struct RamCache::Impl {
             return i == fh.end() || i->second.activeReads == 0;
         });
     }
-    // Invalidate the cached file version for every handle pointing at `path` so
-    // the next read re-derives size/mtime after a local mutation.
     void clearFhVersion(const std::string& path) {
         std::lock_guard<std::mutex> lk(fhMtx);
         for (auto& kv : fh)
@@ -487,8 +475,6 @@ struct RamCache::Impl {
         evictToBudgetLocked(budget);
     }
 
-    // Fetch one block from the host (no lock held during network I/O), with
-    // in-flight de-duplication so concurrent readers never double-fetch.
     int blockFetch(const std::string& path, uint64_t fhId, uint64_t size, int64_t mtime,
                    uint64_t idx, std::vector<uint8_t>& out, bool& eof, bool* fromCache = nullptr) {
         std::unique_lock<std::mutex> lk(blockMtx);
@@ -508,9 +494,6 @@ struct RamCache::Impl {
         }
         lk.unlock();
 
-        // Honor an open handle only — never read against a released/closing fh.
-        // The refcount makes RELEASE wait for this read instead of pulling the fh
-        // out from under it.
         std::vector<uint8_t> resp;
         int status;
         if (!fhBeginRead(fhId)) {
@@ -552,9 +535,6 @@ struct RamCache::Impl {
         {
             std::lock_guard<std::mutex> lk(fhMtx);
             auto it = fh.find(fhId);
-            // Trust the captured version only briefly: past the TTL we re-derive
-            // size/mtime so an external writer's change can't be served stale
-            // from this handle's old blocks indefinitely.
             if (it != fh.end() && it->second.haveVer &&
                 now_ms() - it->second.verAt <= kMetaTtlMs) {
                 size = it->second.size;
@@ -698,8 +678,6 @@ struct RamCache::Impl {
         int status = forward(OP_READDIR, payload, resp);
         if (status != 0) return status;
         dirStore(path, resp);
-        // Seed the metadata cache from the listing so subsequent getattr on each
-        // child is a hit — the host already returns full attrs per entry.
         Reader rr(resp.data(), resp.size());
         uint32_t n = 0;
         if (rr.pod(n)) {
@@ -795,8 +773,6 @@ int RamCache::request(uint16_t op, const std::vector<uint8_t>& payload, std::vec
         Reader r(payload.data(), payload.size());
         uint64_t fhId = 0;
         r.pod(fhId);
-        // Block new prefetches and wait for in-flight reads to drain before we let
-        // the host close the handle, then drop our tracking once it's released.
         d.fhBeginClose(fhId);
         int status = d.forward(op, payload, resp);
         d.fhRemove(fhId);
@@ -877,8 +853,6 @@ int RamCache::request(uint16_t op, const std::vector<uint8_t>& payload, std::vec
         return status;
     }
 
-    // FSYNC/FLUSH stay honest (forwarded, host must ack); STATFS/ACCESS/others
-    // are forwarded untouched.
     default:
         return d.forward(op, payload, resp);
     }

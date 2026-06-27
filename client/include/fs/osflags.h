@@ -1,8 +1,3 @@
-// Folder Buddies — portable open() flag translation.
-//
-// open() flag *values* differ across Linux/macOS/Windows. The client converts
-// its OS flags to these stable wire values; the server converts them back to
-// its own OS flags. This keeps cross-OS mounts correct.
 #pragma once
 
 #include <fcntl.h>

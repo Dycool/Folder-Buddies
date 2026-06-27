@@ -39,8 +39,6 @@ bool Upnp::map(uint16_t internalPort, std::string& externalIp, uint16_t& externa
     char ips[16];
     std::snprintf(ips, sizeof(ips), "%u", internalPort); // LAN-side port to forward to
 
-    // Scan for a free external port; a busy mapping or a failed AddPortMapping
-    // both move to the next. The rule name carries the external port.
     bool mapped = false;
     uint16_t candidate = internalPort;
     for (int tries = 0; tries < 64 && !mapped; ++tries, ++candidate) {

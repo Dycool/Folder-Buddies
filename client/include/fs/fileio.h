@@ -1,9 +1,3 @@
-// Folder Buddies — cross-platform positioned file I/O for the server.
-//
-// Positioned reads/writes (pread/pwrite on POSIX, OVERLAPPED on Win32) let
-// multiple connections of one client hit a single open handle concurrently
-// without serializing on a shared file pointer. Flags arrive already
-// translated to the server's native O_* values (see osflags.h).
 #pragma once
 
 #include <cstdint>

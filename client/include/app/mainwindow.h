@@ -1,5 +1,3 @@
-// Folder Buddies — Qt6 UI. Two modes in one window: host a folder (server)
-// and connect to a folder (client). A machine can do both at once.
 #pragma once
 
 #include "client.h"
@@ -43,6 +41,7 @@ private:
     QWidget* buildConnectTab();
     void setShareRunning(bool running);
     void setConnected(bool connected);
+    void refreshShareStatus();
 
     // Share (server) side
     QLineEdit* folderEdit_;

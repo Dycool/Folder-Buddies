@@ -1,6 +1,3 @@
-// Folder Buddies — local address discovery, IPv6-first. LAN-only mode advertises
-// a non-globally-routable address; internet mode prefers global IPv6, else
-// IPv4 + UPnP.
 #pragma once
 
 #include <string>
@@ -16,9 +13,6 @@ struct LocalAddrs {
 
 LocalAddrs enumerate_local_addrs();
 
-// Best address to put in a share code. lanOnly → a private/ULA address only
-// (never a globally-routable one). Otherwise → prefer global IPv6, else "" so
-// the caller knows to use IPv4 + UPnP.
 std::string best_local_ip(bool lanOnly);
 
 } // namespace fb

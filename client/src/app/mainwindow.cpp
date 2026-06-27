@@ -8,6 +8,7 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QEvent>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -15,6 +16,8 @@
 #include <QLineEdit>
 #include <QMetaObject>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSizePolicy>
@@ -25,6 +28,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 static QString humanRate(double bytesPerSec) {
     const char* u[] = {"B/s", "KB/s", "MB/s", "GB/s"};
     int i = 0;
@@ -32,10 +37,6 @@ static QString humanRate(double bytesPerSec) {
     return QString::number(bytesPerSec, 'f', 1) + " " + u[i];
 }
 
-// Per-second rate from a monotonic counter sampled every 500 ms. Saturates at 0
-// when the counter goes backwards — tearing down a host/mount and restarting it
-// makes a fresh object whose counters begin again at 0, which would otherwise
-// underflow the unsigned subtraction into a bogus multi-exabyte/s spike.
 static double perSec(uint64_t cur, uint64_t& last) {
     uint64_t delta = cur >= last ? cur - last : 0;
     last = cur;
@@ -59,10 +60,80 @@ static QLabel* hintLabel(const QString& text) {
     return label;
 }
 
+class CleanCheckBox final : public QCheckBox {
+public:
+    using QCheckBox::QCheckBox;
+
+    QSize sizeHint() const override {
+        const QFontMetrics fm(font());
+        const int box = 14;
+        const int gap = 7;
+        return QSize(box + gap + fm.horizontalAdvance(text()),
+                     std::max(20, fm.height() + 4));
+    }
+
+protected:
+    bool event(QEvent* e) override {
+        if (e->type() == QEvent::Enter || e->type() == QEvent::Leave)
+            update();
+        return QCheckBox::event(e);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        const int boxSize = 14;
+        const QRect box(0, (height() - boxSize) / 2, boxSize, boxSize);
+        const bool on = checkState() != Qt::Unchecked;
+        const bool mixed = checkState() == Qt::PartiallyChecked;
+        const bool active = isEnabled();
+
+        QColor border = on ? QColor("#0a64d6") : QColor("#9ca3af");
+        QColor fill = on ? QColor("#0a64d6") : QColor("#ffffff");
+        QColor textColor = active ? QColor("#1d1d1f") : QColor("#9a9a9f");
+
+        if (!active) {
+            border = QColor("#c9c9ce");
+            fill = on ? QColor("#aac8f2") : QColor("#f4f4f5");
+        } else if (isDown()) {
+            fill = on ? QColor("#084fa8") : QColor("#f3f4f6");
+            border = on ? QColor("#084fa8") : QColor("#6b7280");
+        } else if (underMouse()) {
+            border = on ? QColor("#0a58bd") : QColor("#6b7280");
+        }
+
+        painter.setPen(QPen(border, 1.0));
+        painter.setBrush(fill);
+        painter.drawRoundedRect(box.adjusted(0, 0, -1, -1), 3, 3);
+
+        if (on && !mixed) {
+            QPen tickPen(Qt::white, 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+            painter.setPen(tickPen);
+            QPainterPath tick;
+            tick.moveTo(box.left() + 3.2, box.top() + 7.2);
+            tick.lineTo(box.left() + 5.9, box.top() + 9.8);
+            tick.lineTo(box.left() + 10.9, box.top() + 4.4);
+            painter.drawPath(tick);
+        } else if (mixed) {
+            painter.setPen(QPen(Qt::white, 2.0, Qt::SolidLine, Qt::RoundCap));
+            painter.drawLine(box.left() + 3, box.center().y(), box.right() - 3, box.center().y());
+        }
+
+        if (hasFocus()) {
+            painter.setPen(QPen(QColor("#0a64d6"), 1.0, Qt::DashLine));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRoundedRect(box.adjusted(-2, -2, 1, 1), 5, 5);
+        }
+
+        painter.setPen(textColor);
+        const QRect textRect(box.right() + 7, 0, width() - box.right() - 7, height());
+        painter.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, text());
+    }
+};
+
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Folder Buddies");
-    // The window inherits the application window icon set in main(), which on
-    // Windows comes from the embedded .ico (reliable in static builds).
 
     auto* tabs = new QTabWidget;
     tabs->setObjectName("modeTabs");
@@ -274,10 +345,10 @@ QWidget* MainWindow::buildShareTab() {
     fl->addWidget(browse);
     form->addRow("Folder:", folderRow);
 
-    lanCheck_ = new QCheckBox("Share on this LAN only");
+    lanCheck_ = new CleanCheckBox("Share on this LAN only");
     form->addRow("", lanCheck_);
 
-    writeCheck_ = new QCheckBox("Allow clients to upload and delete files");
+    writeCheck_ = new CleanCheckBox("Allow clients to upload and delete files");
     form->addRow("Access:", writeCheck_);
 
     shareButton_ = new QPushButton("Host");
@@ -415,6 +486,9 @@ void MainWindow::toggleShare() {
     activeTicket_ = ticket;
     if (ticket.cloudPublished && fb::web_compat_available()) {
         webCompatHost_ = std::make_unique<fb::WebRtcCompatHost>();
+        webCompatHost_->onClientsChanged = [this] {
+            QMetaObject::invokeMethod(this, "onClientsChanged", Qt::QueuedConnection);
+        };
         std::string werr;
         if (!webCompatHost_->start(folder.toStdString(), ticket.roomCode, writeCheck_->isChecked(), werr)) {
             webCompatHost_.reset();
@@ -425,24 +499,35 @@ void MainWindow::toggleShare() {
         }
     }
     tokenEdit_->setPlainText(QString::fromStdString(ticket.connectCode));
-    shareStatus_->setText(QString("Hosting — 0 client(s)") +
-                          (writeCheck_->isChecked() ? " — read/write" : " — read-only"));
+    refreshShareStatus();
     setShareRunning(true);
 }
 
+void MainWindow::refreshShareStatus() {
+    if (!server_ || !server_->running()) {
+        shareStatus_->setText("Not hosting.");
+        return;
+    }
+
+    const int nativeClients = server_->clientCount();
+    const int browserClients = webCompatHost_ ? webCompatHost_->clientCount() : 0;
+    const int totalClients = nativeClients + browserClients;
+
+    QString text = QString("Hosting — %1 client(s)").arg(totalClients);
+    if (browserClients > 0) {
+        text += QString(" (%1 native, %2 browser)").arg(nativeClients).arg(browserClients);
+    }
+    text += server_->allowWrites ? " — read/write" : " — read-only";
+    shareStatus_->setText(text);
+}
+
 void MainWindow::onClientsChanged() {
-    if (!server_ || !server_->running()) return;
-    QString t = shareStatus_->text();
-    int dash = t.indexOf(" — ");
-    if (dash >= 0) t = t.left(dash);
-    shareStatus_->setText(t + QString(" — %1 client(s)").arg(server_->clientCount()) +
-                          (server_->allowWrites ? " — read/write" : " — read-only"));
+    refreshShareStatus();
 }
 
 void MainWindow::copyToken() {
     QApplication::clipboard()->setText(tokenEdit_->toPlainText());
 }
-
 
 void MainWindow::setConnected(bool connected) {
     connectButton_->setText(connected ? "Disconnect" : "Connect");
@@ -522,12 +607,14 @@ void MainWindow::openMount() {
 void MainWindow::refreshStats() {
     QStringList parts;
     if (server_ && server_->running()) {
+        const uint64_t servedOut = server_->bytesOut.load() +
+                                   (webCompatHost_ ? webCompatHost_->bytesOut.load() : 0);
+        const uint64_t servedIn = server_->bytesIn.load() +
+                                  (webCompatHost_ ? webCompatHost_->bytesIn.load() : 0);
         parts << QString("Serve ↑%1 ↓%2")
-                     .arg(humanRate(perSec(server_->bytesOut.load(), lastOut_)))
-                     .arg(humanRate(perSec(server_->bytesIn.load(), lastIn_)));
+                     .arg(humanRate(perSec(servedOut, lastOut_)))
+                     .arg(humanRate(perSec(servedIn, lastIn_)));
     }
-    // Prefer the mount's RAM cache: its byte counters reflect what the kernel
-    // actually moved (cache hits included). Fall back to the raw transport.
     fb::RemoteFs* activeRemote = nullptr;
     if (mount_.active() && mount_.remote()) activeRemote = mount_.remote();
     else if (client_ && client_->connected()) activeRemote = client_.get();

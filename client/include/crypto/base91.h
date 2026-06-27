@@ -7,9 +7,6 @@
 
 namespace fb {
 
-// A shell/URL-friendlier 91-character alphabet: all printable ASCII except
-// whitespace, quotes and backslash. Still true Base91 density, without making
-// copied room/offline strings painful in terminals or JSON.
 inline constexpr char kBase91Alphabet[] =
     "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+,-./:;<=>?@[]^_`{|}~";
 inline constexpr std::size_t kBase91Base = 91;

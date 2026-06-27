@@ -1,13 +1,3 @@
-// Folder Buddies Cloudflare Worker
-//   POST   /create                       store an opaque sealed record
-//   GET    /room?code=<lookup>           fetch the sealed record
-//   DELETE /room?code=<lookup>           delete (X-FB-Owner credential)
-//
-// The KV key is only the public "lookup" half of the share code; the secret
-// half never reaches Cloudflare, so the stored record is undecryptable here.
-// Webapp mode reuses GET /room as a WebSocket upgrade into a Durable Object for
-// encrypted WebRTC signaling. File bytes never touch Cloudflare.
-
 const BASE91 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+,-./:;<=>?@[]^_`{|}~";
 // Public lookup half of a connect code: 4 chars (read-only tier) or 8 (read-write).
 const LOOKUP_LENS = [4, 8];
@@ -190,10 +180,6 @@ function envFlag(value) {
 }
 
 async function verifyWebSocketTurnstile(request, env, token) {
-  // WebSocket signaling must work for native clients too. Native clients cannot
-  // solve browser Turnstile challenges, and privacy/DNS filters can also block
-  // challenges.cloudflare.com in browsers. Keep Turnstile opt-in for WS rooms;
-  // rate limits and message caps remain the default protection.
   const required = envFlag(env.REQUIRE_TURNSTILE_FOR_WEBSOCKET);
   if (!env.TURNSTILE_SECRET_KEY) return { ok: true, disabled: true };
   if (!required && !token) return { ok: true, skipped: true };
@@ -390,5 +376,4 @@ function parseSignal(data) {
 function safeSend(ws, msg) {
   try { ws.send(JSON.stringify(msg)); } catch { /* peer is gone */ }
 }
-
 

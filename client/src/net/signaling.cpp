@@ -42,8 +42,6 @@ constexpr char kPayloadMagic[5] = {'F', 'B', 'Z', 'K', '1'};
 constexpr char kOfflineMagic[5] = {'F', 'B', 'O', 'F', '1'};
 constexpr uint32_t kPayloadVersion = 2;
 
-// Argon2id parameters. Must match the webapp (@noble/hashes) exactly so both
-// sides derive the same wrap key from the secret half of the code.
 constexpr unsigned long long kArgonOps = 3;            // iterations (t)
 constexpr size_t kArgonMem = 64ull * 1024 * 1024;      // 64 MiB (m)
 constexpr size_t kArgonSaltLen = 16;
@@ -108,8 +106,6 @@ bool argon2id_key(const std::string& keyPart, const std::vector<uint8_t>& salt, 
     return true;
 }
 
-// Seal a Token under a fresh random 256-bit key. Returns the key and the
-// ciphertext bundle (MAGIC || nonce || ct || tag).
 void seal_token(const Token& tok, std::vector<uint8_t>& blobKey, std::vector<uint8_t>& bundle) {
     blobKey = random_bytes(32);
     std::vector<uint8_t> plain = serialize_token_payload(tok);
@@ -237,8 +233,6 @@ std::string clean_one_line(std::string s) {
     return out;
 }
 
-// Map a code's total length to its (lookup, secret) split. Returns false for any
-// length that isn't one of the two recognized tiers.
 bool code_split(size_t total, int& lookupLen, int& keyLen) {
     if (total == static_cast<size_t>(kShortCodeLength)) {
         lookupLen = kShortLookupLen; keyLen = kShortKeyPartLen; return true;
@@ -473,8 +467,6 @@ bool FirebaseSignalingClient::create(const CloudRecord& rec, std::string& err) {
     QByteArray resp;
     QNetworkRequest req = firebase_request(rec.lookupId);
 
-    // Realtime Database REST has no anonymous compare-and-set. Check first, then PUT.
-    // A race is still possible, but room collisions are retried and rare enough for fallback use.
     if (!sync_http(req, "GET", {}, status, resp, err)) return false;
     if (status != 200) {
         err = "Firebase fallback room check failed (HTTP " + std::to_string(status) + ")";

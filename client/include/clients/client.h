@@ -1,6 +1,3 @@
-// Folder Buddies — network client. Maintains a pool of authenticated TCP
-// connections and multiplexes synchronous request/response over them so a
-// large transfer on one connection never blocks a metadata call on another.
 #pragma once
 
 #include "common.h"
@@ -30,8 +27,6 @@ public:
     // Returns 0 on success (resp filled) or a positive errno on failure.
     int request(uint16_t op, const std::vector<uint8_t>& payload, std::vector<uint8_t>& resp) override;
 
-    // Callback invoked by the background reader thread when the server pushes
-    // an OP_INVALIDATE message for a path. Set by RamCache to invalidate caches.
     std::function<void(const std::string& path)> onInvalidate;
 
 private:
@@ -47,8 +42,6 @@ private:
         std::thread reader;
         std::mutex wmtx;
         std::mutex pmtx;
-        // Owned via shared_ptr so a reply (or a timed-out request) can never free
-        // a Pending out from under the other thread mid-write/notify.
         std::unordered_map<uint64_t, std::shared_ptr<Pending>> pend;
         std::atomic<uint64_t> nextId{1};
         std::atomic<bool> alive{false};

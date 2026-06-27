@@ -1,7 +1,3 @@
-// Folder Buddies — OS mount abstraction.
-//
-// Linux/macOS use FUSE3. Windows uses Microsoft's native Projected File System
-// (ProjFS), exposed through a drive letter so Explorer treats it like a disk.
 #pragma once
 
 #include "ram_cache.h"
@@ -36,8 +32,6 @@ public:
         onEjected_ = std::move(cb);
     }
 
-    // The RAM-only cache that actually talks to the OS mount layer (wraps the
-    // underlying transport). Byte counters here reflect mount-perceived I/O.
     RemoteFs* remote() const { return cache_.get(); }
 
 private:

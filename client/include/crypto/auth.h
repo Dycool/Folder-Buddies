@@ -1,9 +1,3 @@
-// Folder Buddies — authentication helpers shared by client and server.
-//
-// The code carries a computer-generated `secret` (the password — there is no
-// user-chosen one). Proof of knowledge is an HMAC over both handshake nonces,
-// and the *same* secret derives the per-connection encryption keys, so a passive
-// eavesdropper without the code can neither connect nor read the data.
 #pragma once
 
 #include "crypto.h" // Key256
@@ -41,9 +35,6 @@ inline Key256 to_key256(const QByteArray& b) {
     return k;
 }
 
-// Derive the two directional ChaCha20 keys for one connection from the
-// authenticated handshake. Both peers feed identical material; only the
-// tx/rx assignment differs, so server.tx == client.rx and vice versa.
 inline void derive_session_keys(const QByteArray& authKey, const QByteArray& nonceClient,
                                 const QByteArray& nonceServer, bool isServer, Key256& txKey,
                                 Key256& rxKey) {

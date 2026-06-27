@@ -18,6 +18,9 @@
 #include <cstring>
 #include <filesystem>
 #include <sys/stat.h>
+#ifndef _WIN32
+#  include <sys/statvfs.h>
+#endif
 #include <unistd.h>
 
 // POSIX FUSE aliases. Windows uses src/projfs_mount.cpp instead.
@@ -84,8 +87,8 @@ int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t,
     Reader r(resp.data(), resp.size());
     uint32_t n;
     if (!r.pod(n)) return -EIO;
-    filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
-    filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
+    if (filler(buf, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0)) != 0) return 0;
+    if (filler(buf, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0)) != 0) return 0;
     for (uint32_t i = 0; i < n; ++i) {
         std::string name;
         WireAttr a;
@@ -94,7 +97,7 @@ int fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t,
         fill_stat(stbuf, a);
         fuse_fill_dir_flags fl = static_cast<fuse_fill_dir_flags>(0);
         if (rdflags & FUSE_READDIR_PLUS) fl = FUSE_FILL_DIR_PLUS;
-        filler(buf, name.c_str(), &stbuf, 0, fl);
+        if (filler(buf, name.c_str(), &stbuf, 0, fl) != 0) break;
     }
     return 0;
 }
@@ -113,6 +116,7 @@ int do_open(const char* path, struct fuse_file_info* fi, uint16_t op, fb_mode_t 
     uint64_t fh;
     if (!r.pod(fh)) return -EIO;
     fi->fh = fh;
+    fi->keep_cache = 0;
     return 0;
 }
 
@@ -124,6 +128,7 @@ int fs_create(const char* path, fb_mode_t mode, struct fuse_file_info* fi) {
 }
 
 int fs_read(const char*, char* buf, size_t size, fb_off_t off, struct fuse_file_info* fi) {
+    if (off < 0) return -EINVAL;
     size_t done = 0;
     while (done < size) {
         uint32_t chunk = static_cast<uint32_t>(std::min<size_t>(size - done, kMaxIO));
@@ -134,8 +139,9 @@ int fs_read(const char*, char* buf, size_t size, fb_off_t off, struct fuse_file_
         w.pod(chunk);
         std::vector<uint8_t> resp;
         int st = ctx()->request(OP_READ, w.b, resp);
-        if (st) return -st;
+        if (st) return done ? static_cast<int>(done) : -st;
         if (resp.empty()) break; // EOF
+        if (resp.size() > chunk) return done ? static_cast<int>(done) : -EIO;
         std::memcpy(buf + done, resp.data(), resp.size());
         done += resp.size();
         ctx()->bytesRead += resp.size();
@@ -145,6 +151,7 @@ int fs_read(const char*, char* buf, size_t size, fb_off_t off, struct fuse_file_
 }
 
 int fs_write(const char*, const char* buf, size_t size, fb_off_t off, struct fuse_file_info* fi) {
+    if (off < 0) return -EINVAL;
     size_t done = 0;
     while (done < size) {
         uint32_t chunk = static_cast<uint32_t>(std::min<size_t>(size - done, kMaxIO));
@@ -155,10 +162,11 @@ int fs_write(const char*, const char* buf, size_t size, fb_off_t off, struct fus
         w.raw(buf + done, chunk);
         std::vector<uint8_t> resp;
         int st = ctx()->request(OP_WRITE, w.b, resp);
-        if (st) return -st;
+        if (st) return done ? static_cast<int>(done) : -st;
         Reader r(resp.data(), resp.size());
         uint32_t written;
-        if (!r.pod(written)) return -EIO;
+        if (!r.pod(written) || written > chunk) return done ? static_cast<int>(done) : -EIO;
+        if (written == 0) return done ? static_cast<int>(done) : -EIO;
         done += written;
         ctx()->bytesWritten += written;
         if (written < chunk) break;
@@ -218,6 +226,7 @@ int fs_rename(const char* from, const char* to, unsigned int) {
 }
 
 int fs_truncate(const char* path, off_t size, struct fuse_file_info*) {
+    if (size < 0) return -EINVAL;
     Writer w;
     w.str(path);
     uint64_t s = static_cast<uint64_t>(size);
@@ -281,14 +290,15 @@ int fs_utimens(const char* path, const struct timespec tv[2], struct fuse_file_i
 }
 
 void* fs_init(struct fuse_conn_info* conn, struct fuse_config* cfg) {
-    cfg->kernel_cache = 1;
+    cfg->kernel_cache = 0;
+    cfg->auto_cache = 1;
     cfg->entry_timeout = 1.0;
     cfg->attr_timeout = 1.0;
     cfg->negative_timeout = 1.0;
     cfg->use_ino = 0;
     conn->max_write = kMaxIO;
 #ifdef FUSE_CAP_WRITEBACK_CACHE
-    if (conn->capable & FUSE_CAP_WRITEBACK_CACHE) conn->want |= FUSE_CAP_WRITEBACK_CACHE;
+    conn->want &= ~FUSE_CAP_WRITEBACK_CACHE;
 #endif
 #ifdef FUSE_CAP_PARALLEL_DIROPS
     if (conn->capable & FUSE_CAP_PARALLEL_DIROPS) conn->want |= FUSE_CAP_PARALLEL_DIROPS;
@@ -371,8 +381,6 @@ std::string dedupe_label(const std::string& name) {
     return name;
 }
 #else
-// Reuse the name if the path is free (or just a leftover empty dir); otherwise
-// append -2, -3, … so a second "cool-folder" mounts as "cool-folder-2".
 std::string dedupe_path(const std::string& base, const std::string& name) {
     namespace fs = std::filesystem;
     for (int n = 1; n < 1000; ++n) {
@@ -455,8 +463,6 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     label = dedupe_path("/Volumes", name); // /Volumes is the place disks show up
     mp_ = "/Volumes/" + label;
     std::filesystem::create_directories(mp_, ec);
-    // /Volumes may not be writable (e.g. locked to root:wheel 755); fall back to
-    // a user-writable location so the mount still works.
     if (!std::filesystem::is_directory(mp_)) {
         const char* home = std::getenv("HOME");
         std::string base = std::string(home ? home : "/tmp") + "/FolderBuddies";

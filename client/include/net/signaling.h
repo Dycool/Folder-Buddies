@@ -1,9 +1,3 @@
-// Folder Buddies — Cloudflare-blind share codes and self-contained offline blobs.
-//
-// The host seals the connection Token (ip/port/folder/data-path secret) once.
-// The data-path secret is delivered to the client without the client ever typing
-// a password: either embedded in a long offline blob, or wrapped behind the
-// secret half of a short room code that Cloudflare never receives.
 #pragma once
 
 #include "token.h"
@@ -12,14 +6,6 @@
 
 namespace fb {
 
-// Connect codes come in two tiers, told apart purely by total length so a
-// connecting client needs no out-of-band hint:
-//   * read-only (default): 4-char public lookup + 2-char secret half  ( 6 total)
-//   * read-write:          8-char public lookup + 8-char secret half  (16 total)
-// The host issues the long, ~52-bit tier exactly when it grants write access,
-// because tampering is the higher-stakes capability; read-only stays short for
-// convenience. The lookup is the public Cloudflare/Firebase key; the secret half
-// is never sent to the server.
 constexpr int kShortLookupLen = 4;
 constexpr int kShortKeyPartLen = 2;
 constexpr int kShortCodeLength = kShortLookupLen + kShortKeyPartLen;   // 6
@@ -49,8 +35,6 @@ struct CloudRecord {
     std::string owner;      // delete credential
 };
 
-// Generate a connect code: the long read-write tier when `longCode` is set,
-// otherwise the short read-only tier.
 std::string random_room_code(bool longCode);
 // True for a clean Base91 code of either tier (6 or 16 chars).
 bool looks_like_room_code(const std::string& text);
@@ -88,8 +72,6 @@ public:
 
 class FirebaseSignalingClient {
 public:
-    // Optional native fallback. Runtime env wins over build-time macro.
-    // Example: https://PROJECT.europe-west1.firebasedatabase.app
     static std::string base_url();
     static bool configured();
 
