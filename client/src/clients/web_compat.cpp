@@ -25,6 +25,8 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -57,6 +59,11 @@ namespace {
 namespace fs = std::filesystem;
 constexpr uint32_t kBinMagic = 0x4642494eu; // FBIN, big endian in browser buffers
 constexpr size_t kWebChunk = 64 * 1024;
+
+inline void compat_dbg(const std::string& s) {
+    static const bool on = std::getenv("FB_COMPAT_DEBUG") != nullptr;
+    if (on) { std::fprintf(stderr, "[compat] %s\n", s.c_str()); std::fflush(stderr); }
+}
 
 std::string strip_ws(std::string s) {
     std::string out;
@@ -216,12 +223,9 @@ std::string ws_url_for(const std::string& lookup, const char* role) {
     while (path.endsWith('/')) path.chop(1);
     url.setPath(path + "/room");
 
-    QUrlQuery q;
-    q.addQueryItem("code", QString::fromStdString(lookup));
-    q.addQueryItem("role", QString::fromLatin1(role));
-    q.addQueryItem("web", "1");
-    q.addQueryItem("compat", "native");
-    url.setQuery(q);
+    QString query = QString::fromStdString("code=" + encode_url_query_value(lookup)) +
+                    "&role=" + QString::fromLatin1(role) + "&web=1&compat=native";
+    url.setQuery(query, QUrl::StrictMode);
     return url.toString(QUrl::FullyEncoded).toStdString();
 }
 
@@ -736,18 +740,14 @@ struct WebRtcCompatHost::Impl {
     }
 
     void create_peer(const std::string& peerId) {
+        compat_dbg("host create_peer peer=" + peerId);
         std::lock_guard<std::mutex> lk(mtx);
         rtc::Configuration cfg;
         cfg.iceServers.emplace_back("stun:stun.l.google.com:19302");
         auto pc = std::make_shared<rtc::PeerConnection>(cfg);
-        auto dc = pc->createDataChannel("folderbuddies-files");
-        pcs[peerId] = pc;
-        channels[peerId] = dc;
-        dc->onMessage([this, peerId, dc](std::variant<rtc::binary, rtc::string> message) {
-            if (std::holds_alternative<rtc::string>(message)) on_json(peerId, dc, parse_json_obj(std::get<rtc::string>(message)));
-            else on_binary(std::get<rtc::binary>(message));
-        });
+
         pc->onLocalDescription([this, peerId](rtc::Description desc) {
+            compat_dbg("host sending offer to peer=" + peerId);
             QJsonObject sdp; sdp["type"] = "offer"; sdp["sdp"] = QString::fromStdString(std::string(desc));
             QJsonObject payload; payload["type"] = "offer"; payload["sdp"] = sdp;
             send_signal(peerId, payload);
@@ -757,11 +757,27 @@ struct WebRtcCompatHost::Impl {
             QJsonObject payload; payload["type"] = "candidate"; payload["candidate"] = c;
             send_signal(peerId, payload);
         });
-        pc->setLocalDescription();
+        pc->onStateChange([peerId](rtc::PeerConnection::State s) {
+            compat_dbg("host pc state peer=" + peerId + " state=" + std::to_string(static_cast<int>(s)));
+        });
+        pc->onGatheringStateChange([peerId](rtc::PeerConnection::GatheringState g) {
+            compat_dbg("host gathering peer=" + peerId + " state=" + std::to_string(static_cast<int>(g)));
+        });
+
+        auto dc = pc->createDataChannel("folderbuddies-files");
+        pcs[peerId] = pc;
+        channels[peerId] = dc;
+        dc->onMessage([this, peerId, dc](std::variant<rtc::binary, rtc::string> message) {
+            if (std::holds_alternative<rtc::string>(message)) on_json(peerId, dc, parse_json_obj(std::get<rtc::string>(message)));
+            else on_binary(std::get<rtc::binary>(message));
+        });
+        dc->onOpen([peerId] { compat_dbg("host datachannel OPEN peer=" + peerId); });
     }
 
     void on_signal(const QJsonObject& msg) {
         const QString kind = msg.value("kind").toString();
+        compat_dbg("host on_signal kind=" + kind.toStdString() +
+                   " peer=" + msg.value("peerId").toString().toStdString());
         if (kind == "ready") { live = true; cv.notify_all(); return; }
         if (kind == "error") { std::lock_guard<std::mutex> lk(mtx); wsError = msg.value("error").toString("signaling error").toStdString(); wsClosed = true; cv.notify_all(); return; }
         if (kind == "client-joined") { create_peer(msg.value("peerId").toString().toStdString()); return; }
@@ -944,14 +960,17 @@ bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomC
         });
         impl_->ws->onOpen([this]() { impl_->cv.notify_all(); });
         impl_->ws->onClosed([this]() { impl_->live = false; impl_->wsClosed = true; impl_->cv.notify_all(); });
-        try { impl_->ws->open(ws_url_for(lookup_of(roomCode), "host")); }
+        const std::string wsUrl = ws_url_for(lookup_of(roomCode), "host");
+        compat_dbg("host opening Cloudflare WS: " + wsUrl);
+        try { impl_->ws->open(wsUrl); }
         catch (const std::exception& e) { cloudErr = e.what(); }
         if (cloudErr.empty()) {
             std::unique_lock<std::mutex> lk(impl_->mtx);
             impl_->cv.wait_for(lk, std::chrono::seconds(12), [this]{ return impl_->live.load() || impl_->wsClosed.load() || !impl_->wsError.empty(); });
-            if (impl_->live.load()) return true;
+            if (impl_->live.load()) { compat_dbg("host LIVE via Cloudflare"); return true; }
             cloudErr = impl_->wsError.empty() ? "Cloudflare WebRTC compatibility signaling did not become ready" : impl_->wsError;
         }
+        compat_dbg("host Cloudflare WS failed: " + cloudErr);
         try { if (impl_->ws) impl_->ws->close(); } catch (...) {}
         impl_->ws.reset();
     } else {
@@ -959,9 +978,11 @@ bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomC
     }
 
     if (FirebaseSignalingClient::configured()) {
+        compat_dbg("host falling back to Firebase relay");
         impl_->fbRelay = std::make_shared<FirebaseCompatRelay>();
         if (impl_->fbRelay->startHost(lookup_of(roomCode), [this](const QJsonObject& msg) { impl_->on_signal(msg); }, err)) {
             impl_->live = true;
+            compat_dbg("host LIVE via Firebase");
             return true;
         }
         err = cloudErr + "; Firebase WebRTC compatibility fallback failed: " + err;

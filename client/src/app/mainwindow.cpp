@@ -472,7 +472,6 @@ void MainWindow::toggleConnect() {
         client_ = std::make_unique<fb::Client>();
         if (fb::start_mounting(*client_, mount_, tok, mountpoint, err)) {
             mounted = true;
-            connectStatus_->setText("Connected.");
         } else {
             client_->disconnect();
             client_.reset();
@@ -486,7 +485,6 @@ void MainWindow::toggleConnect() {
             if (mount_.start(webClient_.get(), "", name, webClient_->canWrite(), err)) {
                 mountpoint = mount_.mountpoint();
                 mounted = true;
-                connectStatus_->setText("Connected.");
             }
         }
         if (!mounted) { webClient_->disconnect(); webClient_.reset(); }
@@ -497,6 +495,12 @@ void MainWindow::toggleConnect() {
         return;
     }
 
+    QString displayedMount = QString::fromStdString(mountpoint);
+    if (displayedMount.size() > 1 &&
+        (displayedMount.endsWith('/') || displayedMount.endsWith('\\'))) {
+        displayedMount.chop(1);
+    }
+    connectStatus_->setText(QString("Connected - Mounted in %1").arg(displayedMount));
     setConnected(true);
 }
 

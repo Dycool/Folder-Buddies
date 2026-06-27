@@ -82,7 +82,7 @@ static void applyBundledWindowsQtStyle() {
     // qmodernwindowsstyle exposes these keys when the Qt Windows style plugin is
     // available. In a static build, importing/linking the plugin is not enough
     // to guarantee Qt picks it as the default, so choose it explicitly.
-    for (const char* preferred : {"windows11", "windowsvista", "Windows", "Fusion"}) {
+    for (const char* preferred : {"windows11", "windowsvista", "Fusion", "Windows"}) {
         const QString wanted = QString::fromLatin1(preferred);
         for (const QString& key : available) {
             if (key.compare(wanted, Qt::CaseInsensitive) != 0) continue;

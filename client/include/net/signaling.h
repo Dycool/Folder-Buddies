@@ -57,6 +57,8 @@ bool looks_like_room_code(const std::string& text);
 // The public lookup half (Cloudflare/Firebase key) of a connect code.
 std::string room_lookup_id(const std::string& code);
 
+std::string encode_url_query_value(const std::string& value);
+
 // Seal `tok` into a self-contained offline blob (embeds its own key).
 bool seal_for_offline(const Token& tok, std::string& offlineBlob, std::string& err);
 

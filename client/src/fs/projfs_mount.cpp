@@ -93,14 +93,6 @@ std::string sanitize(const std::string& name) {
     return s;
 }
 
-std::string free_drive_letter() {
-    DWORD mask = ::GetLogicalDrives();
-    for (char c = 'Z'; c >= 'D'; --c) {
-        if (!(mask & (1u << (c - 'A')))) return std::string(1, c) + ":";
-    }
-    return {};
-}
-
 std::string dedupe_path(const std::string& base, const std::string& name) {
     namespace fs = std::filesystem;
     // Always return a path that does not exist yet. We must NOT reuse an existing
@@ -171,6 +163,67 @@ void clear_drive_label(const std::string& drive) {
     ::RegDeleteKeyW(HKEY_CURRENT_USER, base.c_str()); // no-op unless now empty
 }
 
+bool allocate_drive_mapping(const std::wstring& target, const std::string& label,
+                            std::string& drive, std::wstring& driveName, std::string& err) {
+    HANDLE mutex = ::CreateMutexW(nullptr, FALSE,
+                                  L"Local\\FolderBuddies.DriveLetterAllocation");
+    if (!mutex) {
+        err = windows_error("CreateMutex for drive allocation failed");
+        return false;
+    }
+
+    DWORD wait = ::WaitForSingleObject(mutex, INFINITE);
+    if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED) {
+        DWORD waitError = ::GetLastError();
+        ::CloseHandle(mutex);
+        ::SetLastError(waitError);
+        err = windows_error("waiting for drive allocation mutex failed");
+        return false;
+    }
+
+    DWORD mask = ::GetLogicalDrives();
+    DWORD maskError = mask == 0 ? ::GetLastError() : ERROR_SUCCESS;
+    DWORD lastMappingError = ERROR_SUCCESS;
+    bool mapped = false;
+
+    if (mask != 0) {
+        for (char c = 'D'; c <= 'Z'; ++c) {
+            if (mask & (1u << (c - 'A'))) continue;
+
+            std::string candidate(1, c);
+            candidate += ':';
+            std::wstring candidateName = widen(candidate);
+            if (drive_mapping_exists(candidateName)) continue;
+
+            set_drive_label(candidate, label);
+            if (::DefineDosDeviceW(DDD_RAW_TARGET_PATH, candidateName.c_str(), target.c_str())) {
+                drive = std::move(candidate);
+                driveName = std::move(candidateName);
+                mapped = true;
+                break;
+            }
+
+            lastMappingError = ::GetLastError();
+            clear_drive_label(candidate);
+        }
+    }
+
+    ::ReleaseMutex(mutex);
+    ::CloseHandle(mutex);
+
+    if (mapped) return true;
+    if (mask == 0) {
+        ::SetLastError(maskError);
+        err = windows_error("GetLogicalDrives failed");
+    } else if (lastMappingError != ERROR_SUCCESS) {
+        err = "failed to map any available drive letter (last Windows error " +
+              std::to_string(lastMappingError) + ")";
+    } else {
+        err = "no free drive letter is available from D: through Z:";
+    }
+    return false;
+}
+
 LARGE_INTEGER unix_to_filetime(int64_t unixSeconds) {
     LARGE_INTEGER li{};
     li.QuadPart = (unixSeconds + 11644473600LL) * 10000000LL;
@@ -195,13 +248,20 @@ struct DirEntry {
     PRJ_FILE_BASIC_INFO info{};
 };
 
+struct EnumSession {
+    std::vector<DirEntry> entries;
+    size_t cursor = 0;
+    bool haveExpr = false;
+    std::wstring expr;
+};
+
 struct ProjfsState {
     RemoteFs* client = nullptr;
     PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT ctx = nullptr;
     bool allowWrites = false;
     std::filesystem::path root;
     std::mutex enumMtx;
-    std::unordered_map<std::string, std::vector<DirEntry>> enumerations;
+    std::unordered_map<std::string, std::unique_ptr<EnumSession>> enumerations;
 };
 
 HRESULT status_to_hresult(int st) {
@@ -392,8 +452,10 @@ HRESULT CALLBACK start_enum_cb(const PRJ_CALLBACK_DATA* data, const GUID* enumId
     std::vector<DirEntry> entries;
     HRESULT hr = query_dir(st, narrow(data->FilePathName), entries);
     if (FAILED(hr)) return hr;
+    auto session = std::make_unique<EnumSession>();
+    session->entries = std::move(entries);
     std::lock_guard<std::mutex> lk(st->enumMtx);
-    st->enumerations[enum_key(*enumId)] = std::move(entries);
+    st->enumerations[enum_key(*enumId)] = std::move(session);
     return S_OK;
 }
 
@@ -407,19 +469,29 @@ HRESULT CALLBACK end_enum_cb(const PRJ_CALLBACK_DATA* data, const GUID* enumId) 
 HRESULT CALLBACK get_enum_cb(const PRJ_CALLBACK_DATA* data, const GUID* enumId,
                              PCWSTR searchExpression, PRJ_DIR_ENTRY_BUFFER_HANDLE dirEntryBufferHandle) {
     auto* st = static_cast<ProjfsState*>(data->InstanceContext);
-    std::vector<DirEntry> entries;
+    EnumSession* s = nullptr;
     {
         std::lock_guard<std::mutex> lk(st->enumMtx);
         auto it = st->enumerations.find(enum_key(*enumId));
         if (it == st->enumerations.end()) return HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER);
-        entries = it->second;
+        s = it->second.get();
     }
-    for (const auto& e : entries) {
-        if (searchExpression && !fb::projfs::FileNameMatch(e.name.c_str(), searchExpression)) continue;
-        HRESULT hr = fb::projfs::FillDirEntryBuffer(e.name.c_str(), const_cast<PRJ_FILE_BASIC_INFO*>(&e.info),
-                                           dirEntryBufferHandle);
+    const bool restart = (data->Flags & PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN) != 0;
+    if (restart || !s->haveExpr) {
+        s->cursor = 0;
+        s->haveExpr = true;
+        s->expr = searchExpression ? searchExpression : L"";
+    }
+    const wchar_t* expr = s->expr.empty() ? nullptr : s->expr.c_str();
+
+    while (s->cursor < s->entries.size()) {
+        const DirEntry& e = s->entries[s->cursor];
+        if (expr && !fb::projfs::FileNameMatch(e.name.c_str(), expr)) { ++s->cursor; continue; }
+        HRESULT hr = fb::projfs::FillDirEntryBuffer(
+            e.name.c_str(), const_cast<PRJ_FILE_BASIC_INFO*>(&e.info), dirEntryBufferHandle);
         if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER)) return S_OK;
         if (FAILED(hr)) return hr;
+        ++s->cursor;
     }
     return S_OK;
 }
@@ -635,34 +707,24 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
         return false;
     }
 
-    std::string drive = free_drive_letter();
-    if (drive.empty()) {
-        fb::projfs::StopVirtualizing(state->ctx);
-        delete state;
-        cache_.reset();
-        err = "no free drive letter to mount the share";
-        return false;
-    }
-
-    driveName_ = widen(drive);
     driveTarget_ = dos_device_target(backingRoot);
-    if (!::DefineDosDeviceW(DDD_RAW_TARGET_PATH, driveName_.c_str(), driveTarget_.c_str())) {
+    std::string drive;
+    if (!allocate_drive_mapping(driveTarget_, shareLabel, drive, driveName_, err)) {
         fb::projfs::StopVirtualizing(state->ctx);
         delete state;
         cache_.reset();
         driveName_.clear();
         driveTarget_.clear();
-        err = windows_error("DefineDosDevice failed");
         return false;
     }
 
     mp_ = drive + "\\";
     backend_ = state;
     active_.store(true);
-    // Give the drive the hosted folder's name before Explorer enumerates it, so
-    // "This PC" shows e.g. "MyFolder (Z:)" instead of a generic "Local Disk".
-    set_drive_label(drive, shareLabel);
-    ::SHChangeNotify(SHCNE_DRIVEADD, SHCNF_PATHW, drive_root(driveName_).c_str(), nullptr);
+    std::wstring root = drive_root(driveName_);
+    ::SHChangeNotify(SHCNE_DRIVEADD, SHCNF_PATHW, root.c_str(), nullptr);
+    ::SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, root.c_str(), nullptr);
+    ::SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, root.c_str(), nullptr);
 
     thread_ = std::thread([this] {
         while (!stopping_.load()) {

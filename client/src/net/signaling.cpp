@@ -272,6 +272,10 @@ std::string room_lookup_id(const std::string& code) {
     return code.substr(0, static_cast<size_t>(lookupLen));
 }
 
+std::string encode_url_query_value(const std::string& value) {
+    return QUrl::toPercentEncoding(QString::fromStdString(value)).toStdString();
+}
+
 bool seal_for_offline(const Token& tok, std::string& offlineBlob, std::string& err) {
     std::vector<uint8_t> blobKey, bundle;
     seal_token(tok, blobKey, bundle);
@@ -403,9 +407,7 @@ bool SignalingClient::get(const std::string& lookupId, std::string& salt, std::s
                           std::string& payload, std::string& err) {
     if (!configured()) { err = "Cloudflare signaling URL is not configured"; return false; }
     QUrl url(QString::fromStdString(base_url() + "/room"));
-    QUrlQuery q;
-    q.addQueryItem("code", QString::fromStdString(lookupId));
-    url.setQuery(q);
+    url.setQuery(QString::fromStdString("code=" + encode_url_query_value(lookupId)), QUrl::StrictMode);
     QNetworkRequest req(url);
     req.setRawHeader("Accept", "application/json");
 
@@ -435,9 +437,7 @@ bool SignalingClient::get(const std::string& lookupId, std::string& salt, std::s
 bool SignalingClient::remove(const std::string& lookupId, const std::string& owner, std::string& err) {
     if (!configured()) { err = "Cloudflare signaling URL is not configured"; return false; }
     QUrl url(QString::fromStdString(base_url() + "/room"));
-    QUrlQuery q;
-    q.addQueryItem("code", QString::fromStdString(lookupId));
-    url.setQuery(q);
+    url.setQuery(QString::fromStdString("code=" + encode_url_query_value(lookupId)), QUrl::StrictMode);
     QNetworkRequest req(url);
     req.setRawHeader("Accept", "application/json");
     req.setRawHeader("X-FB-Owner", QByteArray::fromStdString(owner));

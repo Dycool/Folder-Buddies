@@ -1,6 +1,11 @@
 # Build outputs
 /build/
+/build-win/
 /cmake-build-*/
+/qt/
+/_cache/
+/_deps/
+aqtinstall.log
 CMakeFiles/
 CMakeCache.txt
 *.o

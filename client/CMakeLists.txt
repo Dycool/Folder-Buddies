@@ -74,6 +74,23 @@ if(WIN32)
         endif()
       endif()
     endforeach()
+    foreach(_known
+        Qt6::QWindowsIntegrationPlugin
+        Qt6::QModernWindowsStylePlugin
+        Qt6::QWindowsVistaStylePlugin
+        Qt6::QICOPlugin
+        Qt6::QGifPlugin
+        Qt6::QJpegPlugin
+        Qt6::QSvgPlugin)
+      if(TARGET ${_known})
+        list(APPEND _fb_plugin_targets ${_known})
+        if(_known MATCHES "Style")
+          list(APPEND _fb_style_plugins ${_known})
+        endif()
+      endif()
+    endforeach()
+    list(REMOVE_DUPLICATES _fb_plugin_targets)
+    list(REMOVE_DUPLICATES _fb_style_plugins)
     if(NOT _fb_plugin_targets)
       message(FATAL_ERROR
         "No Qt *Plugin imported targets are defined for the static build, so no "
@@ -83,13 +100,13 @@ if(WIN32)
     qt6_import_plugins(folderbuddies INCLUDE ${_fb_plugin_targets})
     message(STATUS "  Imported plugin targets: ${_fb_plugin_targets}")
     if(NOT _fb_style_plugins)
-      message(FATAL_ERROR
-        "No native Qt style plugin was found among the imported plugin targets, "
-        "so the static build would fall back to the basic style (rough text, "
-        "unchecked checkboxes). Refusing to produce a broken binary.\n"
+      message(WARNING
+        "No native Qt style plugin target was found for the static build; it will "
+        "render with the Fusion style instead of the native Windows style.\n"
         "Plugin targets found were:\n  ${_fb_plugin_targets}")
+    else()
+      message(STATUS "  Native style plugin(s): ${_fb_style_plugins}")
     endif()
-    message(STATUS "  Native style plugin(s): ${_fb_style_plugins}")
   endif()
 endif()
 
@@ -293,4 +310,24 @@ if(FB_BUILD_TESTS)
     target_link_libraries(fb_signaling_selftest PRIVATE ws2_32)
   endif()
   add_test(NAME signaling_selftest COMMAND fb_signaling_selftest)
+
+  if(WIN32)
+    add_executable(fb_projfs_mount_selftest
+      src/fs/projfs_mount_selftest.cpp
+      src/fs/projfs_mount.cpp
+      src/fs/projfs_loader.cpp
+      src/fs/fuse_backend.cpp
+      src/fs/ram_cache.cpp)
+    target_include_directories(fb_projfs_mount_selftest PRIVATE ${FB_INCLUDE_DIRS})
+    target_compile_definitions(fb_projfs_mount_selftest PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(fb_projfs_mount_selftest PRIVATE
+      Qt6::Core Threads::Threads shell32 advapi32 Rpcrt4 user32)
+    if(MSVC)
+      target_compile_options(fb_projfs_mount_selftest PRIVATE /EHsc)
+    endif()
+    add_test(NAME projfs_mount_selftest COMMAND fb_projfs_mount_selftest)
+    set_tests_properties(projfs_mount_selftest PROPERTIES
+      RUN_SERIAL TRUE
+      SKIP_RETURN_CODE 77)
+  endif()
 endif()
