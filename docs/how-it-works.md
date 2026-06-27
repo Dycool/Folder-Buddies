@@ -144,7 +144,7 @@ Uses **libfuse3** (`FUSE_USE_VERSION 31`) with the high-level API. Multi-threade
 
 Uses the native **Projected File System** shipped with Windows. The Provider pattern callbacks hydrate files on demand: placeholders appear immediately with metadata, content is fetched only when an application reads it. If ProjFS is disabled, the app requests UAC elevation and runs `dism /online /enable-feature /featurename:Client-ProjFS /all /norestart`.
 
-The projected root is exposed as a drive letter (`Z:` through `D:`). If that drive mapping is removed/ejected, Folder Buddies stops the ProjFS provider and disconnects.
+The projected root is exposed as a drive letter (`Z:` through `D:`), labeled with the hosted folder's name so Explorer shows it as `<folder-name> (Z:)` — matching how the FUSE backends name the mount on Linux/macOS. If that drive mapping is removed/ejected, Folder Buddies stops the ProjFS provider and disconnects.
 
 ### macOS — FUSE-T
 

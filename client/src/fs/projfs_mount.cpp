@@ -146,6 +146,31 @@ std::string windows_error(const char* what) {
     return std::string(what) + " (Windows error " + std::to_string(::GetLastError()) + ")";
 }
 
+
+std::wstring drive_icon_key(wchar_t letter) {
+    return std::wstring(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\DriveIcons\\") + letter;
+}
+
+void set_drive_label(const std::string& drive, const std::string& label) {
+    if (drive.empty() || label.empty()) return;
+    std::wstring sub = drive_icon_key(static_cast<wchar_t>(drive[0])) + L"\\DefaultLabel";
+    HKEY key = nullptr;
+    if (::RegCreateKeyExW(HKEY_CURRENT_USER, sub.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr,
+                          &key, nullptr) != ERROR_SUCCESS)
+        return;
+    std::wstring wlabel = widen(label);
+    ::RegSetValueExW(key, nullptr, 0, REG_SZ, reinterpret_cast<const BYTE*>(wlabel.c_str()),
+                     static_cast<DWORD>((wlabel.size() + 1) * sizeof(wchar_t)));
+    ::RegCloseKey(key);
+}
+
+void clear_drive_label(const std::string& drive) {
+    if (drive.empty()) return;
+    std::wstring base = drive_icon_key(static_cast<wchar_t>(drive[0]));
+    ::RegDeleteKeyW(HKEY_CURRENT_USER, (base + L"\\DefaultLabel").c_str());
+    ::RegDeleteKeyW(HKEY_CURRENT_USER, base.c_str()); // no-op unless now empty
+}
+
 LARGE_INTEGER unix_to_filetime(int64_t unixSeconds) {
     LARGE_INTEGER li{};
     li.QuadPart = (unixSeconds + 11644473600LL) * 10000000LL;
@@ -570,7 +595,8 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     std::string base = default_backing_base(mountBase);
     std::error_code ec;
     std::filesystem::create_directories(base, ec);
-    std::string backingRoot = dedupe_path(base, sanitize(volname));
+    std::string shareLabel = sanitize(volname); // shown as the drive's name in Explorer
+    std::string backingRoot = dedupe_path(base, shareLabel);
     std::filesystem::create_directories(backingRoot, ec);
     if (ec) { err = "failed to create ProjFS root: " + backingRoot; return false; }
 
@@ -633,6 +659,9 @@ bool Mount::start(RemoteFs* client, const std::string& mountBase, const std::str
     mp_ = drive + "\\";
     backend_ = state;
     active_.store(true);
+    // Give the drive the hosted folder's name before Explorer enumerates it, so
+    // "This PC" shows e.g. "MyFolder (Z:)" instead of a generic "Local Disk".
+    set_drive_label(drive, shareLabel);
     ::SHChangeNotify(SHCNE_DRIVEADD, SHCNF_PATHW, drive_root(driveName_).c_str(), nullptr);
 
     thread_ = std::thread([this] {
@@ -653,6 +682,7 @@ void Mount::stop() {
 
     if (!driveName_.empty()) {
         std::wstring root = drive_root(driveName_);
+        clear_drive_label(narrow_raw(driveName_.c_str()));
         ::DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE | DDD_RAW_TARGET_PATH,
                            driveName_.c_str(), driveTarget_.empty() ? nullptr : driveTarget_.c_str());
         ::SHChangeNotify(SHCNE_DRIVEREMOVED, SHCNF_PATHW, root.c_str(), nullptr);
