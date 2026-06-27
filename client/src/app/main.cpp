@@ -77,6 +77,9 @@ static bool userRequestedQtStyle(int argc, char** argv) {
 }
 
 static void applyBundledWindowsQtStyle() {
+#ifdef FB_STATIC_QT_WINDOWS11_STYLE
+    if (QStyle* style = QStyleFactory::create("windows11")) QApplication::setStyle(style);
+#else
     const QStringList available = QStyleFactory::keys();
 
     // qmodernwindowsstyle exposes these keys when the Qt Windows style plugin is
@@ -92,6 +95,7 @@ static void applyBundledWindowsQtStyle() {
             }
         }
     }
+#endif
 }
 #endif
 
@@ -109,7 +113,11 @@ int main(int argc, char** argv) {
 
     QApplication app(argc, argv);
 #ifdef _WIN32
+#  ifdef FB_STATIC_QT_WINDOWS11_STYLE
+    applyBundledWindowsQtStyle();
+#  else
     if (!explicitQtStyle) applyBundledWindowsQtStyle();
+#  endif
 #endif
     QApplication::setApplicationName("Folder Buddies");
     QApplication::setOrganizationName("FolderBuddies");

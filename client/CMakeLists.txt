@@ -62,51 +62,42 @@ if(WIN32)
     get_property(_fb_imported_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
                  PROPERTY IMPORTED_TARGETS)
     set(_fb_plugin_targets "")
-    set(_fb_style_plugins "")
     foreach(_t ${_fb_imported_targets})
       if(_t MATCHES "Plugin$")
-        if(_t MATCHES "Direct2DIntegration")
+        if(_t MATCHES "Direct2DIntegration" OR _t MATCHES "StylePlugin$")
           continue()
         endif()
         list(APPEND _fb_plugin_targets ${_t})
-        if(_t MATCHES "Style")
-          list(APPEND _fb_style_plugins ${_t})
-        endif()
       endif()
     endforeach()
     foreach(_known
         Qt6::QWindowsIntegrationPlugin
-        Qt6::QModernWindowsStylePlugin
-        Qt6::QWindowsVistaStylePlugin
         Qt6::QICOPlugin
         Qt6::QGifPlugin
         Qt6::QJpegPlugin
         Qt6::QSvgPlugin)
       if(TARGET ${_known})
         list(APPEND _fb_plugin_targets ${_known})
-        if(_known MATCHES "Style")
-          list(APPEND _fb_style_plugins ${_known})
-        endif()
       endif()
     endforeach()
     list(REMOVE_DUPLICATES _fb_plugin_targets)
-    list(REMOVE_DUPLICATES _fb_style_plugins)
+    if(NOT TARGET Qt6::QModernWindowsStylePlugin)
+      message(FATAL_ERROR
+        "The static Windows build requires Qt6::QModernWindowsStylePlugin so it "
+        "can use the same windows11 style as the dynamic build.")
+    endif()
     if(NOT _fb_plugin_targets)
       message(FATAL_ERROR
         "No Qt *Plugin imported targets are defined for the static build, so no "
-        "plugins (platform, native style, image formats) can be linked in.\n"
+        "plugins (platform and image formats) can be linked in.\n"
         "All imported targets were:\n  ${_fb_imported_targets}")
     endif()
-    qt6_import_plugins(folderbuddies INCLUDE ${_fb_plugin_targets})
+    qt6_import_plugins(folderbuddies
+      INCLUDE ${_fb_plugin_targets}
+      INCLUDE_BY_TYPE styles Qt6::QModernWindowsStylePlugin)
+    target_compile_definitions(folderbuddies PRIVATE FB_STATIC_QT_WINDOWS11_STYLE)
     message(STATUS "  Imported plugin targets: ${_fb_plugin_targets}")
-    if(NOT _fb_style_plugins)
-      message(WARNING
-        "No native Qt style plugin target was found for the static build; it will "
-        "render with the Fusion style instead of the native Windows style.\n"
-        "Plugin targets found were:\n  ${_fb_plugin_targets}")
-    else()
-      message(STATUS "  Native style plugin(s): ${_fb_style_plugins}")
-    endif()
+    message(STATUS "  Static Qt style: windows11 (Qt6::QModernWindowsStylePlugin)")
   endif()
 endif()
 
