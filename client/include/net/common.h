@@ -136,7 +136,7 @@ struct WireStatvfs {
 
 static_assert(sizeof(MsgHeader) == 20, "cross-platform message header ABI changed");
 static_assert(sizeof(WireAttr) == 64, "cross-platform file attribute ABI changed");
-static_assert(sizeof(WireStatvfs) == 72, "cross-platform filesystem-stat ABI changed");
+static_assert(sizeof(WireStatvfs) == 64, "cross-platform filesystem-stat ABI changed");
 
 // ---- payload (de)serialization -------------------------------------------
 
