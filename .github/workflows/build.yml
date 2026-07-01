@@ -339,7 +339,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: _cache/vcpkg-bincache
-          key: vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-libdatachannel-openssl-${{ env.VCPKG_COMMIT }}
+          key: vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-libdatachannel-openssl-pkgconf-${{ env.VCPKG_COMMIT }}
           restore-keys: |
             vcpkg-windows-static-qtbase-core-gui-widgets-network-miniupnpc-libsodium-libdatachannel-
 
@@ -362,6 +362,7 @@ jobs:
             "miniupnpc:x64-windows-static" `
             "libsodium:x64-windows-static" `
             "openssl:x64-windows-static" `
+            "pkgconf:x64-windows" `
             "libdatachannel:x64-windows-static" `
             --clean-after-build
 

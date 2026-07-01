@@ -144,6 +144,16 @@ option(FB_NATIVE_QUIC "Build native ICE/STUN + QUIC transport" ON)
 if(FB_NATIVE_QUIC)
   include(FetchContent)
   find_package(OpenSSL REQUIRED)
+  if(WIN32 AND NOT PKG_CONFIG_EXECUTABLE)
+    # Picotls uses FindPkgConfig even when OpenSSL came from vcpkg. pkgconf is
+    # installed as a vcpkg host tool and is not necessarily added to PATH.
+    find_program(PKG_CONFIG_EXECUTABLE
+      NAMES pkgconf pkg-config
+      HINTS
+        "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/pkgconf"
+        "${VCPKG_INSTALLED_DIR}/x64-windows/tools/pkgconf"
+        "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/tools/pkgconf")
+  endif()
   find_package(LibJuice CONFIG QUIET)
   if(NOT TARGET LibJuice::LibJuiceStatic AND NOT TARGET LibJuice::LibJuice)
     set(NO_TESTS ON CACHE BOOL "" FORCE)

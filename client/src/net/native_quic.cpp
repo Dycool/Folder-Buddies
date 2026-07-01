@@ -172,7 +172,7 @@ struct NativeQuicEndpoint::Impl : std::enable_shared_from_this<Impl> {
     std::mutex streamsMutex;
     bool stopping = false;
     bool workPending = false;
-    bool iceConnected = false;
+    std::atomic<bool> iceConnected{false};
     bool established = false;
     std::atomic<bool> failed{false};
     std::string failure;
@@ -192,9 +192,15 @@ struct NativeQuicEndpoint::Impl : std::enable_shared_from_this<Impl> {
         auto* self = static_cast<Impl*>(ptr);
         {
             std::lock_guard<std::mutex> lock(self->mutex);
-            if (state == JUICE_STATE_CONNECTED || state == JUICE_STATE_COMPLETED)
-                self->iceConnected = true;
-            else if (state == JUICE_STATE_FAILED) {
+            if (state == JUICE_STATE_CONNECTED || state == JUICE_STATE_COMPLETED) {
+                self->iceConnected.store(true);
+            } else {
+                // ICE may return to negotiation while resolving a role
+                // conflict. Do not let a transient CONNECTED notification
+                // authorize QUIC packets after the selected path was revoked.
+                self->iceConnected.store(false);
+            }
+            if (state == JUICE_STATE_FAILED) {
                 self->failure = "ICE/STUN could not establish a direct UDP path";
                 self->failed = true;
             }
@@ -426,7 +432,7 @@ struct NativeQuicEndpoint::Impl : std::enable_shared_from_this<Impl> {
     }
 
     void flush_quic() {
-        if (!quic || !ice) return;
+        if (!quic || !ice || !iceConnected.load()) return;
         while (!pendingSends.empty()) {
             const auto& packet = pendingSends.front();
             const int result = juice_send(
@@ -474,7 +480,7 @@ struct NativeQuicEndpoint::Impl : std::enable_shared_from_this<Impl> {
                 if (stopping) break;
                 workPending = false;
                 incoming.swap(datagrams);
-                startClient = iceConnected && role == Role::Client && !conn;
+                startClient = iceConnected.load() && role == Role::Client && !conn;
             }
             if (startClient) create_client_connection();
             for (auto& packet : incoming) process_datagram(packet);
