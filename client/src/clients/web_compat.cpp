@@ -683,26 +683,38 @@ struct WebRtcCompatHost::Impl {
                     e["mtime"] = static_cast<double>(QDateTime::currentMSecsSinceEpoch());
                     entries.append(e);
                 }
-                QJsonObject out; out["t"] = "listResult"; out["id"] = id; out["path"] = QString::fromStdString(path); out["entries"] = entries; out["write"] = allowWrites;
+                QJsonObject out; out["t"] = "listResult"; out["id"] = id; out["path"] = QString::fromStdString(path); out["entries"] = entries; out["write"] = allowWrites; out["ranges"] = true;
                 dc->send(json_compact(out).toStdString());
                 return;
             }
             if (t == "download") {
                 fs::path abs;
                 if (!resolve(msg.value("path").toString().toStdString(), abs) || !fs::is_regular_file(abs)) throw std::runtime_error("Not a file");
-                uint64_t size = fs::file_size(abs);
-                QJsonObject start; start["t"] = "fileStart"; start["id"] = id; start["name"] = QString::fromStdString(abs.filename().string()); start["size"] = static_cast<double>(size);
+                const uint64_t size = fs::file_size(abs);
+                // Optional byte range so remote mounts can read huge files
+                // block by block instead of transferring the whole file.
+                uint64_t offset = static_cast<uint64_t>(std::max<double>(0.0, msg.value("offset").toDouble(0)));
+                if (offset > size) offset = size;
+                uint64_t remaining = size - offset;
+                if (msg.contains("length")) {
+                    const uint64_t want =
+                        static_cast<uint64_t>(std::max<double>(0.0, msg.value("length").toDouble(0)));
+                    remaining = std::min(remaining, want);
+                }
+                QJsonObject start; start["t"] = "fileStart"; start["id"] = id; start["name"] = QString::fromStdString(abs.filename().string()); start["size"] = static_cast<double>(remaining); start["offset"] = static_cast<double>(offset);
                 dc->send(json_compact(start).toStdString());
                 std::ifstream f(abs, std::ios::binary);
+                f.seekg(static_cast<std::streamoff>(offset));
                 std::vector<uint8_t> buf(kWebChunk);
-                while (f) {
-                    f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+                while (f && remaining > 0) {
+                    const size_t want = static_cast<size_t>(std::min<uint64_t>(remaining, buf.size()));
+                    f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(want));
                     std::streamsize got = f.gcount();
-                    if (got > 0) {
-                        const auto n = static_cast<size_t>(got);
-                        send_bin(dc, static_cast<uint32_t>(id), buf.data(), n);
-                        addBytesOut(static_cast<uint64_t>(n));
-                    }
+                    if (got <= 0) break;
+                    const auto n = static_cast<size_t>(got);
+                    send_bin(dc, static_cast<uint32_t>(id), buf.data(), n);
+                    addBytesOut(static_cast<uint64_t>(n));
+                    remaining -= static_cast<uint64_t>(n);
                 }
                 QJsonObject end; end["t"] = "fileEnd"; end["id"] = id; dc->send(json_compact(end).toStdString());
                 return;
@@ -980,6 +992,7 @@ struct WebRtcRemoteClient::Impl {
     uint64_t nextFh = 1;
     uint32_t nextId = 100;
     std::atomic<bool> canWrite{false};
+    std::atomic<bool> canRange{false}; // host supports ranged "download" requests
 
     uint32_t send_json_wait(QJsonObject obj, QJsonObject& out, int timeoutMs = 30000) {
         uint32_t id = 0;
@@ -1018,7 +1031,10 @@ struct WebRtcRemoteClient::Impl {
     void on_json(const QJsonObject& o) {
         std::lock_guard<std::mutex> lk(mtx);
         QString t = o.value("t").toString();
-        if (t == "listResult") canWrite = o.value("write").toBool(canWrite.load());
+        if (t == "listResult") {
+            canWrite = o.value("write").toBool(canWrite.load());
+            if (o.contains("ranges")) canRange = o.value("ranges").toBool(false);
+        }
         if (t == "fileStart") return;
         replies[static_cast<uint32_t>(o.value("id").toInt())] = o;
         cv.notify_all();
@@ -1043,8 +1059,20 @@ struct WebRtcRemoteClient::Impl {
         return 0;
     }
     int fetch_file(const std::string& path, std::vector<uint8_t>& data) {
-        uint32_t id = 0;
         QJsonObject req; req["t"] = "download"; req["path"] = QString::fromStdString(path);
+        return send_download(req, data);
+    }
+    // Fetch only [offset, offset+length) from a range-capable host, so huge
+    // files never have to be buffered whole on either side.
+    int fetch_range(const std::string& path, uint64_t offset, uint32_t length,
+                    std::vector<uint8_t>& data) {
+        QJsonObject req; req["t"] = "download"; req["path"] = QString::fromStdString(path);
+        req["offset"] = static_cast<double>(offset);
+        req["length"] = static_cast<double>(length);
+        return send_download(req, data);
+    }
+    int send_download(QJsonObject req, std::vector<uint8_t>& data) {
+        uint32_t id = 0;
         {
             std::lock_guard<std::mutex> slk(sendMtx);
             id = nextId++;
@@ -1191,6 +1219,7 @@ bool WebRtcRemoteClient::connect(const std::string& webCodeOrRoom, std::string& 
         impl_->open = false;
         impl_->dead = false;
         impl_->canWrite = false;
+        impl_->canRange = false;
         impl_->replies.clear();
         impl_->downloads.clear();
     }
@@ -1347,18 +1376,29 @@ int WebRtcRemoteClient::request(uint16_t op, const std::vector<uint8_t>& payload
             resp = std::move(w.b); return 0;
         }
         if (op == OP_OPEN || op == OP_CREATE) {
-            std::string path; int32_t flags; uint32_t mode; r.str(path); r.pod(flags); r.pod(mode);
+            std::string path; int32_t flags = 0; uint32_t mode = 0;
+            if (!r.str(path) || !r.pod(flags) || !r.pod(mode)) return EINVAL;
             const bool writeIntent = op == OP_CREATE ||
                                       ((flags & FB_O_ACCMODE) == FB_O_WRONLY) ||
                                       ((flags & FB_O_ACCMODE) == FB_O_RDWR) ||
                                       (flags & (FB_O_CREAT | FB_O_TRUNC | FB_O_APPEND));
             if (writeIntent && !impl_->canWrite.load()) return EROFS;
+            // O_TRUNC discards existing content. O_CREAT without O_TRUNC must
+            // preserve an existing file, so only start from an empty buffer
+            // when the file does not exist yet; otherwise lazy-load on first
+            // read/write.
+            bool startEmpty = (flags & FB_O_TRUNC) != 0;
+            if (!startEmpty && (op == OP_CREATE || (flags & FB_O_CREAT))) {
+                Writer probe; probe.str(path);
+                std::vector<uint8_t> attr;
+                startEmpty = request(OP_GETATTR, probe.b, attr) == ENOENT;
+            }
             uint64_t fh = 0;
             {
                 std::lock_guard<std::mutex> lk(impl_->fsMtx);
                 fh = impl_->nextFh++;
                 WebRtcRemoteClient::Impl::Fh f; f.path = path;
-                if (op == OP_CREATE || (flags & (FB_O_CREAT | FB_O_TRUNC))) {
+                if (startEmpty) {
                     f.loaded = true;
                     f.dirty = true;
                 }
@@ -1367,7 +1407,8 @@ int WebRtcRemoteClient::request(uint16_t op, const std::vector<uint8_t>& payload
             Writer w; w.pod(fh); resp = std::move(w.b); return 0;
         }
         if (op == OP_READ) {
-            uint64_t fh, off; uint32_t size; r.pod(fh); r.pod(off); r.pod(size);
+            uint64_t fh = 0, off = 0; uint32_t size = 0;
+            if (!r.pod(fh) || !r.pod(off) || !r.pod(size)) return EINVAL;
             std::string path;
             bool loaded = false;
             {
@@ -1376,6 +1417,19 @@ int WebRtcRemoteClient::request(uint16_t op, const std::vector<uint8_t>& payload
                 if (it == impl_->fhs.end()) return EBADF;
                 path = it->second.path;
                 loaded = it->second.loaded;
+            }
+            // Range-capable host and nothing buffered locally: stream just the
+            // requested window instead of materialising the whole file. The
+            // RamCache layered above turns these into cached 1 MiB blocks
+            // with read-ahead, so huge files stay cheap on both sides.
+            if (!loaded && impl_->canRange.load()) {
+                std::vector<uint8_t> data;
+                int st = impl_->fetch_range(path, off, size, data);
+                if (st) return st;
+                if (data.size() > size) data.resize(size);
+                bytesRead += data.size();
+                resp = std::move(data);
+                return 0;
             }
             if (!loaded) {
                 std::vector<uint8_t> data;

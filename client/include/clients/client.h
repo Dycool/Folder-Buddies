@@ -31,9 +31,18 @@ public:
     // Returns 0 on success (resp filled) or a positive errno on failure.
     int request(uint16_t op, const std::vector<uint8_t>& payload, std::vector<uint8_t>& resp) override;
 
-    std::function<void(const std::string& path)> onInvalidate;
+    // Thread-safe: the callback fires from reader threads, so it is guarded
+    // by a mutex and can be cleared before its captures are destroyed.
+    // Clearing blocks until any in-flight invocation has finished.
+    void setInvalidateCallback(std::function<void(const std::string& path)> cb) {
+        std::lock_guard<std::mutex> lk(invalidateMtx_);
+        onInvalidate_ = std::move(cb);
+    }
 
 private:
+    std::mutex invalidateMtx_;
+    std::function<void(const std::string& path)> onInvalidate_;
+
     struct Pending {
         std::mutex m;
         std::condition_variable cv;

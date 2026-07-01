@@ -277,11 +277,26 @@ int fs_chmod(const char* path, mode_t mode, struct fuse_file_info*) {
     return st ? -st : 0;
 }
 
-int fs_utimens(const char* path, const struct timespec tv[2], struct fuse_file_info*) {
+int fs_utimens(const char* path, const FB_TIMESPEC tv[2], struct fuse_file_info*) {
+    // POSIX: a null tv (or UTIME_NOW) means "set to the current time".
+    const int64_t now =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    auto pick = [now](decltype(tv[0])& ts) -> int64_t {
+#ifdef UTIME_NOW
+        if (ts.tv_nsec == UTIME_NOW) return now;
+#endif
+        return static_cast<int64_t>(ts.tv_sec);
+    };
+#ifdef UTIME_OMIT
+    // The protocol only carries mtime; if the caller asked to leave it
+    // untouched, don't clobber it with a bogus value.
+    if (tv && tv[1].tv_nsec == UTIME_OMIT) return 0;
+#endif
     Writer w;
     w.str(path);
-    int64_t atime = tv ? tv[0].tv_sec : 0;
-    int64_t mtime = tv ? tv[1].tv_sec : 0;
+    int64_t atime = tv ? pick(tv[0]) : now;
+    int64_t mtime = tv ? pick(tv[1]) : now;
     w.pod(atime);
     w.pod(mtime);
     std::vector<uint8_t> resp;

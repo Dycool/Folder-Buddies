@@ -440,7 +440,18 @@ import { argon2id } from "./vendor/noble/argon2.js";
 
   function randomRoom(longCode = false) {
     const n = longCode ? LONG_CODE_LEN : SHORT_CODE_LEN;
-    return [...randomBytes(n)].map((b) => BASE91[b % BASE91.length]).join("");
+    // Rejection sampling: 256 % 91 != 0, so a plain modulo would bias the
+    // secret half of the code toward the first 74 alphabet characters.
+    const limit = 256 - (256 % BASE91.length);
+    let out = "";
+    while (out.length < n) {
+      for (const b of randomBytes(n)) {
+        if (b >= limit) continue;
+        out += BASE91[b % BASE91.length];
+        if (out.length === n) break;
+      }
+    }
+    return out;
   }
 
   function concatBytes(...parts) {
@@ -1341,15 +1352,23 @@ import { argon2id } from "./vendor/noble/argon2.js";
         entries.push(entry);
       }
       entries.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "directory" ? -1 : 1));
-      safeSendJson(dc, { t: "listResult", id: msg.id, path, entries, write: !!state.allowWrites });
+      safeSendJson(dc, { t: "listResult", id: msg.id, path, entries, write: !!state.allowWrites, ranges: true });
       return;
     }
     if (msg.t === "download") {
       const path = normalizePath(msg.path || "/");
       const fileHandle = await fileHandleFor(path);
       const file = await fileHandle.getFile();
-      safeSendJson(dc, { t: "fileStart", id: msg.id, name: file.name, size: file.size, mtime: file.lastModified });
-      await streamFile(dc, msg.id, file);
+      // Optional byte range so clients can read huge files incrementally
+      // instead of pulling the whole file into memory.
+      const offset = Math.min(Math.max(0, Math.floor(Number(msg.offset) || 0)), file.size);
+      const length = msg.length === undefined ? undefined
+        : Math.max(0, Math.floor(Number(msg.length) || 0));
+      const part = (offset > 0 || length !== undefined)
+        ? file.slice(offset, length === undefined ? file.size : Math.min(file.size, offset + length))
+        : file;
+      safeSendJson(dc, { t: "fileStart", id: msg.id, name: file.name, size: part.size, offset, mtime: file.lastModified });
+      await streamFile(dc, msg.id, part);
       safeSendJson(dc, { t: "fileEnd", id: msg.id });
       return;
     }

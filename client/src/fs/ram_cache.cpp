@@ -270,15 +270,18 @@ struct RamCache::Impl {
         unsigned workers = std::clamp<unsigned>(hw ? hw : 4, 2, 8);
         pool = std::make_unique<PrefetchPool>(workers);
         if (auto* cl = dynamic_cast<Client*>(inner)) {
-            cl->onInvalidate = [this](const std::string& path) {
+            cl->setInvalidateCallback([this](const std::string& path) {
                 invalidateFile(path);
                 dirErase(path);
                 dirErase(parent_of(path));
-            };
+            });
         }
     }
 
     ~Impl() {
+        // The transport can outlive this cache; detach the invalidation
+        // callback (waits for any in-flight invocation) before teardown.
+        if (auto* cl = dynamic_cast<Client*>(inner)) cl->setInvalidateCallback({});
         pool.reset(); // join prefetch threads before any cache state is destroyed
         if (debug) dump_stats();
     }

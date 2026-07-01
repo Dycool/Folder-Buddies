@@ -209,6 +209,24 @@ if(FB_NATIVE_QUIC)
       set_target_properties(${_ptls_tool} PROPERTIES EXCLUDE_FROM_ALL TRUE)
     endif()
   endforeach()
+  # Picotls keeps several assertion-only result variables in its release C
+  # sources. NDEBUG removes their readers, producing harmless warning noise.
+  # Keep our own warnings intact and silence only those two upstream classes.
+  foreach(_ptls_lib picotls-core picotls-minicrypto picotls-openssl)
+    if(TARGET ${_ptls_lib})
+      if(MSVC)
+        # Picotls unconditionally adds Unix flags (-std=c99, -g, -Wall) and
+        # enables thousands of diagnostics in its own C/OpenSSL headers under
+        # MSVC. Treat the fetched dependency as external; warnings in Folder
+        # Buddies targets remain enabled.
+        target_compile_options(${_ptls_lib} PRIVATE /w /wd9002)
+      elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${_ptls_lib} PRIVATE
+          -Wno-unused-variable
+          -Wno-unused-but-set-variable)
+      endif()
+    endif()
+  endforeach()
   target_link_libraries(folderbuddies PRIVATE
     ${_fb_juice_target} picoquic::picoquic-core OpenSSL::Crypto)
   target_compile_definitions(folderbuddies PRIVATE FB_HAVE_NATIVE_QUIC)
@@ -371,6 +389,45 @@ if(FB_BUILD_TESTS)
     target_link_libraries(fb_signaling_selftest PRIVATE ws2_32)
   endif()
   add_test(NAME signaling_selftest COMMAND fb_signaling_selftest)
+
+  # End-to-end protocol test: real Server + Client over loopback TCP with the
+  # encrypted framing. Covers filesystem ops, path traversal rejection,
+  # read-only enforcement, malformed payloads, and invalidation broadcast.
+  add_executable(fb_server_selftest
+    src/server/server_selftest.cpp
+    src/server/server.cpp
+    src/clients/client.cpp
+    src/net/stream.cpp
+    src/crypto/crypto.cpp
+    src/crypto/base91.cpp
+    src/crypto/token.cpp)
+  target_include_directories(fb_server_selftest PRIVATE ${FB_INCLUDE_DIRS})
+  target_link_libraries(fb_server_selftest PRIVATE Qt6::Core Threads::Threads)
+  if(WIN32)
+    target_compile_definitions(fb_server_selftest PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(fb_server_selftest PRIVATE ws2_32)
+  endif()
+  add_test(NAME server_selftest COMMAND fb_server_selftest)
+  set_tests_properties(server_selftest PROPERTIES TIMEOUT 120)
+
+  # RamCache behavior against a fake in-memory remote: block-boundary reads,
+  # metadata/directory/negative caching, and write-through invalidation.
+  add_executable(fb_cache_selftest
+    src/fs/ram_cache_selftest.cpp
+    src/fs/ram_cache.cpp
+    src/clients/client.cpp
+    src/net/stream.cpp
+    src/crypto/crypto.cpp
+    src/crypto/base91.cpp
+    src/crypto/token.cpp)
+  target_include_directories(fb_cache_selftest PRIVATE ${FB_INCLUDE_DIRS})
+  target_link_libraries(fb_cache_selftest PRIVATE Qt6::Core Threads::Threads)
+  if(WIN32)
+    target_compile_definitions(fb_cache_selftest PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(fb_cache_selftest PRIVATE ws2_32)
+  endif()
+  add_test(NAME cache_selftest COMMAND fb_cache_selftest)
+  set_tests_properties(cache_selftest PROPERTIES TIMEOUT 60)
 
   if(FB_NATIVE_QUIC)
     add_executable(fb_native_quic_selftest

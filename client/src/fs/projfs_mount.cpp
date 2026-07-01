@@ -478,13 +478,19 @@ HRESULT CALLBACK get_enum_cb(const PRJ_CALLBACK_DATA* data, const GUID* enumId,
     }
     const wchar_t* expr = s->expr.empty() ? nullptr : s->expr.c_str();
 
+    bool wroteEntry = false;
     while (s->cursor < s->entries.size()) {
         const DirEntry& e = s->entries[s->cursor];
         if (expr && !fb::projfs::FileNameMatch(e.name.c_str(), expr)) { ++s->cursor; continue; }
         HRESULT hr = fb::projfs::FillDirEntryBuffer(
             e.name.c_str(), const_cast<PRJ_FILE_BASIC_INFO*>(&e.info), dirEntryBufferHandle);
-        if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER)) return S_OK;
+        if (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER)) {
+            // Per ProjFS contract: report the error if even the first entry
+            // does not fit; S_OK here would silently truncate the listing.
+            return wroteEntry ? S_OK : hr;
+        }
         if (FAILED(hr)) return hr;
+        wroteEntry = true;
         ++s->cursor;
     }
     return S_OK;

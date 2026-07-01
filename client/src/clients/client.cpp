@@ -162,6 +162,7 @@ bool Client::handshake(Conn& c, const Token& tok, std::string& err) {
 }
 
 bool Client::connect(const Token& tok, int nconns, std::string& err) {
+    disconnect(); // drop any previous session before reusing this client
     net_startup();
     auto rb = random_bytes(16);
     std::memcpy(clientId_, rb.data(), 16);
@@ -226,10 +227,15 @@ void Client::readerLoop(Conn* c) {
     MsgHeader h;
     std::vector<uint8_t> payload;
     while (c->alive.load() && c->chan.recv(*c->stream, h, payload)) {
-        if (h.op == OP_INVALIDATE && onInvalidate) {
+        if (h.op == OP_INVALIDATE) {
             Reader r(payload.data(), payload.size());
             std::string path;
-            if (r.str(path)) onInvalidate(path);
+            if (r.str(path)) {
+                // Held across the call so setInvalidateCallback({}) can wait
+                // out an in-flight invocation before its captures die.
+                std::lock_guard<std::mutex> lk(invalidateMtx_);
+                if (onInvalidate_) onInvalidate_(path);
+            }
             continue;
         }
         std::shared_ptr<Pending> p;

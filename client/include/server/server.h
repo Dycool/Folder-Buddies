@@ -8,6 +8,7 @@
 #include <QString>
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -40,10 +41,20 @@ public:
     int clientCount();
 
 private:
+    // Each session drains its own bounded invalidation queue on a dedicated
+    // sender thread, so one stalled client socket can never block request
+    // handling or invalidation delivery for the other sessions. The queue is
+    // best-effort: client caches self-heal via short TTLs, so overflow drops
+    // the oldest entry instead of blocking.
     struct BroadcastSession {
-        ByteStream* stream;
-        SecureChannel* chan;
-        std::mutex* sendMutex;
+        ByteStream* stream = nullptr;
+        SecureChannel* chan = nullptr;
+        std::mutex* sendMutex = nullptr;
+        std::mutex qMtx;
+        std::condition_variable qCv;
+        std::deque<std::string> queue; // guarded by qMtx
+        bool stopping = false;         // guarded by qMtx
+        std::thread worker;
     };
     void broadcastInvalidate(const std::string& path);
     void registerSession(ByteStream* stream, SecureChannel* chan, std::mutex* sendMutex);
@@ -78,7 +89,7 @@ private:
     std::unordered_map<uint64_t, std::string> fhPaths_; // guarded by fhMtx_
 
     std::mutex broadcastMtx_;
-    std::vector<BroadcastSession> broadcastSessions_;
+    std::vector<std::shared_ptr<BroadcastSession>> broadcastSessions_;
 };
 
 } // namespace fb

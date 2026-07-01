@@ -95,6 +95,15 @@ static bool path_within(const fs::path& root, const fs::path& candidate) {
            (c[r.size()] == '/' || c[r.size()] == '\\' || c[r.size()] == sep);
 }
 
+// Constant-time comparison for authentication proofs: never let the number
+// of matching prefix bytes influence how long the check takes.
+static bool ct_equal_bytes(const char* a, const char* b, size_t n) {
+    unsigned char diff = 0;
+    for (size_t i = 0; i < n; ++i)
+        diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+    return diff == 0;
+}
+
 static bool is_boundary_reparse_point(const fs::path& p) {
 #ifdef _WIN32
     DWORD attrs = ::GetFileAttributesW(widen(p.string()).c_str());
@@ -213,6 +222,15 @@ bool Server::start(const std::string& folder, int port, std::string& err) {
 
 void Server::stop() {
     if (!running_.exchange(false)) return;
+    if (listen_ != FB_BAD_SOCKET) {
+        // close() alone does not reliably wake a thread blocked in accept()
+        // on POSIX; shut the socket down first.
+#ifdef _WIN32
+        ::shutdown(listen_, SD_BOTH);
+#else
+        ::shutdown(listen_, SHUT_RDWR);
+#endif
+    }
     close_socket(listen_);
     listen_ = FB_BAD_SOCKET;
     std::vector<std::shared_ptr<ByteStream>> streams;
@@ -279,7 +297,8 @@ bool Server::handshake(ByteStream& stream, std::string& clientId, SecureChannel&
     QByteArray proof(reinterpret_cast<const char*>(payload.data()), static_cast<int>(payload.size()));
     QByteArray expect = auth_proof(authKey_, nonceCQ, nonceSQ);
     if (proof.size() != expect.size() ||
-        ::memcmp(proof.constData(), expect.constData(), expect.size()) != 0) {
+        !ct_equal_bytes(proof.constData(), expect.constData(),
+                        static_cast<size_t>(expect.size()))) {
         send_message(stream, OP_AUTH_FAIL, 0, h.req_id, nullptr, 0);
         return false;
     }
@@ -353,7 +372,7 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         switch (h.op) {
         case OP_GETATTR: {
             std::string path, abs;
-            r.str(path);
+            if (!r.str(path)) { status = EINVAL; break; }
             if (!resolve(path, abs)) { status = EACCES; break; }
             WireAttr a;
             if (!fill_attr(abs, a)) { status = ENOENT; break; }
@@ -362,7 +381,7 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         }
         case OP_READDIR: {
             std::string path, abs;
-            r.str(path);
+            if (!r.str(path)) { status = EINVAL; break; }
             if (!resolve(path, abs)) { status = EACCES; break; }
             std::error_code ec;
             std::vector<std::pair<std::string, WireAttr>> entries;
@@ -381,11 +400,9 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         case OP_OPEN:
         case OP_CREATE: {
             std::string path, abs;
-            int32_t pflags;
-            uint32_t mode;
-            r.str(path);
-            r.pod(pflags);
-            r.pod(mode);
+            int32_t pflags = 0;
+            uint32_t mode = 0;
+            if (!r.str(path) || !r.pod(pflags) || !r.pod(mode)) { status = EINVAL; break; }
             bool opensForWrite = h.op == OP_CREATE ||
                                   ((pflags & FB_O_ACCMODE) == FB_O_WRONLY) ||
                                   ((pflags & FB_O_ACCMODE) == FB_O_RDWR) ||
@@ -395,7 +412,8 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
             auto fh = std::make_shared<FileHandle>();
             if (!fh->open(abs, from_portable_flags(pflags), mode)) {
 #ifdef _WIN32
-                status = fs::exists(abs) ? EACCES : ENOENT;
+                std::error_code exErr;
+                status = fs::exists(abs, exErr) ? EACCES : ENOENT;
 #else
                 status = errno ? errno : EIO;
 #endif
@@ -412,11 +430,9 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
             break;
         }
         case OP_READ: {
-            uint64_t fhid, off;
-            uint32_t size;
-            r.pod(fhid);
-            r.pod(off);
-            r.pod(size);
+            uint64_t fhid = 0, off = 0;
+            uint32_t size = 0;
+            if (!r.pod(fhid) || !r.pod(off) || !r.pod(size)) { status = EINVAL; break; }
             if (size > kMaxIO) size = kMaxIO;
             std::shared_ptr<FileHandle> fh;
             {
@@ -434,9 +450,8 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         }
         case OP_WRITE: {
             if (denyIfReadOnly()) break;
-            uint64_t fhid, off;
-            r.pod(fhid);
-            r.pod(off);
+            uint64_t fhid = 0, off = 0;
+            if (!r.pod(fhid) || !r.pod(off)) { status = EINVAL; break; }
             uint32_t n = static_cast<uint32_t>(r.e - r.p);
             std::string writePath;
             std::shared_ptr<FileHandle> fh;
@@ -457,16 +472,16 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
             break;
         }
         case OP_RELEASE: {
-            uint64_t fhid;
-            r.pod(fhid);
+            uint64_t fhid = 0;
+            if (!r.pod(fhid)) { status = EINVAL; break; }
             std::lock_guard<std::mutex> lk(fhMtx_);
             handles_.erase(fhid);
             fhPaths_.erase(fhid);
             break;
         }
         case OP_FSYNC: {
-            uint64_t fhid;
-            r.pod(fhid);
+            uint64_t fhid = 0;
+            if (!r.pod(fhid)) { status = EINVAL; break; }
             std::shared_ptr<FileHandle> fh;
             {
                 std::lock_guard<std::mutex> lk(fhMtx_);
@@ -481,9 +496,8 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         case OP_MKDIR: {
             if (denyIfReadOnly()) break;
             std::string path, abs;
-            uint32_t mode;
-            r.str(path);
-            r.pod(mode);
+            uint32_t mode = 0;
+            if (!r.str(path) || !r.pod(mode)) { status = EINVAL; break; }
             if (!resolve(path, abs)) { status = EACCES; break; }
             std::error_code ec;
             if (!fs::create_directory(abs, ec)) status = ec ? EIO : EEXIST;
@@ -494,7 +508,7 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         case OP_RMDIR: {
             if (denyIfReadOnly()) break;
             std::string path, abs;
-            r.str(path);
+            if (!r.str(path)) { status = EINVAL; break; }
             if (!resolve(path, abs)) { status = EACCES; break; }
             std::error_code ec;
             if (!fs::remove(abs, ec)) status = ec ? EIO : ENOENT;
@@ -504,8 +518,7 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         case OP_RENAME: {
             if (denyIfReadOnly()) break;
             std::string from, to, afrom, ato;
-            r.str(from);
-            r.str(to);
+            if (!r.str(from) || !r.str(to)) { status = EINVAL; break; }
             if (!resolve(from, afrom) || !resolve(to, ato)) { status = EACCES; break; }
             std::error_code ec;
             fs::rename(afrom, ato, ec);
@@ -516,9 +529,8 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         case OP_TRUNCATE: {
             if (denyIfReadOnly()) break;
             std::string path, abs;
-            uint64_t size;
-            r.str(path);
-            r.pod(size);
+            uint64_t size = 0;
+            if (!r.str(path) || !r.pod(size)) { status = EINVAL; break; }
             if (!resolve(path, abs)) { status = EACCES; break; }
             std::error_code ec;
             fs::resize_file(abs, size, ec);
@@ -528,7 +540,7 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         }
         case OP_STATFS: {
             std::string path, abs;
-            r.str(path);
+            if (!r.str(path)) { status = EINVAL; break; }
             if (!resolve(path, abs)) { status = EACCES; break; }
             std::error_code ec;
             fs::space_info si = fs::space(abs, ec);
@@ -544,9 +556,8 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         }
         case OP_ACCESS: {
             std::string path, abs;
-            uint32_t mode;
-            r.str(path);
-            r.pod(mode);
+            uint32_t mode = 0;
+            if (!r.str(path) || !r.pod(mode)) { status = EINVAL; break; }
             if (!allowWrites && (mode & 2u)) { status = EROFS; break; }
             if (!resolve(path, abs)) { status = EACCES; break; }
             if (!fs::exists(abs)) status = ENOENT;
@@ -555,9 +566,8 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         case OP_CHMOD: {
             if (denyIfReadOnly()) break;
             std::string path, abs;
-            uint32_t mode;
-            r.str(path);
-            r.pod(mode);
+            uint32_t mode = 0;
+            if (!r.str(path) || !r.pod(mode)) { status = EINVAL; break; }
             if (!resolve(path, abs)) { status = EACCES; break; }
 #ifndef _WIN32
             if (::chmod(abs.c_str(), mode) != 0) status = errno;
@@ -568,14 +578,18 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         case OP_UTIMENS: {
             if (denyIfReadOnly()) break;
             std::string path, abs;
-            int64_t atime, mtime;
-            r.str(path);
-            r.pod(atime);
-            r.pod(mtime);
+            int64_t atime = 0, mtime = 0;
+            if (!r.str(path) || !r.pod(atime) || !r.pod(mtime)) { status = EINVAL; break; }
             if (!resolve(path, abs)) { status = EACCES; break; }
             std::error_code ec;
-            fs::last_write_time(
-                abs, fs::file_time_type(std::chrono::seconds(mtime)), ec);
+            // mtime is Unix seconds, but file_clock's epoch is not the Unix
+            // epoch (1601 on MSVC, 2174 on libstdc++); anchor on "now" in
+            // both clocks instead of constructing file_time_type directly.
+            const auto want = std::chrono::sys_seconds(std::chrono::seconds(mtime));
+            const auto fileTime = fs::file_time_type::clock::now() +
+                std::chrono::duration_cast<fs::file_time_type::duration>(
+                    want - std::chrono::system_clock::now());
+            fs::last_write_time(abs, fileTime, ec);
             (void)atime;
             if (ec) status = EIO;
             if (status == 0) broadcastInvalidate(path);
@@ -594,6 +608,9 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
         }
     }
 
+    // Close before unregistering: unblocks this session's invalidation
+    // sender if it is stalled mid-write, so joining it cannot hang.
+    stream->close();
     unregisterSession(stream.get());
     if (authed) {
         bool clientRemoved = false;
@@ -618,26 +635,73 @@ void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket
 
 // ---- cross-client invalidation broadcast -----------------------------------
 
+namespace {
+// Invalidations are advisory (client caches expire via TTL within seconds),
+// so a slow consumer sheds the oldest entries instead of blocking anyone.
+constexpr size_t kMaxQueuedInvalidations = 256;
+} // namespace
+
 void Server::registerSession(ByteStream* stream, SecureChannel* chan, std::mutex* sendMutex) {
+    auto bs = std::make_shared<BroadcastSession>();
+    bs->stream = stream;
+    bs->chan = chan;
+    bs->sendMutex = sendMutex;
+    bs->worker = std::thread([bs] {
+        std::unique_lock<std::mutex> lk(bs->qMtx);
+        for (;;) {
+            bs->qCv.wait(lk, [&] { return bs->stopping || !bs->queue.empty(); });
+            if (bs->stopping) break;
+            std::string path = std::move(bs->queue.front());
+            bs->queue.pop_front();
+            lk.unlock();
+            Writer w;
+            w.str(path);
+            {
+                // Only this session's send lock: a stalled socket here blocks
+                // nothing but this session's own invalidation sender.
+                std::lock_guard<std::mutex> sendLock(*bs->sendMutex);
+                bs->chan->send(*bs->stream, OP_INVALIDATE, 0, 0, w.b.data(),
+                               static_cast<uint32_t>(w.b.size()));
+            }
+            lk.lock();
+        }
+    });
     std::lock_guard<std::mutex> lk(broadcastMtx_);
-    broadcastSessions_.push_back({stream, chan, sendMutex});
+    broadcastSessions_.push_back(std::move(bs));
 }
 
 void Server::unregisterSession(ByteStream* stream) {
-    std::lock_guard<std::mutex> lk(broadcastMtx_);
-    auto it = std::remove_if(broadcastSessions_.begin(), broadcastSessions_.end(),
-        [stream](const BroadcastSession& bs) { return bs.stream == stream; });
-    broadcastSessions_.erase(it, broadcastSessions_.end());
+    std::shared_ptr<BroadcastSession> victim;
+    {
+        std::lock_guard<std::mutex> lk(broadcastMtx_);
+        auto it = std::find_if(broadcastSessions_.begin(), broadcastSessions_.end(),
+            [stream](const std::shared_ptr<BroadcastSession>& bs) { return bs->stream == stream; });
+        if (it != broadcastSessions_.end()) {
+            victim = *it;
+            broadcastSessions_.erase(it);
+        }
+    }
+    if (!victim) return;
+    {
+        std::lock_guard<std::mutex> lk(victim->qMtx);
+        victim->stopping = true;
+    }
+    victim->qCv.notify_all();
+    // The caller closes the stream before unregistering, so a sender blocked
+    // mid-write is released and this join cannot hang.
+    if (victim->worker.joinable()) victim->worker.join();
 }
 
 void Server::broadcastInvalidate(const std::string& path) {
-    Writer w;
-    w.str(path);
     std::lock_guard<std::mutex> lk(broadcastMtx_);
     for (auto& bs : broadcastSessions_) {
-        std::lock_guard<std::mutex> sendLock(*bs.sendMutex);
-        bs.chan->send(*bs.stream, OP_INVALIDATE, 0, 0, w.b.data(),
-                      static_cast<uint32_t>(w.b.size()));
+        {
+            std::lock_guard<std::mutex> qlk(bs->qMtx);
+            if (bs->stopping) continue;
+            if (bs->queue.size() >= kMaxQueuedInvalidations) bs->queue.pop_front();
+            bs->queue.push_back(path);
+        }
+        bs->qCv.notify_one();
     }
 }
 

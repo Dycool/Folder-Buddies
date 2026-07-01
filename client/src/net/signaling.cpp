@@ -246,11 +246,20 @@ bool code_split(size_t total, int& lookupLen, int& keyLen) {
 } // namespace
 
 std::string random_room_code(bool longCode) {
-    int n = longCode ? kLongCodeLength : kShortCodeLength;
-    std::vector<uint8_t> rb = random_bytes(static_cast<size_t>(n));
+    const int n = longCode ? kLongCodeLength : kShortCodeLength;
     std::string code;
     code.reserve(static_cast<size_t>(n));
-    for (uint8_t b : rb) code.push_back(kBase91Alphabet[b % kBase91Base]);
+    // Rejection sampling: 256 % 91 != 0, so a plain modulo would bias the
+    // secret half of the code toward the first 74 alphabet characters.
+    constexpr uint8_t kLimit = static_cast<uint8_t>(256 - (256 % kBase91Base));
+    while (static_cast<int>(code.size()) < n) {
+        std::vector<uint8_t> rb = random_bytes(static_cast<size_t>(n));
+        for (uint8_t b : rb) {
+            if (b >= kLimit) continue;
+            code.push_back(kBase91Alphabet[b % kBase91Base]);
+            if (static_cast<int>(code.size()) == n) break;
+        }
+    }
     return code;
 }
 

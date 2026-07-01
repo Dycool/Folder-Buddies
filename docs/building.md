@@ -115,6 +115,15 @@ cmake --build build --target fb_crypto_selftest
 ctest --test-dir build --output-on-failure
 ```
 
-Two tests are included:
+The test suite includes:
 - **crypto_selftest** — AEAD encrypt/decrypt against RFC 8439 vectors.
 - **signaling_selftest** — Room code and offline blob round-trips.
+- **server_selftest** — End-to-end protocol test: a real `Server` and `Client`
+  over loopback TCP with encrypted framing. Covers every filesystem op,
+  path-traversal rejection, read-only enforcement, malformed payload
+  handling, mtime round-trips, invalidation broadcast, and auth failure.
+- **cache_selftest** — `RamCache` against a fake in-memory remote:
+  block-boundary reads, metadata/directory/negative caching, and
+  write-through invalidation.
+- **native_quic_selftest** — QUIC/ICE loopback transport (when built).
+- **projfs_mount_selftest** — Windows ProjFS mount smoke test (Windows only).
