@@ -2,6 +2,7 @@
 #pragma once
 
 #include <atomic>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -27,6 +28,16 @@ using socket_t = int;
 #endif
 
 namespace fb {
+
+// The native protocol deliberately uses one stable wire ABI on every desktop
+// target. Windows x64, Linux x64/arm64, and macOS x64/arm64 are little-endian;
+// reject an unsupported architecture at compile time instead of connecting and
+// corrupting fields silently. All values placed on the wire use fixed-width
+// integer types, and wire records below are packed explicitly.
+static_assert(std::endian::native == std::endian::little,
+              "Folder Buddies native wire protocol requires little-endian targets");
+static_assert(sizeof(uint16_t) == 2 && sizeof(uint32_t) == 4 && sizeof(uint64_t) == 8,
+              "Folder Buddies native wire protocol requires exact-width integers");
 
 // Reliable ordered byte stream used by the wire protocol. TCP and native
 // QUIC streams both implement this interface, keeping framing, authentication,
@@ -122,6 +133,10 @@ struct WireStatvfs {
     uint64_t namemax;
 };
 #pragma pack(pop)
+
+static_assert(sizeof(MsgHeader) == 20, "cross-platform message header ABI changed");
+static_assert(sizeof(WireAttr) == 64, "cross-platform file attribute ABI changed");
+static_assert(sizeof(WireStatvfs) == 72, "cross-platform filesystem-stat ABI changed");
 
 // ---- payload (de)serialization -------------------------------------------
 

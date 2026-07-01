@@ -10,8 +10,9 @@
 
 namespace fb {
 
-// Native-only QUIC endpoint. libjuice performs ICE/STUN and carries quiche's
-// UDP datagrams over the selected direct candidate pair. No TURN server is
+// Native-only, cross-platform QUIC endpoint. libjuice performs ICE/STUN and
+// carries picoquic datagrams over the selected direct candidate pair. The SDP
+// and QUIC wire formats are independent of the host OS. No TURN server is
 // configured, so application data can never be relayed.
 class NativeQuicEndpoint {
 public:
