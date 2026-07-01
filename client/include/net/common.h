@@ -1,8 +1,10 @@
 // Folder Buddies — shared wire protocol, framing, and cross-platform socket helpers.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -25,6 +27,30 @@ using socket_t = int;
 #endif
 
 namespace fb {
+
+// Reliable ordered byte stream used by the wire protocol. TCP and native
+// QUIC streams both implement this interface, keeping framing, authentication,
+// and filesystem operations transport-independent.
+class ByteStream {
+public:
+    virtual ~ByteStream() = default;
+    virtual bool read(void* data, size_t size) = 0;
+    virtual bool write(const void* data, size_t size) = 0;
+    virtual void close() = 0;
+};
+
+class SocketByteStream final : public ByteStream {
+public:
+    explicit SocketByteStream(socket_t socket) : socket_(socket) {}
+    ~SocketByteStream() override { close(); }
+    bool read(void* data, size_t size) override;
+    bool write(const void* data, size_t size) override;
+    void close() override;
+    socket_t socket() const { return socket_.load(); }
+
+private:
+    std::atomic<socket_t> socket_{FB_BAD_SOCKET};
+};
 
 constexpr uint32_t kMagic = 0x46424459; // "FBDY"
 constexpr uint32_t kProtocolVersion = 2; // v2: post-handshake ChaCha20-Poly1305
@@ -173,6 +199,14 @@ inline bool send_all(socket_t s, const void* buf, size_t n) {
     return true;
 }
 
+inline bool recv_all(ByteStream& stream, void* buf, size_t n) {
+    return stream.read(buf, n);
+}
+
+inline bool send_all(ByteStream& stream, const void* buf, size_t n) {
+    return stream.write(buf, n);
+}
+
 inline void close_socket(socket_t s) {
     if (s == FB_BAD_SOCKET) return;
 #ifdef _WIN32
@@ -220,6 +254,20 @@ inline bool send_message(socket_t s, uint16_t op, int16_t status, uint64_t req_i
     if (!send_all(s, &h, sizeof(h))) return false;
     if (len && !send_all(s, payload, len)) return false;
     return true;
+}
+
+inline bool recv_message(ByteStream& stream, MsgHeader& h, std::vector<uint8_t>& payload) {
+    if (!stream.read(&h, sizeof(h))) return false;
+    if (h.magic != kMagic || h.length > kMaxHandshakeMsg) return false;
+    payload.resize(h.length);
+    return !h.length || stream.read(payload.data(), h.length);
+}
+
+inline bool send_message(ByteStream& stream, uint16_t op, int16_t status, uint64_t req_id,
+                         const uint8_t* payload, uint32_t len) {
+    MsgHeader h{kMagic, op, status, req_id, len};
+    if (!stream.write(&h, sizeof(h))) return false;
+    return !len || stream.write(payload, len);
 }
 
 } // namespace fb

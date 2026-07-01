@@ -66,6 +66,7 @@ private:
     std::unique_ptr<fb::Server> server_;
     fb::Upnp upnp_;
     std::unique_ptr<fb::Client> client_;
+    std::unique_ptr<fb::NativeQuicRemoteClient> quicClient_;
     std::unique_ptr<fb::WebRtcRemoteClient> webClient_;
     std::unique_ptr<fb::WebRtcCompatHost> webCompatHost_;
     fb::Mount mount_;

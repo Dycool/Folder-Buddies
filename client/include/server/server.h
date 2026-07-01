@@ -25,6 +25,10 @@ public:
     void stop();
     bool running() const { return running_.load(); }
 
+    // Accept an already-established reliable stream (for example, a QUIC
+    // stream selected by ICE). Ownership is retained until its session ends.
+    void acceptStream(std::shared_ptr<ByteStream> stream);
+
     std::vector<uint8_t> secret;       // auto-generated password (set by start)
     uint16_t boundPort = 0;
     std::string shareName;             // folder basename, baked into the token
@@ -37,16 +41,19 @@ public:
 
 private:
     struct BroadcastSession {
-        socket_t sock;
+        ByteStream* stream;
         SecureChannel* chan;
+        std::mutex* sendMutex;
     };
     void broadcastInvalidate(const std::string& path);
-    void registerSession(socket_t s, SecureChannel* chan);
-    void unregisterSession(socket_t s);
+    void registerSession(ByteStream* stream, SecureChannel* chan, std::mutex* sendMutex);
+    void unregisterSession(ByteStream* stream);
 
     void acceptLoop();
-    void handleConn(socket_t s);
-    bool handshake(socket_t s, std::string& clientId, SecureChannel& chan);
+    void launchStream(std::shared_ptr<ByteStream> stream,
+                      socket_t tcpSocket = FB_BAD_SOCKET);
+    void handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket = FB_BAD_SOCKET);
+    bool handshake(ByteStream& stream, std::string& clientId, SecureChannel& chan);
     bool resolve(const std::string& rel, std::string& abs);
 
     std::string root_;
@@ -60,6 +67,7 @@ private:
     std::condition_variable connCv_;             // notified when a conn thread exits
     int connCount_ = 0;                          // live connection threads (guarded by connMtx_)
     std::unordered_set<socket_t> activeSocks_;
+    std::unordered_set<std::shared_ptr<ByteStream>> activeStreams_;
 
     std::mutex sessMtx_;
     std::unordered_map<std::string, int> sessions_; // clientId -> active conns

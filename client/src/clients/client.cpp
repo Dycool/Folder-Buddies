@@ -129,14 +129,14 @@ bool Client::handshake(Conn& c, const Token& tok, std::string& err) {
     w.raw(clientId_, 16);
     w.raw(folderHash.constData(), 32);
     w.raw(nonceC.data(), 16);
-    if (!send_message(c.sock, OP_HELLO, 0, 1, w.b.data(), static_cast<uint32_t>(w.b.size()))) {
+    if (!send_message(*c.stream, OP_HELLO, 0, 1, w.b.data(), static_cast<uint32_t>(w.b.size()))) {
         err = "handshake send failed";
         return false;
     }
 
     MsgHeader h;
     std::vector<uint8_t> payload;
-    if (!recv_message(c.sock, h, payload) || h.op != OP_CHALLENGE || payload.size() < 16) {
+    if (!recv_message(*c.stream, h, payload) || h.op != OP_CHALLENGE || payload.size() < 16) {
         err = "server rejected connection (folder/full?)";
         return false;
     }
@@ -144,13 +144,13 @@ bool Client::handshake(Conn& c, const Token& tok, std::string& err) {
     QByteArray nonceSQ(reinterpret_cast<const char*>(payload.data()), 16); // server nonce
     QByteArray key = derive_key(tok.secret);
     QByteArray proof = auth_proof(key, nonceCQ, nonceSQ);
-    if (!send_message(c.sock, OP_AUTH, 0, 1,
+    if (!send_message(*c.stream, OP_AUTH, 0, 1,
                       reinterpret_cast<const uint8_t*>(proof.constData()),
                       static_cast<uint32_t>(proof.size()))) {
         err = "auth send failed";
         return false;
     }
-    if (!recv_message(c.sock, h, payload) || h.op != OP_AUTH_OK) {
+    if (!recv_message(*c.stream, h, payload) || h.op != OP_AUTH_OK) {
         err = "authentication failed (wrong password or token)";
         return false;
     }
@@ -170,9 +170,9 @@ bool Client::connect(const Token& tok, int nconns, std::string& err) {
         socket_t s = connect_socket(tok.ip, tok.port, err);
         if (s == FB_BAD_SOCKET) { disconnect(); return false; }
         auto c = std::make_unique<Conn>();
-        c->sock = s;
+        c->stream = std::make_shared<SocketByteStream>(s);
         if (!handshake(*c, tok, err)) {
-            close_socket(s);
+            c->stream->close();
             disconnect();
             return false;
         }
@@ -188,12 +188,34 @@ bool Client::connect(const Token& tok, int nconns, std::string& err) {
     return true;
 }
 
+bool Client::connectStreams(const Token& tok,
+                            std::vector<std::shared_ptr<ByteStream>> streams,
+                            std::string& err) {
+    disconnect();
+    auto rb = random_bytes(16);
+    std::memcpy(clientId_, rb.data(), 16);
+    if (streams.empty()) { err = "QUIC established no usable streams"; return false; }
+    for (auto& stream : streams) {
+        if (!stream) { err = "invalid QUIC stream"; disconnect(); return false; }
+        auto c = std::make_unique<Conn>();
+        c->stream = std::move(stream);
+        if (!handshake(*c, tok, err)) { c->stream->close(); disconnect(); return false; }
+        c->alive = true;
+        conns_.push_back(std::move(c));
+    }
+    connected_ = true;
+    for (auto& c : conns_) {
+        Conn* raw = c.get();
+        raw->reader = std::thread([this, raw] { readerLoop(raw); });
+    }
+    return true;
+}
+
 void Client::disconnect() {
     connected_ = false;
     for (auto& c : conns_) {
         c->alive = false;
-        close_socket(c->sock); // unblocks the reader's recv
-        c->sock = FB_BAD_SOCKET;
+        if (c->stream) c->stream->close(); // unblocks the reader
     }
     for (auto& c : conns_)
         if (c->reader.joinable()) c->reader.join();
@@ -203,7 +225,7 @@ void Client::disconnect() {
 void Client::readerLoop(Conn* c) {
     MsgHeader h;
     std::vector<uint8_t> payload;
-    while (c->alive.load() && c->chan.recv(c->sock, h, payload)) {
+    while (c->alive.load() && c->chan.recv(*c->stream, h, payload)) {
         if (h.op == OP_INVALIDATE && onInvalidate) {
             Reader r(payload.data(), payload.size());
             std::string path;
@@ -253,7 +275,7 @@ int Client::request(uint16_t op, const std::vector<uint8_t>& payload, std::vecto
     bool sent;
     {
         std::lock_guard<std::mutex> wlk(c->wmtx);
-        sent = c->chan.send(c->sock, op, 0, id, payload.data(),
+        sent = c->chan.send(*c->stream, op, 0, id, payload.data(),
                             static_cast<uint32_t>(payload.size()));
     }
     if (!sent) {

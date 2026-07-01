@@ -5,6 +5,9 @@
 #include "fileio.h"
 #include "osflags.h"
 #include "signaling.h"
+#include "native_quic.h"
+#include "client.h"
+#include "server.h"
 
 #include <QByteArray>
 #include <QDateTime>
@@ -584,6 +587,10 @@ struct WebRtcCompatHost::Impl {
     std::string wsError;
     std::unordered_map<std::string, std::shared_ptr<rtc::PeerConnection>> pcs;
     std::unordered_map<std::string, std::shared_ptr<rtc::DataChannel>> channels;
+    std::unordered_map<std::string, std::shared_ptr<NativeQuicEndpoint>> quicPeers;
+    std::vector<std::thread> negotiationTimers;
+    std::set<std::string> departedPeers;
+    Server* nativeServer = nullptr;
     std::unordered_map<uint32_t, std::ofstream> uploads;
     std::atomic<bool> live{false};
     std::atomic<uint64_t>* bytesOut = nullptr;
@@ -763,18 +770,21 @@ struct WebRtcCompatHost::Impl {
     }
 
     void create_peer(const std::string& peerId) {
+        if (!live.load()) return;
         compat_dbg("host create_peer peer=" + peerId);
         rtc::Configuration cfg;
         cfg.iceServers.emplace_back("stun:stun.l.google.com:19302");
         auto pc = std::make_shared<rtc::PeerConnection>(cfg);
 
         pc->onLocalDescription([this, peerId](rtc::Description desc) {
+            if (!live.load()) return;
             compat_dbg("host sending offer to peer=" + peerId);
             QJsonObject sdp; sdp["type"] = "offer"; sdp["sdp"] = QString::fromStdString(std::string(desc));
             QJsonObject payload; payload["type"] = "offer"; payload["sdp"] = sdp;
             send_signal(peerId, payload);
         });
         pc->onLocalCandidate([this, peerId](rtc::Candidate cand) {
+            if (!live.load()) return;
             QJsonObject c; c["candidate"] = QString::fromStdString(cand.candidate()); c["sdpMid"] = QString::fromStdString(cand.mid());
             QJsonObject payload; payload["type"] = "candidate"; payload["candidate"] = c;
             send_signal(peerId, payload);
@@ -808,11 +818,48 @@ struct WebRtcCompatHost::Impl {
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(mtx);
+            if (!live.load()) return;
             changed = !channels.count(peerId);
             pcs[peerId] = pc;
             channels[peerId] = dc;
         }
         if (changed) notifyClients();
+    }
+
+    void create_quic_peer(const std::string& peerId) {
+        if (!live.load() || !nativeServer || !native_quic_available()) return;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            if (quicPeers.count(peerId)) return;
+        }
+        auto endpoint = std::make_shared<NativeQuicEndpoint>(NativeQuicEndpoint::Role::Server);
+        endpoint->setLocalDescriptionCallback([this, peerId](const std::string& description) {
+            QJsonObject payload;
+            payload["type"] = "native-quic-description";
+            payload["description"] = QString::fromStdString(description);
+            send_signal(peerId, payload);
+        });
+        endpoint->setIncomingStreamCallback([this](std::shared_ptr<ByteStream> stream) {
+            if (nativeServer) nativeServer->acceptStream(std::move(stream));
+        });
+        endpoint->setStateCallback([peerId](const std::string& state) {
+            compat_dbg("native QUIC peer=" + peerId + " state=" + state);
+        });
+        std::string err;
+        if (!endpoint->start(err)) {
+            compat_dbg("native QUIC start failed peer=" + peerId + ": " + err);
+            QJsonObject payload; payload["type"] = "native-quic-error";
+            payload["message"] = QString::fromStdString(err);
+            send_signal(peerId, payload);
+            return;
+        }
+        bool keep = false;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            keep = live.load();
+            if (keep) quicPeers[peerId] = endpoint;
+        }
+        if (!keep) endpoint->close();
     }
 
     void on_signal(const QJsonObject& msg) {
@@ -821,15 +868,42 @@ struct WebRtcCompatHost::Impl {
                    " peer=" + msg.value("peerId").toString().toStdString());
         if (kind == "ready") { live = true; cv.notify_all(); return; }
         if (kind == "error") { std::lock_guard<std::mutex> lk(mtx); wsError = msg.value("error").toString("signaling error").toStdString(); wsClosed = true; cv.notify_all(); return; }
-        if (kind == "client-joined") { create_peer(msg.value("peerId").toString().toStdString()); return; }
+        if (kind == "client-joined") {
+            const std::string peer = msg.value("peerId").toString().toStdString();
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                if (!live.load()) return;
+                departedPeers.erase(peer);
+                negotiationTimers.emplace_back([this, peer] {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                    bool useWebRtc = false;
+                    {
+                        std::lock_guard<std::mutex> inner(mtx);
+                        useWebRtc = live.load() && !departedPeers.count(peer) &&
+                                    !quicPeers.count(peer) && !pcs.count(peer);
+                    }
+                    // Browser clients do not send compat-hello; native QUIC
+                    // clients do, so only the silent peer gets a WebRTC offer.
+                    if (useWebRtc) create_peer(peer);
+                });
+            }
+            return;
+        }
         if (kind == "client-left") {
             bool changed = false;
+            std::shared_ptr<NativeQuicEndpoint> endpoint;
             {
                 std::lock_guard<std::mutex> lk(mtx);
                 const std::string peer = msg.value("peerId").toString().toStdString();
+                departedPeers.insert(peer);
                 pcs.erase(peer);
+                if (auto q = quicPeers.find(peer); q != quicPeers.end()) {
+                    endpoint = std::move(q->second);
+                    quicPeers.erase(q);
+                }
                 changed = channels.erase(peer) > 0;
             }
+            if (endpoint) endpoint->close();
             if (changed) notifyClients();
             return;
         }
@@ -837,6 +911,38 @@ struct WebRtcCompatHost::Impl {
         std::string peerId = msg.value("peerId").toString().toStdString();
         QJsonObject sig = unb64url_json(msg.value("ciphertext").toString().toStdString());
         if (sig.isEmpty()) return;
+        const QString signalType = sig.value("type").toString();
+        if (signalType == "native-quic-hello") { create_quic_peer(peerId); return; }
+        if (signalType == "compat-hello") {
+            bool exists = false;
+            { std::lock_guard<std::mutex> lock(mtx); exists = pcs.count(peerId) != 0; }
+            if (!exists) create_peer(peerId);
+            return;
+        }
+        if (signalType == "native-quic-description") {
+            std::shared_ptr<NativeQuicEndpoint> endpoint;
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                auto it = quicPeers.find(peerId);
+                if (it != quicPeers.end()) endpoint = it->second;
+            }
+            if (!endpoint) {
+                create_quic_peer(peerId);
+                std::lock_guard<std::mutex> lock(mtx);
+                auto it = quicPeers.find(peerId);
+                if (it != quicPeers.end()) endpoint = it->second;
+            }
+            if (endpoint) {
+                std::string err;
+                if (!endpoint->setRemoteDescription(
+                        sig.value("description").toString().toStdString(), err)) {
+                    QJsonObject payload; payload["type"] = "native-quic-error";
+                    payload["message"] = QString::fromStdString(err);
+                    send_signal(peerId, payload);
+                }
+            }
+            return;
+        }
         std::lock_guard<std::mutex> lk(mtx);
         auto it = pcs.find(peerId);
         if (it == pcs.end()) return;
@@ -992,7 +1098,8 @@ WebRtcCompatHost::WebRtcCompatHost() : impl_(new Impl) {
 }
 WebRtcCompatHost::~WebRtcCompatHost() { stop(); }
 
-bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomCode, bool allowWrites, std::string& err) {
+bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomCode,
+                             bool allowWrites, Server* nativeServer, std::string& err) {
     if (!looks_like_room_code(roomCode)) { err = "WebRTC compatibility needs a 6- or 16-character room code"; return false; }
     if (is_boundary_reparse_point(fs::path(folder))) {
         err = "Cannot host a symlink, junction, or projected filesystem root";
@@ -1000,6 +1107,7 @@ bool WebRtcCompatHost::start(const std::string& folder, const std::string& roomC
     }
     impl_->root = fs::weakly_canonical(folder).string();
     impl_->allowWrites = allowWrites;
+    impl_->nativeServer = nativeServer;
     bytesOut = 0;
     bytesIn = 0;
     impl_->wsClosed = false;
@@ -1053,13 +1161,20 @@ void WebRtcCompatHost::stop() {
     if (impl_->ws) impl_->ws->close();
     if (impl_->fbRelay) impl_->fbRelay->close();
     bool hadClients = false;
+    std::vector<std::shared_ptr<NativeQuicEndpoint>> quicPeers;
+    std::vector<std::thread> negotiationTimers;
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
         hadClients = !impl_->channels.empty();
+        for (auto& [id, endpoint] : impl_->quicPeers) quicPeers.push_back(endpoint);
+        impl_->quicPeers.clear();
         impl_->pcs.clear();
         impl_->channels.clear();
         impl_->uploads.clear();
+        negotiationTimers.swap(impl_->negotiationTimers);
     }
+    for (auto& timer : negotiationTimers) if (timer.joinable()) timer.join();
+    for (auto& endpoint : quicPeers) endpoint->close();
     if (hadClients) impl_->notifyClients();
 }
 bool WebRtcCompatHost::running() const { return impl_ && impl_->live.load(); }
@@ -1360,13 +1475,200 @@ int WebRtcRemoteClient::request(uint16_t op, const std::vector<uint8_t>& payload
     } catch (...) { return EIO; }
 }
 
+struct NativeQuicRemoteClient::Impl {
+    Client client;
+    std::shared_ptr<NativeQuicEndpoint> endpoint;
+    std::shared_ptr<rtc::WebSocket> ws;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::string peerId;
+    std::string pendingDescription;
+    std::string signalError;
+    bool ready = false;
+    bool dead = false;
+
+    void send(const QJsonObject& payload) {
+        std::shared_ptr<rtc::WebSocket> socket;
+        std::string peer;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            socket = ws;
+            peer = peerId;
+        }
+        if (socket && !peer.empty()) send_plain_signal(socket, peer, payload);
+    }
+};
+
+NativeQuicRemoteClient::NativeQuicRemoteClient() : impl_(new Impl) {}
+NativeQuicRemoteClient::~NativeQuicRemoteClient() { disconnect(); }
+
+bool NativeQuicRemoteClient::connect(const std::string& roomCode, const Token& token,
+                                     std::string& err) {
+    disconnect();
+    if (!native_quic_available()) { err = "native QUIC support was not built"; return false; }
+    if (!looks_like_room_code(roomCode) || !SignalingClient::configured()) {
+        err = "native QUIC needs a published room code and Cloudflare signaling";
+        return false;
+    }
+
+    impl_->endpoint = std::make_shared<NativeQuicEndpoint>(NativeQuicEndpoint::Role::Client);
+    impl_->endpoint->setLocalDescriptionCallback([this](const std::string& description) {
+        bool canSend = false;
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            impl_->pendingDescription = description;
+            canSend = impl_->ready && !impl_->peerId.empty();
+        }
+        if (canSend) {
+            QJsonObject payload; payload["type"] = "native-quic-description";
+            payload["description"] = QString::fromStdString(description);
+            impl_->send(payload);
+        }
+    });
+    impl_->endpoint->setStateCallback([](const std::string& state) {
+        compat_dbg("native QUIC client state=" + state);
+    });
+    if (!impl_->endpoint->start(err)) { disconnect(); return false; }
+
+    impl_->ws = std::make_shared<rtc::WebSocket>();
+    impl_->ws->onMessage([this](std::variant<rtc::binary, rtc::string> message) {
+        if (!std::holds_alternative<rtc::string>(message)) return;
+        QJsonObject outer = parse_json_obj(std::get<rtc::string>(message));
+        const QString kind = outer.value("kind").toString();
+        if (kind == "ready") {
+            std::string description;
+            {
+                std::lock_guard<std::mutex> lock(impl_->mutex);
+                impl_->peerId = outer.value("peerId").toString().toStdString();
+                impl_->ready = true;
+                description = impl_->pendingDescription;
+            }
+            QJsonObject hello; hello["type"] = "native-quic-hello";
+            impl_->send(hello);
+            if (!description.empty()) {
+                QJsonObject payload; payload["type"] = "native-quic-description";
+                payload["description"] = QString::fromStdString(description);
+                impl_->send(payload);
+            }
+            impl_->cv.notify_all();
+            return;
+        }
+        if (kind == "host-joined") {
+            std::string description;
+            {
+                std::lock_guard<std::mutex> lock(impl_->mutex);
+                description = impl_->pendingDescription;
+            }
+            QJsonObject hello; hello["type"] = "native-quic-hello";
+            impl_->send(hello);
+            if (!description.empty()) {
+                QJsonObject payload; payload["type"] = "native-quic-description";
+                payload["description"] = QString::fromStdString(description);
+                impl_->send(payload);
+            }
+            return;
+        }
+        if (kind == "host-left") {
+            std::shared_ptr<NativeQuicEndpoint> endpoint;
+            {
+                std::lock_guard<std::mutex> lock(impl_->mutex);
+                impl_->dead = true;
+                impl_->signalError = "host left during QUIC negotiation";
+                endpoint = impl_->endpoint;
+                impl_->cv.notify_all();
+            }
+            if (endpoint) endpoint->close();
+            return;
+        }
+        if (kind != "signal") return;
+        QJsonObject signal = unb64url_json(outer.value("ciphertext").toString().toStdString());
+        const QString type = signal.value("type").toString();
+        if (type == "native-quic-description") {
+            std::shared_ptr<NativeQuicEndpoint> endpoint;
+            {
+                std::lock_guard<std::mutex> lock(impl_->mutex);
+                endpoint = impl_->endpoint;
+            }
+            std::string setErr;
+            if (!endpoint || !endpoint->setRemoteDescription(
+                    signal.value("description").toString().toStdString(), setErr)) {
+                std::lock_guard<std::mutex> lock(impl_->mutex);
+                impl_->signalError = setErr.empty() ? "native QUIC endpoint closed" : setErr;
+                impl_->dead = true;
+                impl_->cv.notify_all();
+            }
+        } else if (type == "native-quic-error") {
+            std::shared_ptr<NativeQuicEndpoint> endpoint;
+            {
+                std::lock_guard<std::mutex> lock(impl_->mutex);
+                impl_->signalError = signal.value("message").toString().toStdString();
+                impl_->dead = true;
+                endpoint = impl_->endpoint;
+                impl_->cv.notify_all();
+            }
+            if (endpoint) endpoint->close();
+        }
+    });
+    impl_->ws->onClosed([this]() {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (!impl_->endpoint || !impl_->endpoint->connected()) impl_->dead = true;
+        impl_->cv.notify_all();
+    });
+    try { impl_->ws->open(ws_url_for(room_lookup_id(roomCode), "client")); }
+    catch (const std::exception& e) { err = e.what(); disconnect(); return false; }
+
+    {
+        std::unique_lock<std::mutex> lock(impl_->mutex);
+        if (!impl_->cv.wait_for(lock, std::chrono::seconds(8), [this] {
+                return impl_->ready || impl_->dead;
+            }) || !impl_->ready) {
+            err = impl_->signalError.empty() ? "native QUIC signaling timed out" : impl_->signalError;
+            lock.unlock(); disconnect(); return false;
+        }
+    }
+    if (!impl_->endpoint->waitConnected(std::chrono::seconds(12), err)) {
+        disconnect();
+        return false;
+    }
+    auto streams = impl_->endpoint->openStreams(kDefaultConns, err);
+    if (streams.empty() || !impl_->client.connectStreams(token, std::move(streams), err)) {
+        disconnect();
+        return false;
+    }
+    // Keep the existing signaling socket open as presence. Closing it here
+    // would emit client-left and make the host tear down the negotiated ICE
+    // endpoint. No file data is sent over this socket.
+    return true;
+}
+
+void NativeQuicRemoteClient::disconnect() {
+    if (!impl_) return;
+    impl_->client.disconnect();
+    std::shared_ptr<rtc::WebSocket> ws;
+    std::shared_ptr<NativeQuicEndpoint> endpoint;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        ws = std::move(impl_->ws);
+        endpoint = std::move(impl_->endpoint);
+        impl_->peerId.clear(); impl_->pendingDescription.clear(); impl_->signalError.clear();
+        impl_->ready = false; impl_->dead = false;
+    }
+    try { if (ws) ws->close(); } catch (...) {}
+    if (endpoint) endpoint->close();
+}
+bool NativeQuicRemoteClient::connected() const { return impl_ && impl_->client.connected(); }
+int NativeQuicRemoteClient::request(uint16_t op, const std::vector<uint8_t>& payload,
+                                    std::vector<uint8_t>& resp) {
+    return impl_ ? impl_->client.request(op, payload, resp) : EIO;
+}
+
 #else
 
 struct WebRtcCompatHost::Impl {};
 struct WebRtcRemoteClient::Impl {};
 WebRtcCompatHost::WebRtcCompatHost() : impl_(new Impl) {}
 WebRtcCompatHost::~WebRtcCompatHost() = default;
-bool WebRtcCompatHost::start(const std::string&, const std::string&, bool, std::string& err) { err = "libdatachannel support was not built"; return false; }
+bool WebRtcCompatHost::start(const std::string&, const std::string&, bool, Server*, std::string& err) { err = "libdatachannel support was not built"; return false; }
 void WebRtcCompatHost::stop() {}
 bool WebRtcCompatHost::running() const { return false; }
 int WebRtcCompatHost::clientCount() const { return 0; }
@@ -1377,6 +1679,13 @@ void WebRtcRemoteClient::disconnect() {}
 bool WebRtcRemoteClient::connected() const { return false; }
 bool WebRtcRemoteClient::canWrite() const { return false; }
 int WebRtcRemoteClient::request(uint16_t, const std::vector<uint8_t>&, std::vector<uint8_t>&) { return EIO; }
+struct NativeQuicRemoteClient::Impl {};
+NativeQuicRemoteClient::NativeQuicRemoteClient() : impl_(new Impl) {}
+NativeQuicRemoteClient::~NativeQuicRemoteClient() = default;
+bool NativeQuicRemoteClient::connect(const std::string&, const Token&, std::string& err) { err = "native QUIC signaling support was not built"; return false; }
+void NativeQuicRemoteClient::disconnect() {}
+bool NativeQuicRemoteClient::connected() const { return false; }
+int NativeQuicRemoteClient::request(uint16_t, const std::vector<uint8_t>&, std::vector<uint8_t>&) { return EIO; }
 #endif
 
 bool web_compat_available() {

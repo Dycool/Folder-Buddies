@@ -3,6 +3,7 @@
 #include "session.h"
 #include "token.h"
 #include "fuse_backend.h"
+#include "native_quic.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -38,6 +39,7 @@ namespace {
 // Carried back from the connect worker thread to the GUI thread.
 struct ConnectResult {
     std::unique_ptr<fb::Client> client;
+    std::unique_ptr<fb::NativeQuicRemoteClient> quicClient;
     std::unique_ptr<fb::WebRtcRemoteClient> webClient;
     fb::Token tok;
     bool ok = false;
@@ -346,6 +348,7 @@ MainWindow::~MainWindow() {
     mount_.stop();
     if (client_) client_->disconnect();
     if (webClient_) webClient_->disconnect();
+    if (quicClient_) quicClient_->disconnect();
     if (webCompatHost_) webCompatHost_->stop();
     if (activeTicket_.cloudPublished) {
         std::string derr;
@@ -549,7 +552,7 @@ void MainWindow::toggleShare() {
                 QMetaObject::invokeMethod(this, "onClientsChanged", Qt::QueuedConnection);
             };
             std::string werr;
-            if (wch->start(folderStd, res->ticket.roomCode, allowWrites, werr))
+            if (wch->start(folderStd, res->ticket.roomCode, allowWrites, server_.get(), werr))
                 res->webCompatHost = std::move(wch);
             else
                 res->webCompatWarning = werr;
@@ -621,12 +624,15 @@ void MainWindow::setConnected(bool connected) {
 void MainWindow::toggleConnect() {
     if (busyConnect_) return;
 
-    if ((client_ && client_->connected()) || (webClient_ && webClient_->connected())) {
+    if ((client_ && client_->connected()) || (quicClient_ && quicClient_->connected()) ||
+        (webClient_ && webClient_->connected())) {
         mount_.stop();
         if (client_) client_->disconnect();
         if (webClient_) webClient_->disconnect();
+        if (quicClient_) quicClient_->disconnect();
         client_.reset();
         webClient_.reset();
+        quicClient_.reset();
         connectStatus_->setText("Not connected.");
         setConnected(false);
         return;
@@ -651,30 +657,42 @@ void MainWindow::toggleConnect() {
         fb::Token tok;
         std::string decodeErr;
         if (fb::resolve_share_code(entered, tok, decodeErr)) {
+            std::string quicErr;
+            if (fb::looks_like_room_code(entered) && fb::native_quic_available()) {
+                auto quic = std::make_unique<fb::NativeQuicRemoteClient>();
+                if (quic->connect(entered, tok, quicErr)) {
+                    res->quicClient = std::move(quic);
+                    res->tok = tok;
+                    res->ok = true;
+                }
+            }
+
+            // Direct TCP is the only fallback. It covers public IPv6 and the
+            // existing UPnP mapping; native peers never fall back to WebRTC.
             auto client = std::make_unique<fb::Client>();
             std::string err;
-            if (client->connect(tok, fb::kDefaultConns, err)) {
+            if (!res->ok && client->connect(tok, fb::kDefaultConns, err)) {
                 res->client = std::move(client);
                 res->tok = tok;
                 res->ok = true;
-            } else {
-                res->err = err; // client cleaned itself up on failure
+            } else if (!res->ok) {
+                res->err = "Direct QUIC failed: " +
+                    (quicErr.empty() ? std::string("unavailable") : quicErr) +
+                    "; direct TCP failed: " + err;
             }
         } else {
             res->decodeErr = decodeErr;
         }
 
-        if (!res->ok && tryWeb && fb::looks_like_web_compat_code(entered)) {
+        // Browser-only codes retain the browser WebRTC compatibility path.
+        if (!res->ok && tryWeb && !res->decodeErr.empty() &&
+            fb::looks_like_web_compat_code(entered)) {
             auto webClient = std::make_unique<fb::WebRtcRemoteClient>();
-            std::string err;
-            if (webClient->connect(entered, err)) {
+            std::string webErr;
+            if (webClient->connect(entered, webErr)) {
                 res->webClient = std::move(webClient);
                 res->ok = true;
-                res->err.clear();
-            } else {
-                webClient->disconnect();
-                if (res->err.empty()) res->err = err;
-            }
+            } else if (res->err.empty()) res->err = webErr;
         }
 
         QMetaObject::invokeMethod(this, [this, res] {
@@ -700,6 +718,16 @@ void MainWindow::toggleConnect() {
                 } else {
                     client_->disconnect();
                     client_.reset();
+                }
+            } else if (res->quicClient) {
+                quicClient_ = std::move(res->quicClient);
+                if (mount_.start(quicClient_.get(), "", res->tok.folder,
+                                 res->tok.allowWrites, err)) {
+                    mountpoint = mount_.mountpoint();
+                    mounted = true;
+                } else {
+                    quicClient_->disconnect();
+                    quicClient_.reset();
                 }
             } else if (res->webClient) {
                 webClient_ = std::move(res->webClient);
@@ -735,8 +763,10 @@ void MainWindow::onMountEjected() {
     mount_.stop();
     if (client_) client_->disconnect();
     if (webClient_) webClient_->disconnect();
+    if (quicClient_) quicClient_->disconnect();
     client_.reset();
     webClient_.reset();
+    quicClient_.reset();
     connectStatus_->setText("Disconnected (ejected).");
     setConnected(false);
     refreshStats();
@@ -761,6 +791,7 @@ void MainWindow::refreshStats() {
     if (mount_.active() && mount_.remote()) activeRemote = mount_.remote();
     else if (client_ && client_->connected()) activeRemote = client_.get();
     else if (webClient_ && webClient_->connected()) activeRemote = webClient_.get();
+    else if (quicClient_ && quicClient_->connected()) activeRemote = quicClient_.get();
     if (activeRemote) {
         parts << QString("Mount ↓%1 ↑%2")
                      .arg(humanRate(perSec(activeRemote->bytesRead.load(), lastRead_)))

@@ -313,10 +313,66 @@ bool SecureChannel::recv(socket_t s, MsgHeader& h, std::vector<uint8_t>& payload
     return true;
 }
 
+bool SecureChannel::send(ByteStream& stream, uint16_t op, int16_t status, uint64_t req_id,
+                         const uint8_t* payload, uint32_t len) {
+    if (!active_) return send_message(stream, op, status, req_id, payload, len);
+
+    MsgHeader h{kMagic, op, status, req_id, len};
+    std::vector<uint8_t> plain(sizeof(h) + len);
+    std::memcpy(plain.data(), &h, sizeof(h));
+    if (len) std::memcpy(plain.data() + sizeof(h), payload, len);
+    uint8_t nonce[12];
+    nonce_from_counter(txCtr_++, nonce);
+    std::vector<uint8_t> rec(plain.size() + 16);
+    aead_encrypt(txKey_, std::span<const uint8_t, 12>(nonce, 12), {}, plain,
+                 rec.data(), rec.data() + plain.size());
+    uint8_t lenbuf[4];
+    store_le32(lenbuf, static_cast<uint32_t>(rec.size()));
+    return stream.write(lenbuf, sizeof(lenbuf)) && stream.write(rec.data(), rec.size());
+}
+
+bool SecureChannel::recv(ByteStream& stream, MsgHeader& h, std::vector<uint8_t>& payload) {
+    if (!active_) return recv_message(stream, h, payload);
+    uint8_t lenbuf[4];
+    if (!stream.read(lenbuf, sizeof(lenbuf))) return false;
+    uint32_t recLen = load_le32(lenbuf);
+    if (recLen < sizeof(MsgHeader) + 16 || recLen > kMaxRecord) return false;
+    std::vector<uint8_t> rec(recLen);
+    if (!stream.read(rec.data(), recLen)) return false;
+    uint8_t nonce[12];
+    nonce_from_counter(rxCtr_++, nonce);
+    const size_t plainLen = recLen - 16;
+    std::vector<uint8_t> plain(plainLen);
+    if (!aead_decrypt(rxKey_, std::span<const uint8_t, 12>(nonce, 12), {},
+                      std::span<const uint8_t>(rec.data(), plainLen),
+                      rec.data() + plainLen, plain.data())) return false;
+    std::memcpy(&h, plain.data(), sizeof(h));
+    if (h.magic != kMagic || h.length != plainLen - sizeof(h)) return false;
+    payload.assign(plain.begin() + sizeof(h), plain.end());
+    return true;
+}
+
 } // namespace fb
 
 #ifdef FB_CRYPTO_SELFTEST
 #  include <cstdio>
+class MemoryByteStream final : public fb::ByteStream {
+public:
+    bool read(void* data, size_t size) override {
+        if (offset + size > bytes.size()) return false;
+        std::memcpy(data, bytes.data() + offset, size);
+        offset += size;
+        return true;
+    }
+    bool write(const void* data, size_t size) override {
+        const auto* p = static_cast<const uint8_t*>(data);
+        bytes.insert(bytes.end(), p, p + size);
+        return true;
+    }
+    void close() override {}
+    std::vector<uint8_t> bytes;
+    size_t offset = 0;
+};
 int main() {
     using namespace fb;
     Key256 key;
@@ -351,6 +407,21 @@ int main() {
     ok = ok && !aead_decrypt(key, std::span<const uint8_t, 12>(nonce, 12),
                              std::span<const uint8_t>(aad, 12),
                              std::span<const uint8_t>(ct.data(), ct.size()), tag, back.data());
+
+    // The transport-neutral framing used by both TCP and QUIC streams.
+    Key256 channelKey{};
+    for (size_t i = 0; i < channelKey.size(); ++i) channelKey[i] = static_cast<uint8_t>(i);
+    SecureChannel sender, receiver;
+    sender.activate(channelKey, channelKey);
+    receiver.activate(channelKey, channelKey);
+    MemoryByteStream memory;
+    const uint8_t framed[] = {1, 2, 3, 4, 5};
+    MsgHeader framedHeader{};
+    std::vector<uint8_t> framedPayload;
+    ok = ok && sender.send(memory, OP_READ, 0, 42, framed, sizeof(framed)) &&
+         receiver.recv(memory, framedHeader, framedPayload) &&
+         framedHeader.op == OP_READ && framedHeader.req_id == 42 &&
+         framedPayload == std::vector<uint8_t>(framed, framed + sizeof(framed));
 
     std::printf("%s\n", ok ? "crypto self-test PASS" : "crypto self-test FAIL");
     return ok ? 0 : 1;

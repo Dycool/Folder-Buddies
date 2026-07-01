@@ -2,6 +2,7 @@
 
 #include "session.h"
 #include "web_compat.h"
+#include "native_quic.h"
 
 #include <QCoreApplication>
 #include <QString>
@@ -131,7 +132,7 @@ int cli_host(const Args& a) {
         webCompat = std::make_unique<WebRtcCompatHost>();
         webCompat->onClientsChanged = printClientCount;
         std::string werr;
-        if (!webCompat->start(a.positional, ticket.roomCode, a.has("--write"), werr)) {
+        if (!webCompat->start(a.positional, ticket.roomCode, a.has("--write"), &server, werr)) {
             out() << "  WebRTC compatibility disabled: " << QString::fromStdString(werr) << "\n";
         }
     }
@@ -169,31 +170,46 @@ int cli_connect(const Args& a) {
     std::string decodeErr, e, mountpoint;
     Mount mount;
     std::unique_ptr<Client> client;
+    std::unique_ptr<NativeQuicRemoteClient> quicClient;
     std::unique_ptr<WebRtcRemoteClient> webClient;
     std::string label = "share";
     g_ejected.store(false);
     mount.setEjectedCallback([] { g_ejected.store(true); });
 
     if (resolve_share_code(a.positional, tok, decodeErr)) {
-        client = std::make_unique<Client>();
-        if (start_mounting(*client, mount, tok, mountpoint, e)) {
-            label = tok.folder;
-        } else {
-            client->disconnect();
-            client.reset();
+        std::string quicErr;
+        if (looks_like_room_code(a.positional) && native_quic_available()) {
+            quicClient = std::make_unique<NativeQuicRemoteClient>();
+            if (quicClient->connect(a.positional, tok, quicErr)) {
+                label = tok.folder;
+                if (mount.start(quicClient.get(), "", label, tok.allowWrites, e))
+                    mountpoint = mount.mountpoint();
+                else { quicClient->disconnect(); quicClient.reset(); }
+            } else quicClient.reset();
+        }
+        if (!mount.active()) {
+            client = std::make_unique<Client>();
+            std::string tcpErr;
+            if (start_mounting(*client, mount, tok, mountpoint, tcpErr)) {
+                label = tok.folder;
+            } else {
+                client->disconnect();
+                client.reset();
+                e = "Direct QUIC failed: " +
+                    (quicErr.empty() ? std::string("unavailable") : quicErr) +
+                    "; direct TCP failed: " + tcpErr;
+            }
         }
     }
 
-    if (!mount.active() && web_compat_available() && looks_like_web_compat_code(a.positional)) {
+    if (!mount.active() && !decodeErr.empty() &&
+        web_compat_available() && looks_like_web_compat_code(a.positional)) {
         webClient = std::make_unique<WebRtcRemoteClient>();
         if (webClient->connect(a.positional, e)) {
             label = "Web share";
-            if (!mount.start(webClient.get(), "", label, webClient->canWrite(), e)) {
-                webClient->disconnect();
-                webClient.reset();
-            } else {
+            if (mount.start(webClient.get(), "", label, webClient->canWrite(), e))
                 mountpoint = mount.mountpoint();
-            }
+            else { webClient->disconnect(); webClient.reset(); }
         }
     }
 
@@ -205,7 +221,9 @@ int cli_connect(const Args& a) {
 
     out() << "Mounted \"" << QString::fromStdString(label) << "\" as "
           << QString::fromStdString(mountpoint) << "\n"
-          << (webClient ? "Transport: WebRTC compatibility (browser/native).\n" : "Transport: native TCP.\n")
+          << (quicClient ? "Transport: direct native QUIC via ICE/STUN.\n" :
+              webClient ? "Transport: WebRTC browser compatibility.\n" :
+                          "Transport: direct native TCP.\n")
           << "It behaves like a local disk; only the bytes apps actually read cross the wire.\n\n"
           << "Press Ctrl+C to unmount, or eject the drive/volume in the OS.\n";
     out().flush();
@@ -215,6 +233,7 @@ int cli_connect(const Args& a) {
     out().flush();
     mount.stop();
     if (client) client->disconnect();
+    if (quicClient) quicClient->disconnect();
     if (webClient) webClient->disconnect();
     return rc;
 }

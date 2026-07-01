@@ -21,6 +21,10 @@ namespace fb {
 class Client : public RemoteFs {
 public:
     bool connect(const Token& tok, int nconns, std::string& err);
+    // Connect over already-established streams, used by native QUIC after
+    // ICE has selected a direct path.
+    bool connectStreams(const Token& tok, std::vector<std::shared_ptr<ByteStream>> streams,
+                        std::string& err);
     void disconnect();
     bool connected() const override { return connected_.load(); }
 
@@ -38,7 +42,7 @@ private:
         std::vector<uint8_t> data;
     };
     struct Conn {
-        socket_t sock = FB_BAD_SOCKET;
+        std::shared_ptr<ByteStream> stream;
         std::thread reader;
         std::mutex wmtx;
         std::mutex pmtx;

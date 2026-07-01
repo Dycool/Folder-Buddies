@@ -34,6 +34,9 @@ public:
     bool send(socket_t s, uint16_t op, int16_t status, uint64_t req_id,
               const uint8_t* payload, uint32_t len);
     bool recv(socket_t s, MsgHeader& h, std::vector<uint8_t>& payload);
+    bool send(ByteStream& stream, uint16_t op, int16_t status, uint64_t req_id,
+              const uint8_t* payload, uint32_t len);
+    bool recv(ByteStream& stream, MsgHeader& h, std::vector<uint8_t>& payload);
 
 private:
     Key256 txKey_{}, rxKey_{};

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(FolderBuddies VERSION 1.0.0 LANGUAGES CXX)
+project(FolderBuddies VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,6 +36,8 @@ set(FB_COMMON_SOURCES
   src/net/netutil.cpp
   src/net/signaling.cpp
   src/net/upnp.cpp
+  src/net/stream.cpp
+  src/net/native_quic.cpp
   src/server/server.cpp
   src/clients/client.cpp
   src/clients/web_compat.cpp
@@ -135,9 +137,78 @@ target_compile_definitions(folderbuddies PRIVATE FB_HAVE_LIBDATACHANNEL)
 target_link_libraries(folderbuddies PRIVATE ${_fb_dc_target})
 message(STATUS "WebRTC compatibility: enabled (libdatachannel target ${_fb_dc_target})")
 
+# Native-to-native direct transport: libjuice performs ICE/STUN without TURN,
+# while the native C picoquic stack supplies QUIC packets carried over the
+# ICE-selected path. No Rust toolchain is involved.
+option(FB_NATIVE_QUIC "Build native ICE/STUN + QUIC transport" ON)
+if(FB_NATIVE_QUIC)
+  include(FetchContent)
+  find_package(OpenSSL REQUIRED)
+  find_package(LibJuice CONFIG QUIET)
+  if(NOT TARGET LibJuice::LibJuiceStatic AND NOT TARGET LibJuice::LibJuice)
+    set(NO_TESTS ON CACHE BOOL "" FORCE)
+    set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(libjuice
+      GIT_REPOSITORY https://github.com/paullouisageneau/libjuice.git
+      GIT_TAG v1.7.2
+      GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(libjuice)
+  endif()
+  if(TARGET LibJuice::LibJuiceStatic)
+    set(_fb_juice_target LibJuice::LibJuiceStatic)
+  elseif(TARGET LibJuice::LibJuice)
+    set(_fb_juice_target LibJuice::LibJuice)
+  else()
+    message(FATAL_ERROR "libjuice target was not available")
+  endif()
+
+  # Disable picoquic's applications, log tools, tests, and optional assembly
+  # engine. We only need its core C library with picotls/OpenSSL.
+  set(BUILD_DEMO OFF CACHE BOOL "" FORCE)
+  set(BUILD_HTTP OFF CACHE BOOL "" FORCE)
+  set(BUILD_PQBENCH OFF CACHE BOOL "" FORCE)
+  set(BUILD_LOGLIB OFF CACHE BOOL "" FORCE)
+  set(BUILD_LOGREADER OFF CACHE BOOL "" FORCE)
+  set(BUILD_PICO_SIM OFF CACHE BOOL "" FORCE)
+  set(picoquic_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(PICOQUIC_FETCH_PTLS ON CACHE BOOL "" FORCE)
+  set(WITH_OPENSSL ON CACHE BOOL "" FORCE)
+  set(WITH_FUSION OFF CACHE BOOL "" FORCE)
+  set(WITH_AEGIS OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(picoquic
+    GIT_REPOSITORY https://github.com/private-octopus/picoquic.git
+    GIT_TAG d3a80307200d28c53a6470d257bdd0801fad7971)
+  FetchContent_MakeAvailable(picoquic)
+  FetchContent_GetProperties(picotls)
+  if(WIN32 AND picotls_SOURCE_DIR)
+    # Upstream picotls' CMake omits its MSVC compatibility header directory.
+    foreach(_ptls_lib picotls-core picotls-minicrypto picotls-openssl)
+      if(TARGET ${_ptls_lib})
+        target_include_directories(${_ptls_lib} PRIVATE
+          "${picotls_SOURCE_DIR}/picotlsvs/picotls")
+      endif()
+    endforeach()
+    target_sources(picotls-core PRIVATE
+      "${picotls_SOURCE_DIR}/picotlsvs/picotls/wintimeofday.c")
+  endif()
+  # Picotls declares its standalone CLI/tests unconditionally. Keep them out
+  # of the application build; picoquic-core only needs the three libraries.
+  foreach(_ptls_tool cli test-minicrypto.t test-openssl.t test-fusion.t ptlsbench)
+    if(TARGET ${_ptls_tool})
+      set_target_properties(${_ptls_tool} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    endif()
+  endforeach()
+  target_link_libraries(folderbuddies PRIVATE
+    ${_fb_juice_target} picoquic::picoquic-core OpenSSL::Crypto)
+  target_compile_definitions(folderbuddies PRIVATE FB_HAVE_NATIVE_QUIC)
+  message(STATUS "Native transport: ICE/STUN + picoquic (C, no TURN, no Rust)")
+endif()
+
 if(WIN32)
-  target_compile_definitions(folderbuddies PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_link_libraries(folderbuddies PRIVATE ws2_32 iphlpapi shell32 advapi32 Rpcrt4 gdi32 user32)
+  target_compile_definitions(folderbuddies PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _WINDOWS)
+  target_link_libraries(folderbuddies PRIVATE ws2_32 iphlpapi shell32 advapi32
+    bcrypt Rpcrt4 gdi32 user32)
 elseif(APPLE)
   find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)
@@ -290,6 +361,25 @@ if(FB_BUILD_TESTS)
     target_link_libraries(fb_signaling_selftest PRIVATE ws2_32)
   endif()
   add_test(NAME signaling_selftest COMMAND fb_signaling_selftest)
+
+  if(FB_NATIVE_QUIC)
+    add_executable(fb_native_quic_selftest
+      src/net/native_quic_selftest.cpp
+      src/net/native_quic.cpp
+      src/net/stream.cpp)
+    target_include_directories(fb_native_quic_selftest PRIVATE ${FB_INCLUDE_DIRS})
+    target_compile_definitions(fb_native_quic_selftest PRIVATE FB_HAVE_NATIVE_QUIC)
+    target_link_libraries(fb_native_quic_selftest PRIVATE
+      Qt6::Core Threads::Threads ${_fb_juice_target}
+      picoquic::picoquic-core OpenSSL::Crypto)
+    if(WIN32)
+      target_compile_definitions(fb_native_quic_selftest PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX _WINDOWS)
+      target_link_libraries(fb_native_quic_selftest PRIVATE ws2_32 bcrypt)
+    endif()
+    add_test(NAME native_quic_selftest COMMAND fb_native_quic_selftest)
+    set_tests_properties(native_quic_selftest PROPERTIES TIMEOUT 45)
+  endif()
 
   if(WIN32)
     add_executable(fb_projfs_mount_selftest

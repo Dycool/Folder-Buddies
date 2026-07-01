@@ -215,10 +215,12 @@ void Server::stop() {
     if (!running_.exchange(false)) return;
     close_socket(listen_);
     listen_ = FB_BAD_SOCKET;
+    std::vector<std::shared_ptr<ByteStream>> streams;
     {
         std::lock_guard<std::mutex> lk(connMtx_);
-        for (socket_t s : activeSocks_) close_socket(s);
+        streams.assign(activeStreams_.begin(), activeStreams_.end());
     }
+    for (auto& stream : streams) stream->close();
     if (acceptThread_.joinable()) acceptThread_.join();
     {
         std::unique_lock<std::mutex> lk(connMtx_);
@@ -242,21 +244,16 @@ void Server::acceptLoop() {
             continue;
         }
         tune_socket(s);
-        {
-            std::lock_guard<std::mutex> lk(connMtx_);
-            activeSocks_.insert(s);
-            ++connCount_;
-        }
-        std::thread([this, s] { handleConn(s); }).detach();
+        launchStream(std::make_shared<SocketByteStream>(s), s);
     }
 }
 
 // ---- handshake ------------------------------------------------------------
 
-bool Server::handshake(socket_t s, std::string& clientId, SecureChannel& chan) {
+bool Server::handshake(ByteStream& stream, std::string& clientId, SecureChannel& chan) {
     MsgHeader h;
     std::vector<uint8_t> payload;
-    if (!recv_message(s, h, payload) || h.op != OP_HELLO) return false;
+    if (!recv_message(stream, h, payload) || h.op != OP_HELLO) return false;
 
     Reader r(payload.data(), payload.size());
     uint32_t version;
@@ -268,25 +265,25 @@ bool Server::handshake(socket_t s, std::string& clientId, SecureChannel& chan) {
         QCryptographicHash::hash(QByteArray::fromStdString(shareName), QCryptographicHash::Sha256);
     if (version != kProtocolVersion || expectFolder.size() != 32 ||
         std::memcmp(folderHash, expectFolder.constData(), 32) != 0) {
-        send_message(s, OP_AUTH_FAIL, 0, h.req_id, nullptr, 0);
+        send_message(stream, OP_AUTH_FAIL, 0, h.req_id, nullptr, 0);
         return false;
     }
     clientId.assign(reinterpret_cast<char*>(cid), 16);
 
     std::vector<uint8_t> nonceS = random_bytes(16);
-    if (!send_message(s, OP_CHALLENGE, 0, h.req_id, nonceS.data(), 16)) return false;
+    if (!send_message(stream, OP_CHALLENGE, 0, h.req_id, nonceS.data(), 16)) return false;
 
-    if (!recv_message(s, h, payload) || h.op != OP_AUTH) return false;
+    if (!recv_message(stream, h, payload) || h.op != OP_AUTH) return false;
     QByteArray nonceCQ(reinterpret_cast<char*>(nonceC), 16);
     QByteArray nonceSQ(reinterpret_cast<char*>(nonceS.data()), 16);
     QByteArray proof(reinterpret_cast<const char*>(payload.data()), static_cast<int>(payload.size()));
     QByteArray expect = auth_proof(authKey_, nonceCQ, nonceSQ);
     if (proof.size() != expect.size() ||
         ::memcmp(proof.constData(), expect.constData(), expect.size()) != 0) {
-        send_message(s, OP_AUTH_FAIL, 0, h.req_id, nullptr, 0);
+        send_message(stream, OP_AUTH_FAIL, 0, h.req_id, nullptr, 0);
         return false;
     }
-    send_message(s, OP_AUTH_OK, 0, h.req_id, nullptr, 0);
+    send_message(stream, OP_AUTH_OK, 0, h.req_id, nullptr, 0);
 
     Key256 txKey, rxKey;
     derive_session_keys(authKey_, nonceCQ, nonceSQ, /*isServer=*/true, txKey, rxKey);
@@ -296,22 +293,54 @@ bool Server::handshake(socket_t s, std::string& clientId, SecureChannel& chan) {
 
 // ---- request dispatch -----------------------------------------------------
 
-void Server::handleConn(socket_t s) {
+void Server::acceptStream(std::shared_ptr<ByteStream> stream) {
+    launchStream(std::move(stream));
+}
+
+void Server::launchStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket) {
+    if (!stream) return;
+    {
+        std::lock_guard<std::mutex> lk(connMtx_);
+        if (!running_.load()) { stream->close(); return; }
+        if (tcpSocket != FB_BAD_SOCKET) activeSocks_.insert(tcpSocket);
+        activeStreams_.insert(stream);
+        ++connCount_;
+    }
+    try {
+        std::thread([this, stream, tcpSocket] {
+            handleStream(stream, tcpSocket);
+        }).detach();
+    } catch (...) {
+        std::lock_guard<std::mutex> lk(connMtx_);
+        if (tcpSocket != FB_BAD_SOCKET) activeSocks_.erase(tcpSocket);
+        activeStreams_.erase(stream);
+        if (--connCount_ == 0) connCv_.notify_all();
+        stream->close();
+    }
+}
+
+void Server::handleStream(std::shared_ptr<ByteStream> stream, socket_t tcpSocket) {
     std::string clientId;
     SecureChannel chan;
-    bool authed = handshake(s, clientId, chan);
+    std::mutex sendMutex;
+    bool authed = handshake(*stream, clientId, chan);
     if (authed) {
-        std::lock_guard<std::mutex> lk(sessMtx_);
-        sessions_[clientId]++;
-        if (onClientsChanged) onClientsChanged();
-        registerSession(s, &chan);
+        bool clientAdded = false;
+        {
+            std::lock_guard<std::mutex> lk(sessMtx_);
+            clientAdded = sessions_[clientId]++ == 0;
+        }
+        registerSession(stream.get(), &chan, &sendMutex);
+        // Callbacks commonly query clientCount(), so never invoke one while
+        // holding sessMtx_. Eight parallel transport streams are one client.
+        if (clientAdded && onClientsChanged) onClientsChanged();
     }
 
     std::vector<uint8_t> payload;
     std::vector<uint8_t> resp;
     MsgHeader h;
 
-    while (authed && chan.recv(s, h, payload)) {
+    while (authed && chan.recv(*stream, h, payload)) {
         Reader r(payload.data(), payload.size());
         Writer w;
         int16_t status = 0;
@@ -557,36 +586,47 @@ void Server::handleConn(socket_t s) {
             break;
         }
 
-        if (!chan.send(s, h.op, status, h.req_id, w.b.data(),
-                       static_cast<uint32_t>(w.b.size())))
-            break;
+        {
+            std::lock_guard<std::mutex> sendLock(sendMutex);
+            if (!chan.send(*stream, h.op, status, h.req_id, w.b.data(),
+                           static_cast<uint32_t>(w.b.size())))
+                break;
+        }
     }
 
-    unregisterSession(s);
+    unregisterSession(stream.get());
     if (authed) {
-        std::lock_guard<std::mutex> lk(sessMtx_);
-        if (--sessions_[clientId] <= 0) sessions_.erase(clientId);
-        if (onClientsChanged) onClientsChanged();
+        bool clientRemoved = false;
+        {
+            std::lock_guard<std::mutex> lk(sessMtx_);
+            auto it = sessions_.find(clientId);
+            if (it != sessions_.end() && --it->second <= 0) {
+                sessions_.erase(it);
+                clientRemoved = true;
+            }
+        }
+        if (clientRemoved && onClientsChanged) onClientsChanged();
     }
     {
         std::lock_guard<std::mutex> lk(connMtx_);
-        activeSocks_.erase(s);
+        if (tcpSocket != FB_BAD_SOCKET) activeSocks_.erase(tcpSocket);
+        activeStreams_.erase(stream);
         if (--connCount_ == 0) connCv_.notify_all();
     }
-    close_socket(s);
+    stream->close();
 }
 
 // ---- cross-client invalidation broadcast -----------------------------------
 
-void Server::registerSession(socket_t s, SecureChannel* chan) {
+void Server::registerSession(ByteStream* stream, SecureChannel* chan, std::mutex* sendMutex) {
     std::lock_guard<std::mutex> lk(broadcastMtx_);
-    broadcastSessions_.push_back({s, chan});
+    broadcastSessions_.push_back({stream, chan, sendMutex});
 }
 
-void Server::unregisterSession(socket_t s) {
+void Server::unregisterSession(ByteStream* stream) {
     std::lock_guard<std::mutex> lk(broadcastMtx_);
     auto it = std::remove_if(broadcastSessions_.begin(), broadcastSessions_.end(),
-        [s](const BroadcastSession& bs) { return bs.sock == s; });
+        [stream](const BroadcastSession& bs) { return bs.stream == stream; });
     broadcastSessions_.erase(it, broadcastSessions_.end());
 }
 
@@ -595,7 +635,8 @@ void Server::broadcastInvalidate(const std::string& path) {
     w.str(path);
     std::lock_guard<std::mutex> lk(broadcastMtx_);
     for (auto& bs : broadcastSessions_) {
-        bs.chan->send(bs.sock, OP_INVALIDATE, 0, 0, w.b.data(),
+        std::lock_guard<std::mutex> sendLock(*bs.sendMutex);
+        bs.chan->send(*bs.stream, OP_INVALIDATE, 0, 0, w.b.data(),
                       static_cast<uint32_t>(w.b.size()));
     }
 }

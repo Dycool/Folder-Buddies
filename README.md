@@ -12,7 +12,7 @@
 
 🌐 **Works everywhere** — Native Linux FUSE, Windows ProjFS, macOS FUSE-T, and a browser-based webapp for quick access.
 
-⚡ **Direct P2P TCP** — Cloudflare Workers are used as the primary blind signaling relay, with Firebase as an automatic fallback. The data path stays peer-to-peer.
+⚡ **Direct native transport** — Native peers try QUIC over an ICE/STUN-selected UDP path first, then direct TCP over public IPv6 or UPnP. Cloudflare/Firebase carry signaling only; file data stays peer-to-peer.
 
 🔄 **Automatic fallback** — If Cloudflare is rate-limited or unreachable, the client transparently falls back to Firebase Realtime Database, then to the self-contained offline blob.
 
@@ -55,6 +55,8 @@ The host seals connection metadata (IP, port, folder name, 256-bit session secre
 
 Cloudflare stores only the lookup half and an opaque encrypted record — never the IP, port, folder name, data-path secret, or secret half of the code.
 
+For native-to-native connections the order is deliberately strict: direct QUIC via ICE/STUN, then direct TCP via public IPv6 or UPnP, then a clear connection error. No TURN relay is configured, and native peers do not use WebRTC. Browser interoperability keeps its existing WebRTC path.
+
 ---
 
 ## 🖥️ Mounting backends
@@ -69,11 +71,11 @@ Cloudflare stores only the lookup half and an opaque encrypted record — never 
 
 ## 🔨 Building
 
-Requirements: **CMake ≥ 3.21**, a **C++23** compiler, **Qt 6 Widgets + Network**. UPnP is auto-enabled if `miniupnpc` is found.
+Requirements: **CMake ≥ 3.21**, a **C++23** compiler, **Qt 6 Widgets + Network**, and OpenSSL. Native connections use direct ICE/STUN + QUIC (`libjuice` + `picoquic`/picotls), entirely through native C/C++ dependencies. UPnP remains the direct TCP fallback.
 
 **Linux**
 ```
-sudo apt-get install -y cmake ninja-build pkg-config qt6-base-dev libfuse3-dev libminiupnpc-dev
+sudo apt-get install -y cmake ninja-build pkg-config qt6-base-dev libfuse3-dev libminiupnpc-dev libssl-dev
 cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/folderbuddies
@@ -88,7 +90,7 @@ cmake --build build
 
 **macOS**
 ```
-brew install cmake ninja qt6 miniupnpc
+brew install cmake ninja qt6 miniupnpc openssl@3
 cmake -G Ninja -S client -B build -DCMAKE_BUILD_TYPE=Release \
   -DFB_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 cmake --build build
