@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -60,6 +61,9 @@ static bool getattr(Client& c, const std::string& p, WireAttr& a, int& status) {
 }
 
 int main() {
+#ifndef _WIN32
+    std::signal(SIGPIPE, SIG_IGN); // match the app: sends to dead peers must not kill us
+#endif
     net_startup();
     std::error_code ec;
     const fs::path base = fs::temp_directory_path() /
