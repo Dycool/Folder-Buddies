@@ -62,6 +62,9 @@ private:
     };
 
     bool handshake(Conn& c, const Token& tok, std::string& err);
+    bool establishParallel(const Token& tok, size_t n,
+                           const std::function<std::unique_ptr<Conn>(std::string&)>& open,
+                           std::string& err);
     void readerLoop(Conn* c);
 
     std::vector<std::unique_ptr<Conn>> conns_;

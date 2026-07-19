@@ -161,25 +161,53 @@ bool Client::handshake(Conn& c, const Token& tok, std::string& err) {
     return true;
 }
 
+// Dial (optional) and handshake each connection on its own thread: eight
+// sequential handshakes cost ~24 RTTs on a WAN, in parallel they cost ~3.
+bool Client::establishParallel(const Token& tok, size_t n,
+                               const std::function<std::unique_ptr<Conn>(std::string&)>& open,
+                               std::string& err) {
+    std::vector<std::unique_ptr<Conn>> ready(n);
+    std::vector<std::string> errs(n);
+    std::vector<std::thread> dialers;
+    dialers.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        dialers.emplace_back([this, &tok, &open, &ready, &errs, i] {
+            auto c = open(errs[i]);
+            if (!c) return;
+            if (!handshake(*c, tok, errs[i])) { c->stream->close(); return; }
+            c->alive = true;
+            ready[i] = std::move(c);
+        });
+    }
+    for (auto& t : dialers) t.join();
+
+    bool ok = true;
+    for (size_t i = 0; i < n; ++i) {
+        if (ready[i]) {
+            conns_.push_back(std::move(ready[i]));
+        } else {
+            ok = false;
+            if (err.empty()) err = errs[i];
+        }
+    }
+    if (!ok) { disconnect(); return false; }
+    return true;
+}
+
 bool Client::connect(const Token& tok, int nconns, std::string& err) {
     disconnect(); // drop any previous session before reusing this client
     net_startup();
     auto rb = random_bytes(16);
     std::memcpy(clientId_, rb.data(), 16);
 
-    for (int i = 0; i < nconns; ++i) {
-        socket_t s = connect_socket(tok.ip, tok.port, err);
-        if (s == FB_BAD_SOCKET) { disconnect(); return false; }
+    auto open = [&tok](std::string& e) -> std::unique_ptr<Conn> {
+        socket_t s = connect_socket(tok.ip, tok.port, e);
+        if (s == FB_BAD_SOCKET) return nullptr;
         auto c = std::make_unique<Conn>();
         c->stream = std::make_shared<SocketByteStream>(s);
-        if (!handshake(*c, tok, err)) {
-            c->stream->close();
-            disconnect();
-            return false;
-        }
-        c->alive = true;
-        conns_.push_back(std::move(c));
-    }
+        return c;
+    };
+    if (!establishParallel(tok, static_cast<size_t>(nconns), open, err)) return false;
 
     connected_ = true;
     for (auto& c : conns_) {
@@ -196,14 +224,16 @@ bool Client::connectStreams(const Token& tok,
     auto rb = random_bytes(16);
     std::memcpy(clientId_, rb.data(), 16);
     if (streams.empty()) { err = "QUIC established no usable streams"; return false; }
-    for (auto& stream : streams) {
-        if (!stream) { err = "invalid QUIC stream"; disconnect(); return false; }
+
+    std::atomic<size_t> next{0};
+    auto open = [&streams, &next](std::string& e) -> std::unique_ptr<Conn> {
+        auto stream = std::move(streams[next.fetch_add(1)]);
+        if (!stream) { e = "invalid QUIC stream"; return nullptr; }
         auto c = std::make_unique<Conn>();
         c->stream = std::move(stream);
-        if (!handshake(*c, tok, err)) { c->stream->close(); disconnect(); return false; }
-        c->alive = true;
-        conns_.push_back(std::move(c));
-    }
+        return c;
+    };
+    if (!establishParallel(tok, streams.size(), open, err)) return false;
     connected_ = true;
     for (auto& c : conns_) {
         Conn* raw = c.get();

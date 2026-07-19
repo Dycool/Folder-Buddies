@@ -4,6 +4,7 @@
 
 #include <juice/juice.h>
 #include <picoquic.h>
+#include <picoquic_bbr.h>
 #include <openssl/ec.h>
 #include <openssl/evp.h>
 #include <openssl/obj_mac.h>
@@ -124,9 +125,12 @@ struct NativeQuicEndpoint::Impl : std::enable_shared_from_this<Impl> {
                 state_->cv.wait(lock, [&] {
                     return !state_->rx.empty() || state_->remoteClosed || state_->localClosed;
                 });
-                while (done < size && !state_->rx.empty()) {
-                    out[done++] = state_->rx.front();
-                    state_->rx.pop_front();
+                if (!state_->rx.empty()) {
+                    const size_t take = std::min(size - done, state_->rx.size());
+                    std::copy_n(state_->rx.begin(), take, out + done);
+                    state_->rx.erase(state_->rx.begin(),
+                                     state_->rx.begin() + static_cast<ptrdiff_t>(take));
+                    done += take;
                 }
                 if (done < size && (state_->remoteClosed || state_->localClosed)) return false;
             }
@@ -315,6 +319,9 @@ struct NativeQuicEndpoint::Impl : std::enable_shared_from_this<Impl> {
             err = "failed to create picoquic context";
             return false;
         }
+        // BBR instead of the NewReno default: keeps queueing delay low on
+        // bufferbloated home links instead of filling the bottleneck queue.
+        picoquic_set_default_congestion_algorithm(quic, picoquic_bbr_algorithm);
         picoquic_disable_port_blocking(quic, 1);
         picoquic_set_default_pmtud_policy(quic, picoquic_pmtud_blocked);
         picoquic_set_default_tp_value(quic, picoquic_tp_idle_timeout, kIdleTimeoutMs);
@@ -417,7 +424,7 @@ struct NativeQuicEndpoint::Impl : std::enable_shared_from_this<Impl> {
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
                 count = std::min(chunk.size(), state->tx.size());
-                for (size_t i = 0; i < count; ++i) chunk[i] = state->tx[i];
+                std::copy_n(state->tx.begin(), count, chunk.begin());
                 closeAfter = state->localClosed && !state->finSent && count == state->tx.size();
             }
             if (!count && !closeAfter) continue;
@@ -425,7 +432,8 @@ struct NativeQuicEndpoint::Impl : std::enable_shared_from_this<Impl> {
                 conn, streamId, count ? chunk.data() : nullptr, count, closeAfter ? 1 : 0);
             if (result == 0) {
                 std::lock_guard<std::mutex> lock(state->mutex);
-                for (size_t i = 0; i < count; ++i) state->tx.pop_front();
+                state->tx.erase(state->tx.begin(),
+                                state->tx.begin() + static_cast<ptrdiff_t>(count));
                 if (closeAfter) state->finSent = true;
             } else set_failure("picoquic rejected filesystem stream data");
         }
