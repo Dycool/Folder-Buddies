@@ -698,9 +698,7 @@ impl RamCache {
     fn begin_foreground_read(&self, handle: u64) -> Option<String> {
         let mut handles = self.shared.handles.lock().ok()?;
         loop {
-            let Some(entry) = handles.get_mut(&handle) else {
-                return None;
-            };
+            let entry = handles.get_mut(&handle)?;
             if entry.closing {
                 handles = self.shared.handle_changed.wait(handles).ok()?;
                 continue;
