@@ -6,9 +6,11 @@ use std::{
 
 use folderbuddies_core::{
     client::Client,
+    native_transport::{NativeQuicClient, NativeQuicHost},
     server::Server,
     signaling::{
-        HostedShareTicket, Token, publish_share, remove_published_room, resolve_share_code,
+        HostedShareTicket, Token, looks_like_room_code, publish_share, remove_published_room,
+        resolve_share_code,
     },
 };
 use igd_next::{Gateway, PortMappingProtocol, search_gateway};
@@ -26,12 +28,7 @@ impl UpnpMapping {
             .map_err(|error| format!("gateway discovery failed: {error}"))?;
         let local_address = SocketAddr::new(IpAddr::V4(local_ip), internal_port);
         let external_port = gateway
-            .add_any_port(
-                PortMappingProtocol::TCP,
-                local_address,
-                0,
-                "Folder Buddies",
-            )
+            .add_any_port(PortMappingProtocol::TCP, local_address, 0, "Folder Buddies")
             .map_err(|error| format!("UPnP port mapping failed: {error}"))?;
         let external_ip = match gateway.get_external_ip() {
             Ok(ip) => ip,
@@ -62,6 +59,7 @@ impl Drop for UpnpMapping {
 pub(crate) struct HostingSession {
     server: Option<Server>,
     ticket: Option<HostedShareTicket>,
+    quic_host: Option<NativeQuicHost>,
     upnp_mapping: Option<UpnpMapping>,
 }
 
@@ -82,9 +80,15 @@ impl HostingSession {
             allow_writes,
         )?;
         let ticket = publish_share(&token, reach)?;
+        let quic_host = if ticket.cloud_published() {
+            NativeQuicHost::start(ticket.room_code(), server.bound_port()).ok()
+        } else {
+            None
+        };
         Ok(Self {
             server: Some(server),
             ticket: Some(ticket),
+            quic_host,
             upnp_mapping,
         })
     }
@@ -139,6 +143,9 @@ impl HostingSession {
     }
 
     pub(crate) fn stop(&mut self) {
+        if let Some(mut quic_host) = self.quic_host.take() {
+            quic_host.stop();
+        }
         if let Some(ticket) = self.ticket.take()
             && ticket.cloud_published()
         {
@@ -159,6 +166,7 @@ impl Drop for HostingSession {
 
 pub(crate) struct ConnectedSession {
     client: Arc<Client>,
+    quic_client: Option<NativeQuicClient>,
     mount: Option<Mount>,
     mount_path: PathBuf,
     folder: String,
@@ -166,19 +174,61 @@ pub(crate) struct ConnectedSession {
 }
 
 impl ConnectedSession {
-    pub(crate) fn start(code: &str, connections: usize) -> Result<Self, String> {
+    pub(crate) fn start(code: &str, _connections: usize) -> Result<Self, String> {
         let token = resolve_share_code(code)?;
-        let client = Arc::new(Client::connect(&token, connections)?);
+        let mut quic_error = String::new();
+
+        if looks_like_room_code(code) {
+            match NativeQuicClient::connect(code, &token) {
+                Ok(mut quic_client) => {
+                    let client = quic_client.client();
+                    match Mount::start(Arc::clone(&client), token.folder(), token.allow_writes()) {
+                        Ok(mount) => {
+                            let mount_path = mount.mount_path().to_owned();
+                            return Ok(Self {
+                                client,
+                                quic_client: Some(quic_client),
+                                mount: Some(mount),
+                                mount_path,
+                                folder: token.folder().to_owned(),
+                                allow_writes: token.allow_writes(),
+                            });
+                        }
+                        Err(_) => quic_client.disconnect(),
+                    }
+                }
+                Err(error) => quic_error = error,
+            }
+        }
+
+        let client = Arc::new(Client::connect_default(&token).map_err(|tcp_error| {
+            format!(
+                "Direct QUIC failed: {}; direct TCP failed: {tcp_error}",
+                if quic_error.is_empty() {
+                    "unavailable"
+                } else {
+                    quic_error.as_str()
+                }
+            )
+        })?);
         let mount = match Mount::start(Arc::clone(&client), token.folder(), token.allow_writes()) {
             Ok(mount) => mount,
-            Err(error) => {
+            Err(tcp_error) => {
                 client.disconnect();
-                return Err(error);
+                return Err(format!(
+                    "Direct QUIC failed: {}; direct TCP failed: {tcp_error}",
+                    if quic_error.is_empty() {
+                        "unavailable"
+                    } else {
+                        quic_error.as_str()
+                    }
+                ));
             }
         };
         let mount_path = mount.mount_path().to_owned();
         Ok(Self {
             client,
+            quic_client: None,
             mount: Some(mount),
             mount_path,
             folder: token.folder().to_owned(),
@@ -220,7 +270,11 @@ impl ConnectedSession {
         if let Some(mount) = self.mount.take() {
             let _ = mount.unmount();
         }
-        self.client.disconnect();
+        if let Some(mut quic_client) = self.quic_client.take() {
+            quic_client.disconnect();
+        } else {
+            self.client.disconnect();
+        }
     }
 }
 
@@ -236,12 +290,7 @@ fn advertised_endpoint(
 ) -> (IpAddr, u16, String, Option<UpnpMapping>) {
     let lan_ip = best_lan_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     if lan_only {
-        return (
-            lan_ip,
-            internal_port,
-            format!("LAN only — {lan_ip}"),
-            None,
-        );
+        return (lan_ip, internal_port, format!("LAN only — {lan_ip}"), None);
     }
 
     if let Some(ip) = best_global_ipv6() {
