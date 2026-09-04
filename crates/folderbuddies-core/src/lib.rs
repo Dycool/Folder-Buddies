@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod compat_host;
 pub mod crypto;
 pub mod native_quic;
 pub mod native_transport;
