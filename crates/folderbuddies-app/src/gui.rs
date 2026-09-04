@@ -432,10 +432,10 @@ fn choose_folder() -> Result<Option<PathBuf>, String> {
             }
             return Ok(None);
         }
-        return Err(
+        Err(
             "No native folder chooser was found. Install zenity/kdialog or type the folder path directly."
                 .to_owned(),
-        );
+        )
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
