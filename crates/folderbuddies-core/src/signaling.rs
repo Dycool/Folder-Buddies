@@ -28,6 +28,7 @@ const PAYLOAD_VERSION: u32 = 2;
 const ARGON_MEMORY_KIB: u32 = 64 * 1024;
 const ARGON_ITERATIONS: u32 = 3;
 const ARGON_SALT_LEN: usize = 16;
+const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Token {
@@ -187,8 +188,8 @@ struct FirebaseRecord {
 #[must_use]
 pub fn base91_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity((data.len() * 123) / 100 + 8);
-    let mut accumulator: u32 = 0;
-    let mut bits: u32 = 0;
+    let mut accumulator = 0_u32;
+    let mut bits = 0_u32;
     for &byte in data {
         accumulator |= u32::from(byte) << bits;
         bits += 8;
@@ -216,14 +217,16 @@ pub fn base91_encode(data: &[u8]) -> String {
 }
 
 pub fn base91_decode(text: &str) -> Result<Vec<u8>, String> {
-    let mut table = [i16::from(-1_i8); 256];
+    let mut table = [-1_i16; 256];
     for (index, byte) in BASE91_ALPHABET.iter().enumerate() {
-        table[usize::from(*byte)] = i16::try_from(index).map_err(|_| "base91 table overflow")?;
+        table[usize::from(*byte)] =
+            i16::try_from(index).map_err(|_| "Base91 alphabet index overflow".to_owned())?;
     }
+
     let mut out = Vec::with_capacity((text.len() * 100) / 123 + 8);
-    let mut pending: i32 = -1;
-    let mut accumulator: u32 = 0;
-    let mut bits: u32 = 0;
+    let mut pending = -1_i32;
+    let mut accumulator = 0_u32;
+    let mut bits = 0_u32;
     for byte in text.bytes() {
         if byte.is_ascii_whitespace() {
             continue;
@@ -234,24 +237,22 @@ pub fn base91_decode(text: &str) -> Result<Vec<u8>, String> {
         }
         if pending < 0 {
             pending = i32::from(value);
-        } else {
-            pending += i32::from(value) * 91;
-            let combined = u32::try_from(pending).map_err(|_| "invalid Base91 state")?;
-            accumulator |= combined << bits;
-            bits += if (combined & 8191) > 88 { 13 } else { 14 };
-            loop {
-                out.push((accumulator & 0xff) as u8);
-                accumulator >>= 8;
-                bits -= 8;
-                if bits <= 7 {
-                    break;
-                }
-            }
-            pending = -1;
+            continue;
         }
+
+        pending += i32::from(value) * 91;
+        let combined = u32::try_from(pending).map_err(|_| "invalid Base91 state".to_owned())?;
+        accumulator |= combined << bits;
+        bits += if (combined & 8191) > 88 { 13 } else { 14 };
+        while bits > 7 {
+            out.push((accumulator & 0xff) as u8);
+            accumulator >>= 8;
+            bits -= 8;
+        }
+        pending = -1;
     }
     if pending >= 0 {
-        let pending = u32::try_from(pending).map_err(|_| "invalid Base91 tail")?;
+        let pending = u32::try_from(pending).map_err(|_| "invalid Base91 tail".to_owned())?;
         out.push(((accumulator | (pending << bits)) & 0xff) as u8);
     }
     Ok(out)
@@ -260,12 +261,16 @@ pub fn base91_decode(text: &str) -> Result<Vec<u8>, String> {
 #[must_use]
 pub fn base91_is_clean(text: &str) -> bool {
     text.bytes().all(|byte| {
-        byte.is_ascii_whitespace() || BASE91_ALPHABET.iter().any(|candidate| *candidate == byte)
+        byte.is_ascii_whitespace() || BASE91_ALPHABET.contains(&byte)
     })
 }
 
 pub fn random_room_code(long_code: bool) -> Result<String, String> {
-    let len = if long_code { LONG_CODE_LEN } else { SHORT_CODE_LEN };
+    let len = if long_code {
+        LONG_CODE_LEN
+    } else {
+        SHORT_CODE_LEN
+    };
     let mut code = String::with_capacity(len);
     let limit = 256 - (256 % BASE91_ALPHABET.len());
     while code.len() < len {
@@ -273,7 +278,9 @@ pub fn random_room_code(long_code: bool) -> Result<String, String> {
             if usize::from(byte) >= limit {
                 continue;
             }
-            code.push(char::from(BASE91_ALPHABET[usize::from(byte) % BASE91_ALPHABET.len()]));
+            code.push(char::from(
+                BASE91_ALPHABET[usize::from(byte) % BASE91_ALPHABET.len()],
+            ));
             if code.len() == len {
                 break;
             }
@@ -284,7 +291,10 @@ pub fn random_room_code(long_code: bool) -> Result<String, String> {
 
 #[must_use]
 pub fn looks_like_room_code(text: &str) -> bool {
-    let clean: String = text.chars().filter(|character| !character.is_whitespace()).collect();
+    let clean: String = text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
     matches!(clean.len(), SHORT_CODE_LEN | LONG_CODE_LEN) && base91_is_clean(&clean)
 }
 
@@ -318,7 +328,8 @@ pub fn open_offline_blob(blob: &str) -> Result<Token, String> {
 }
 
 pub fn seal_for_cloud(token: &Token, room_code: &str) -> Result<CloudRecord, String> {
-    let (lookup_len, key_len) = code_split(room_code.len()).ok_or_else(|| "bad room code".to_owned())?;
+    let (lookup_len, key_len) =
+        code_split(room_code.len()).ok_or_else(|| "bad room code".to_owned())?;
     let key_part = &room_code[lookup_len..lookup_len + key_len];
     let (blob_key, bundle) = seal_token(token)?;
     let salt: [u8; ARGON_SALT_LEN] = random_array()?;
@@ -343,7 +354,8 @@ pub fn open_cloud_record(
     wrapped_text: &str,
     payload_text: &str,
 ) -> Result<Token, String> {
-    let (lookup_len, key_len) = code_split(room_code.len()).ok_or_else(|| "bad room code".to_owned())?;
+    let (lookup_len, key_len) =
+        code_split(room_code.len()).ok_or_else(|| "bad room code".to_owned())?;
     let key_part = &room_code[lookup_len..lookup_len + key_len];
     let salt = base91_decode(salt_text)?;
     let wrapped = base91_decode(wrapped_text)?;
@@ -352,9 +364,11 @@ pub fn open_cloud_record(
         return Err("malformed cloud record".to_owned());
     }
     let wrap_key = argon2id_key(key_part.as_bytes(), &salt)?;
-    let nonce: [u8; 12] = wrapped[..12].try_into().map_err(|_| "bad wrapped nonce".to_owned())?;
-    let blob_key_plain = aead_open(&wrap_key, &nonce, &wrapped[12..])
-        .map_err(|_| "wrong code".to_owned())?;
+    let nonce: [u8; 12] = wrapped[..12]
+        .try_into()
+        .map_err(|_| "bad wrapped nonce".to_owned())?;
+    let blob_key_plain =
+        aead_open(&wrap_key, &nonce, &wrapped[12..]).map_err(|_| "wrong code".to_owned())?;
     let blob_key: Key256 = blob_key_plain
         .as_slice()
         .try_into()
@@ -374,21 +388,15 @@ impl SignalingClient {
     }
 
     pub fn new(mut base_url: String) -> Result<Option<Self>, String> {
-        while base_url.ends_with('/') {
-            base_url.pop();
-        }
+        trim_trailing_slashes(&mut base_url);
         if base_url.is_empty() {
             return Ok(None);
         }
-        if !base_url.starts_with("https://") {
-            return Err("signaling URL must use https://".to_owned());
-        }
-        let http = HttpClient::builder()
-            .timeout(Duration::from_secs(10))
-            .user_agent("FolderBuddies/1")
-            .build()
-            .map_err(|error| error.to_string())?;
-        Ok(Some(Self { http, base_url }))
+        require_https(&base_url, "signaling URL")?;
+        Ok(Some(Self {
+            http: http_client()?,
+            base_url,
+        }))
     }
 
     pub fn create(&self, record: &CloudRecord) -> Result<(), String> {
@@ -462,23 +470,18 @@ impl FirebaseSignalingClient {
     }
 
     pub fn new(mut base_url: String) -> Result<Option<Self>, String> {
-        while base_url.ends_with('/') {
-            base_url.pop();
-        }
+        trim_trailing_slashes(&mut base_url);
         if base_url.is_empty() {
             return Ok(None);
         }
-        if !base_url.starts_with("https://")
-            || !(base_url.contains("firebasedatabase.app") || base_url.contains("firebaseio.com"))
-        {
+        require_https(&base_url, "Firebase fallback URL")?;
+        if !(base_url.contains("firebasedatabase.app") || base_url.contains("firebaseio.com")) {
             return Err("Firebase fallback URL is invalid".to_owned());
         }
-        let http = HttpClient::builder()
-            .timeout(Duration::from_secs(10))
-            .user_agent("FolderBuddies/1")
-            .build()
-            .map_err(|error| error.to_string())?;
-        Ok(Some(Self { http, base_url }))
+        Ok(Some(Self {
+            http: http_client()?,
+            base_url,
+        }))
     }
 
     fn room_url(&self, lookup_id: &str) -> String {
@@ -488,18 +491,21 @@ impl FirebaseSignalingClient {
 
     pub fn create(&self, record: &CloudRecord) -> Result<(), String> {
         let url = self.room_url(&record.lookup_id);
-        let existing = self.http.get(&url).send().map_err(|error| error.to_string())?;
+        let existing = self
+            .http
+            .get(&url)
+            .send()
+            .map_err(|error| error.to_string())?;
         if !existing.status().is_success() {
-            return Err(format!("Firebase room check failed (HTTP {})", existing.status().as_u16()));
+            return Err(format!(
+                "Firebase room check failed (HTTP {})",
+                existing.status().as_u16()
+            ));
         }
-        let body = existing.text().map_err(|error| error.to_string())?;
-        if body.trim() != "null" {
+        if existing.text().map_err(|error| error.to_string())?.trim() != "null" {
             return Err("Firebase fallback room code collision".to_owned());
         }
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_secs();
+
         let record = FirebaseRecord {
             v: 1,
             lookup: record.lookup_id.clone(),
@@ -507,7 +513,7 @@ impl FirebaseSignalingClient {
             wrapped: record.wrapped.clone(),
             payload: record.payload.clone(),
             owner: record.owner.clone(),
-            created_at: i64::try_from(created_at).map_err(|_| "clock overflow".to_owned())?,
+            created_at: unix_millis()?,
         };
         let response = self
             .http
@@ -518,7 +524,10 @@ impl FirebaseSignalingClient {
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(format!("Firebase fallback create failed (HTTP {})", response.status().as_u16()))
+            Err(format!(
+                "Firebase fallback create failed (HTTP {})",
+                response.status().as_u16()
+            ))
         }
     }
 
@@ -529,27 +538,28 @@ impl FirebaseSignalingClient {
             .send()
             .map_err(|error| error.to_string())?;
         if !response.status().is_success() {
-            return Err(format!("Firebase fallback lookup failed (HTTP {})", response.status().as_u16()));
+            return Err(format!(
+                "Firebase fallback lookup failed (HTTP {})",
+                response.status().as_u16()
+            ));
         }
         let text = response.text().map_err(|error| error.to_string())?;
         if text.trim() == "null" {
             return Err("no Firebase fallback share found for that code".to_owned());
         }
-        let record: FirebaseRecord = serde_json::from_str(&text).map_err(|error| error.to_string())?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_secs();
-        let created_at = u64::try_from(record.created_at).unwrap_or_default();
-        if created_at == 0 || now.saturating_sub(created_at) > ROOM_TTL_SECONDS {
-            return Err("Firebase fallback share expired".to_owned());
-        }
+        let record: FirebaseRecord =
+            serde_json::from_str(&text).map_err(|error| error.to_string())?;
+        validate_firebase_record(lookup_id, &record)?;
         Ok((record.salt, record.wrapped, record.payload))
     }
 
     pub fn remove(&self, lookup_id: &str, owner: &str) -> Result<(), String> {
         let url = self.room_url(lookup_id);
-        let response = self.http.get(&url).send().map_err(|error| error.to_string())?;
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .map_err(|error| error.to_string())?;
         if response.status().as_u16() == 404 {
             return Ok(());
         }
@@ -557,15 +567,23 @@ impl FirebaseSignalingClient {
         if text.trim() == "null" {
             return Ok(());
         }
-        let record: FirebaseRecord = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+        let record: FirebaseRecord =
+            serde_json::from_str(&text).map_err(|error| error.to_string())?;
         if record.owner != owner {
             return Err("Firebase owner credential rejected".to_owned());
         }
-        let deleted = self.http.delete(url).send().map_err(|error| error.to_string())?;
+        let deleted = self
+            .http
+            .delete(url)
+            .send()
+            .map_err(|error| error.to_string())?;
         if deleted.status().is_success() {
             Ok(())
         } else {
-            Err(format!("Firebase delete failed (HTTP {})", deleted.status().as_u16()))
+            Err(format!(
+                "Firebase delete failed (HTTP {})",
+                deleted.status().as_u16()
+            ))
         }
     }
 }
@@ -580,6 +598,7 @@ pub fn resolve_share_code(code_or_blob: &str) -> Result<Token, String> {
     if !looks_like_room_code(code_or_blob) {
         return open_offline_blob(code_or_blob);
     }
+
     let lookup = room_lookup_id(code_or_blob);
     let mut failures = Vec::new();
     if let Some(client) = SignalingClient::from_environment()? {
@@ -598,6 +617,7 @@ pub fn resolve_share_code(code_or_blob: &str) -> Result<Token, String> {
             Err(error) => failures.push(format!("Firebase: {error}")),
         }
     }
+
     Err(if failures.is_empty() {
         "room lookup failed: no signaling backend is configured".to_owned()
     } else {
@@ -613,6 +633,7 @@ pub fn publish_share(token: &Token, reach: String) -> Result<HostedShareTicket, 
         reach,
         ..HostedShareTicket::default()
     };
+
     if let Some(client) = SignalingClient::from_environment()? {
         for _ in 0..12 {
             let room = random_room_code(token.allow_writes())?;
@@ -676,17 +697,27 @@ fn serialize_token(token: &Token) -> Result<Vec<u8>, String> {
     let mut writer = Writer::new();
     writer.raw(PAYLOAD_MAGIC);
     writer.u32(PAYLOAD_VERSION);
-    writer.string(token.ip()).map_err(|error| error.to_string())?;
+    writer
+        .string(token.ip())
+        .map_err(|error| error.to_string())?;
     writer.u16(token.port());
-    writer.string(token.folder()).map_err(|error| error.to_string())?;
+    writer
+        .string(token.folder())
+        .map_err(|error| error.to_string())?;
     writer.u8(u8::from(token.allow_writes()));
-    writer.bytes(token.secret()).map_err(|error| error.to_string())?;
+    writer
+        .bytes(token.secret())
+        .map_err(|error| error.to_string())?;
     Ok(writer.into_inner())
 }
 
 fn deserialize_token(bytes: &[u8]) -> Result<Token, String> {
     let mut reader = Reader::new(bytes);
-    if reader.raw(PAYLOAD_MAGIC.len()).map_err(|error| error.to_string())? != PAYLOAD_MAGIC {
+    if reader
+        .raw(PAYLOAD_MAGIC.len())
+        .map_err(|error| error.to_string())?
+        != PAYLOAD_MAGIC
+    {
         return Err("decrypted payload has bad magic".to_owned());
     }
     let version = reader.u32().map_err(|error| error.to_string())?;
@@ -750,6 +781,62 @@ fn argon2id_key(password: &[u8], salt: &[u8]) -> Result<Key256, String> {
     Ok(key)
 }
 
+fn http_client() -> Result<HttpClient, String> {
+    HttpClient::builder()
+        .timeout(HTTP_TIMEOUT)
+        .user_agent("FolderBuddies/1")
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+fn trim_trailing_slashes(value: &mut String) {
+    while value.ends_with('/') {
+        value.pop();
+    }
+}
+
+fn require_https(value: &str, label: &str) -> Result<(), String> {
+    if value.starts_with("https://") {
+        Ok(())
+    } else {
+        Err(format!("{label} must use https://"))
+    }
+}
+
+fn validate_firebase_record(lookup_id: &str, record: &FirebaseRecord) -> Result<(), String> {
+    if record.v != 1 || record.lookup != lookup_id {
+        return Err("Firebase fallback returned a mismatched record".to_owned());
+    }
+    let created_at = normalize_firebase_timestamp(record.created_at)?;
+    let now = unix_millis()?;
+    let max_age = i64::try_from(ROOM_TTL_SECONDS)
+        .map_err(|_| "TTL overflow".to_owned())?
+        .saturating_mul(1000);
+    if created_at <= 0 || now.saturating_sub(created_at) > max_age {
+        return Err("Firebase fallback share expired".to_owned());
+    }
+    Ok(())
+}
+
+fn normalize_firebase_timestamp(raw: i64) -> Result<i64, String> {
+    if raw <= 0 {
+        return Err("Firebase fallback record has an invalid timestamp".to_owned());
+    }
+    Ok(if raw < 20_000_000_000 {
+        raw.saturating_mul(1000)
+    } else {
+        raw
+    })
+}
+
+fn unix_millis() -> Result<i64, String> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    i64::try_from(millis).map_err(|_| "clock overflow".to_owned())
+}
+
 #[must_use]
 const fn code_split(total: usize) -> Option<(usize, usize)> {
     match total {
@@ -768,7 +855,10 @@ mod tests {
         let source = b"Folder Buddies base91 compatibility";
         let encoded = base91_encode(source);
         assert_eq!(base91_decode(&encoded).expect("decode"), source);
-        assert_eq!(base91_decode(&format!("  {encoded}\n")).expect("decode"), source);
+        assert_eq!(
+            base91_decode(&format!("  {encoded}\n")).expect("decode"),
+            source
+        );
     }
 
     #[test]
