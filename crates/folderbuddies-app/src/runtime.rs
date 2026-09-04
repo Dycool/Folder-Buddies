@@ -139,10 +139,10 @@ impl HostingSession {
     }
 
     pub(crate) fn stop(&mut self) {
-        if let Some(ticket) = self.ticket.take() {
-            if ticket.cloud_published() {
-                let _ = remove_published_room(&ticket);
-            }
+        if let Some(ticket) = self.ticket.take()
+            && ticket.cloud_published()
+        {
+            let _ = remove_published_room(&ticket);
         }
         if let Some(mut server) = self.server.take() {
             server.stop();
