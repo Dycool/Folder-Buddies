@@ -6,9 +6,10 @@ use std::{
 };
 
 use folderbuddies_core::{
-    client::{Client, RemoteError},
+    cached_remote::CachedRemoteFs,
+    client::Client,
     protocol::{MAX_IO, WireAttr},
-    ram_cache::RamCache,
+    remote_fs::{RemoteFs, RemoteFsError},
 };
 use fsk::{
     DirectoryEntry, DirectorySink, Error, FileType, Filesystem, Metadata, MountSession,
@@ -118,15 +119,15 @@ impl InodeIndex {
 }
 
 struct RemoteFilesystem {
-    client: RamCache,
+    client: Arc<dyn RemoteFs>,
     allow_writes: bool,
     inodes: Mutex<InodeIndex>,
 }
 
 impl RemoteFilesystem {
-    fn new(client: Arc<Client>, allow_writes: bool) -> Self {
+    fn new(client: Arc<dyn RemoteFs>, allow_writes: bool) -> Self {
         Self {
-            client: RamCache::new(client),
+            client,
             allow_writes,
             inodes: Mutex::new(InodeIndex::new()),
         }
@@ -230,10 +231,14 @@ impl Filesystem for RemoteFilesystem {
             return Err(Error::NOT_SUPPORTED);
         }
         if let Some(size) = update.size {
-            self.client.truncate(&record.path, size).map_err(remote_error)?;
+            self.client
+                .truncate(&record.path, size)
+                .map_err(remote_error)?;
         }
         if let Some(mode) = update.mode {
-            self.client.chmod(&record.path, mode & 0o7777).map_err(remote_error)?;
+            self.client
+                .chmod(&record.path, mode & 0o7777)
+                .map_err(remote_error)?;
         }
         if update.accessed_ns.is_some() || update.modified_ns.is_some() {
             let atime = ns_to_seconds(update.accessed_ns.unwrap_or(current.accessed_ns));
@@ -281,7 +286,7 @@ impl Filesystem for RemoteFilesystem {
                 format!("{}/{}", record.path, entry.name())
             };
             let child_inode = self.intern(&child_path, inode)?;
-            let next = u64::try_from(index + 1).map_err(|_| Error::IO)?;
+            let next = u64::try_from(index + 1).map_err(|_| Error::INVALID)?;
             if !sink.push(DirectoryEntry {
                 name: entry.name().as_bytes(),
                 inode: child_inode,
@@ -305,7 +310,10 @@ impl Filesystem for RemoteFilesystem {
 
     fn read(&self, inode: u64, offset: u64, output: &mut [u8]) -> fsk::Result<usize> {
         let record = self.record(inode)?;
-        let handle = self.client.open(&record.path, READ_ONLY_FLAGS).map_err(remote_error)?;
+        let handle = self
+            .client
+            .open(&record.path, READ_ONLY_FLAGS)
+            .map_err(remote_error)?;
         let result = (|| {
             let mut done = 0_usize;
             while done < output.len() {
@@ -314,12 +322,18 @@ impl Filesystem for RemoteFilesystem {
                 let chunk_offset = offset
                     .checked_add(u64::try_from(done).map_err(|_| Error::IO)?)
                     .ok_or(Error::INVALID)?;
-                let data = self.client.read(handle, chunk_offset, amount).map_err(remote_error)?;
+                let data = self
+                    .client
+                    .read(handle, chunk_offset, amount)
+                    .map_err(remote_error)?;
                 if data.is_empty() {
                     break;
                 }
                 let end = done.checked_add(data.len()).ok_or(Error::IO)?;
-                output.get_mut(done..end).ok_or(Error::IO)?.copy_from_slice(&data);
+                output
+                    .get_mut(done..end)
+                    .ok_or(Error::IO)?
+                    .copy_from_slice(&data);
                 done = end;
                 if data.len() < chunk_len {
                     break;
@@ -333,7 +347,10 @@ impl Filesystem for RemoteFilesystem {
     fn write(&self, inode: u64, offset: u64, input: &[u8]) -> fsk::Result<usize> {
         self.require_writes()?;
         let record = self.record(inode)?;
-        let handle = self.client.open(&record.path, READ_WRITE_FLAGS).map_err(remote_error)?;
+        let handle = self
+            .client
+            .open(&record.path, READ_WRITE_FLAGS)
+            .map_err(remote_error)?;
         let result = (|| {
             let mut done = 0_usize;
             while done < input.len() {
@@ -366,7 +383,10 @@ impl Filesystem for RemoteFilesystem {
         match kind {
             FileType::Directory => self.client.mkdir(&path, mode).map_err(remote_error)?,
             FileType::File => {
-                let handle = self.client.create(&path, CREATE_FLAGS, mode).map_err(remote_error)?;
+                let handle = self
+                    .client
+                    .create(&path, CREATE_FLAGS, mode)
+                    .map_err(remote_error)?;
                 self.client.release(handle).map_err(remote_error)?;
             }
             FileType::Symlink => return Err(Error::NOT_SUPPORTED),
@@ -401,7 +421,9 @@ impl Filesystem for RemoteFilesystem {
         self.require_writes()?;
         let source = self.child_path(source_parent, source_name)?;
         let destination = self.child_path(destination_parent, destination_name)?;
-        self.client.rename(&source, &destination).map_err(remote_error)?;
+        self.client
+            .rename(&source, &destination)
+            .map_err(remote_error)?;
         let mut index = self.inodes.lock().map_err(|_| Error::IO)?;
         if let Some(replaced) = replaced_inode
             && let Ok(record) = index.record(replaced)
@@ -426,6 +448,15 @@ pub(crate) struct Mount {
 impl Mount {
     pub(crate) fn start(
         client: Arc<Client>,
+        share_name: &str,
+        allow_writes: bool,
+    ) -> Result<Self, String> {
+        let client: Arc<dyn RemoteFs> = Arc::new(CachedRemoteFs::new(client));
+        Self::start_remote(client, share_name, allow_writes)
+    }
+
+    pub(crate) fn start_remote(
+        client: Arc<dyn RemoteFs>,
         share_name: &str,
         allow_writes: bool,
     ) -> Result<Self, String> {
@@ -485,7 +516,7 @@ impl Drop for Mount {
     }
 }
 
-fn remote_error(error: RemoteError) -> Error {
+fn remote_error(error: RemoteFsError) -> Error {
     let status = i32::from(error.status());
     if status > 0 {
         Error(status)
