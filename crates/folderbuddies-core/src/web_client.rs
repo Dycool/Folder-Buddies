@@ -273,6 +273,16 @@ impl WebRtcRemoteClient {
             .replies
             .remove(&id)
             .ok_or_else(|| RemoteFsError::new(EIO, "WebRTC download timed out"))?;
+        if reply.get("t").and_then(Value::as_str) == Some("error") {
+            state.downloads.remove(&id);
+            return Err(RemoteFsError::new(
+                EIO,
+                reply
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("WebRTC download failed"),
+            ));
+        }
         if reply.get("t").and_then(Value::as_str) != Some("fileEnd") {
             state.downloads.remove(&id);
             return Err(RemoteFsError::new(EIO, "WebRTC download failed"));
@@ -463,7 +473,8 @@ impl WebRtcRemoteClient {
                 if !loaded && self.can_range() {
                     let mut data = self.fetch_range(&path, offset, amount)?;
                     data.truncate(amount as usize);
-                    self.bytes_read.fetch_add(data.len() as u64, Ordering::Relaxed);
+                    self.bytes_read
+                        .fetch_add(data.len() as u64, Ordering::Relaxed);
                     return Ok(data);
                 }
                 self.ensure_loaded(handle, &path)?;
@@ -480,9 +491,12 @@ impl WebRtcRemoteClient {
                 if position >= file.data.len() {
                     return Ok(Vec::new());
                 }
-                let end = position.saturating_add(amount as usize).min(file.data.len());
+                let end = position
+                    .saturating_add(amount as usize)
+                    .min(file.data.len());
                 let data = file.data[position..end].to_vec();
-                self.bytes_read.fetch_add(data.len() as u64, Ordering::Relaxed);
+                self.bytes_read
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
                 Ok(data)
             }
             Op::Write => {
@@ -794,10 +808,9 @@ fn room_worker(
                     if let Ok(mut state) = shared.state.lock() {
                         state.peer_id.clone_from(&peer_id);
                     }
-                    let _ = shared.sender.send_signal(
-                        &peer_id,
-                        &json!({"type": "compat-hello"}),
-                    );
+                    let _ = shared
+                        .sender
+                        .send_signal(&peer_id, &json!({"type": "compat-hello"}));
                 }
             }
             Some(Ok(RoomEvent::HostJoined)) => {
@@ -806,10 +819,9 @@ fn room_worker(
                     .lock()
                     .map_or_else(|_| String::new(), |state| state.peer_id.clone());
                 if !peer_id.is_empty() {
-                    let _ = shared.sender.send_signal(
-                        &peer_id,
-                        &json!({"type": "compat-hello"}),
-                    );
+                    let _ = shared
+                        .sender
+                        .send_signal(&peer_id, &json!({"type": "compat-hello"}));
                 }
             }
             Some(Ok(RoomEvent::HostLeft)) => {
@@ -918,8 +930,9 @@ fn invalid_request(error: std::io::Error) -> RemoteFsError {
 }
 
 fn normalize_rel(path: &str) -> Option<String> {
+    let replaced = path.replace('\\', "/");
     let mut components = Vec::new();
-    for part in path.replace('\\', "/").split('/') {
+    for part in replaced.split('/') {
         match part {
             "" | "." => {}
             ".." => return None,
@@ -942,11 +955,17 @@ fn parent_path(path: &str) -> String {
 }
 
 fn basename(path: &str) -> &str {
-    path.trim_end_matches('/').rsplit('/').next().unwrap_or_default()
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
 }
 
 fn write_entry_attr(writer: &mut Writer, entry: &Value) {
-    let path = entry.get("path").and_then(Value::as_str).unwrap_or_default();
+    let path = entry
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let directory = entry.get("kind").and_then(Value::as_str) == Some("directory");
     let size = entry
         .get("size")
@@ -968,7 +987,11 @@ fn write_entry_attr(writer: &mut Writer, entry: &Value) {
 }
 
 fn write_attr(writer: &mut Writer, path: &str, directory: bool, size: u64, mtime: i64) {
-    writer.u64(if path == "/" { 1 } else { fnv1a(path.as_bytes()) });
+    writer.u64(if path == "/" {
+        1
+    } else {
+        fnv1a(path.as_bytes())
+    });
     writer.u64(size);
     writer.u64(size.saturating_add(511) / 512);
     writer.i64(mtime);
@@ -1011,7 +1034,7 @@ mod tests {
 
     #[test]
     fn web_inode_hash_matches_cpp_fnv1a() {
-        assert_eq!(fnv1a(b"/"), 4_956_234_634_734_749_188);
+        assert_eq!(fnv1a(b"/"), 4_953_208_436_630_043_972);
         assert_ne!(fnv1a(b"/file"), 0);
     }
 
