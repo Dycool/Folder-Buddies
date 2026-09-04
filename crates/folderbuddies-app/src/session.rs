@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     path::PathBuf,
     sync::{
@@ -11,8 +12,11 @@ use std::{
 
 use folderbuddies_core::{
     client::Client,
+    native_transport::{NativeQuicClient, NativeQuicHost},
     server::Server,
-    signaling::{Token, publish_share, remove_published_room, resolve_share_code},
+    signaling::{
+        Token, looks_like_room_code, publish_share, remove_published_room, resolve_share_code,
+    },
 };
 use igd_next::{Gateway, PortMappingProtocol, search_gateway};
 
@@ -22,11 +26,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Default)]
 struct CommandArgs {
-    positional: Option<String>,
-    port: Option<u16>,
-    connections: Option<usize>,
-    lan_only: bool,
-    allow_writes: bool,
+    positional: String,
+    options: HashMap<String, String>,
+    flags: HashSet<String>,
+}
+
+impl CommandArgs {
+    fn get(&self, name: &str) -> Option<&str> {
+        self.options.get(name).map(String::as_str)
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.flags.contains(name)
+    }
 }
 
 struct UpnpMapping {
@@ -40,12 +52,7 @@ impl UpnpMapping {
             .map_err(|error| format!("gateway discovery failed: {error}"))?;
         let local_address = SocketAddr::new(IpAddr::V4(local_ip), internal_port);
         let external_port = gateway
-            .add_any_port(
-                PortMappingProtocol::TCP,
-                local_address,
-                0,
-                "Folder Buddies",
-            )
+            .add_any_port(PortMappingProtocol::TCP, local_address, 0, "Folder Buddies")
             .map_err(|error| format!("UPnP port mapping failed: {error}"))?;
         let external_ip = match gateway.get_external_ip() {
             Ok(ip) => ip,
@@ -74,21 +81,35 @@ impl Drop for UpnpMapping {
 }
 
 pub(crate) fn run() -> Result<(), String> {
-    let mut args = std::env::args();
-    let _program = args.next();
-    let Some(command) = args.next() else {
+    let args: Vec<String> = std::env::args().collect();
+    if !is_cli_invocation(&args) {
         return super::gui::run_gui();
-    };
+    }
+    let command = &args[1];
     if matches!(command.as_str(), "help" | "--help" | "-h") {
         print_usage();
         return Ok(());
     }
-    let parsed = parse_arguments(args.collect())?;
+    let parsed = parse_arguments(args[2..].to_vec()).map_err(|error| {
+        format!(
+            "{}: {error}",
+            if command == "host" { "host" } else { "connect" }
+        )
+    })?;
     match command.as_str() {
         "host" => run_host(parsed),
         "connect" => run_connect(parsed),
-        _ => Err(format!("unknown command: {command}")),
+        _ => super::gui::run_gui(),
     }
+}
+
+fn is_cli_invocation(args: &[String]) -> bool {
+    args.get(1).is_some_and(|command| {
+        matches!(
+            command.as_str(),
+            "host" | "connect" | "help" | "--help" | "-h"
+        )
+    })
 }
 
 fn parse_arguments(args: Vec<String>) -> Result<CommandArgs, String> {
@@ -96,72 +117,63 @@ fn parse_arguments(args: Vec<String>) -> Result<CommandArgs, String> {
     let mut index = 0_usize;
     while index < args.len() {
         let token = &args[index];
-        match token.as_str() {
-            "--port" => {
+        if token.starts_with("--") {
+            if takes_value(token) {
                 index += 1;
                 let value = args
                     .get(index)
-                    .ok_or_else(|| "missing value for --port".to_owned())?;
-                parsed.port = Some(
-                    value
-                        .parse::<u16>()
-                        .map_err(|_| format!("invalid port: {value}"))?,
-                );
+                    .ok_or_else(|| format!("missing value for {token}"))?;
+                parsed.options.insert(token.clone(), value.clone());
+            } else {
+                parsed.flags.insert(token.clone());
             }
-            "--conns" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| "missing value for --conns".to_owned())?;
-                let connections = value
-                    .parse::<usize>()
-                    .map_err(|_| format!("invalid connection count: {value}"))?;
-                if connections == 0 || connections > 64 {
-                    return Err("--conns must be between 1 and 64".to_owned());
-                }
-                parsed.connections = Some(connections);
-            }
-            "--lan" => parsed.lan_only = true,
-            "--write" => parsed.allow_writes = true,
-            flag if flag.starts_with("--") => return Err(format!("unknown option: {flag}")),
-            positional if parsed.positional.is_none() => {
-                parsed.positional = Some(positional.to_owned());
-            }
-            unexpected => return Err(format!("unexpected argument: {unexpected}")),
+        } else if parsed.positional.is_empty() {
+            parsed.positional.clone_from(token);
+        } else {
+            return Err(format!("unexpected argument: {token}"));
         }
         index += 1;
     }
     Ok(parsed)
 }
 
+fn takes_value(flag: &str) -> bool {
+    matches!(flag, "--port" | "--conns")
+}
+
 fn run_host(args: CommandArgs) -> Result<(), String> {
-    if args.connections.is_some() {
-        return Err("--conns is only valid with connect".to_owned());
+    if args.positional.is_empty() {
+        return Err("host: missing <folder>".to_owned());
     }
-    let folder = args
-        .positional
-        .as_deref()
-        .ok_or_else(|| "host: missing <folder>".to_owned())?;
-    let mut server = Server::start(folder, args.port.unwrap_or(0), args.allow_writes)?;
+    let port = match args.get("--port") {
+        Some(value) => cxx_stoi(value)? as u16,
+        None => 0,
+    };
+    let mut server = Server::start(&args.positional, port, args.has("--write"))?;
 
     let (advertised_ip, advertised_port, reach, _upnp_mapping) =
-        advertised_endpoint(server.bound_port(), args.lan_only);
+        advertised_endpoint(server.bound_port(), args.has("--lan"));
     let token = Token::new(
         advertised_ip.to_string(),
         advertised_port,
         server.secret().to_vec(),
         server.share_name().to_owned(),
-        args.allow_writes,
+        args.has("--write"),
     )?;
     let ticket = publish_share(&token, reach)?;
+    let mut quic_host = if ticket.cloud_published() {
+        NativeQuicHost::start(ticket.room_code(), server.bound_port()).ok()
+    } else {
+        None
+    };
 
     println!(
-        "Sharing \"{}\" on port {}\n  {}\n  signaling: {}\n  access: {}\n  encryption: ChaCha20-Poly1305 (always on)\n\nConnect code:\n  {}\n\nShare only that code — no password.\nPress Ctrl+C to stop sharing.",
+        "Sharing \"{}\" on port {}\n  {}\n  signaling: {}\n  access: {}\n  encryption: ChaCha20-Poly1305 (always on)\n\nConnect code:\n  {}\n\nShare only that code — no password. Cloudflare never receives the\nIP, port, data-path secret, or the secret half of the code.\nPress Ctrl+C to stop sharing.",
         server.share_name(),
         server.bound_port(),
         ticket.reach(),
         ticket.cloud_status(),
-        if args.allow_writes {
+        if args.has("--write") {
             "read/write"
         } else {
             "read-only"
@@ -170,7 +182,7 @@ fn run_host(args: CommandArgs) -> Result<(), String> {
     );
 
     let stop = install_stop_handler()?;
-    let mut last_clients = usize::MAX;
+    let mut last_clients = server.client_count();
     while !stop.load(Ordering::Acquire) && server.running() {
         let clients = server.client_count();
         if clients != last_clients {
@@ -181,6 +193,9 @@ fn run_host(args: CommandArgs) -> Result<(), String> {
     }
 
     println!("\nStopping…");
+    if let Some(host) = quic_host.as_mut() {
+        host.stop();
+    }
     if ticket.cloud_published()
         && let Err(error) = remove_published_room(&ticket)
     {
@@ -196,12 +211,7 @@ fn advertised_endpoint(
 ) -> (IpAddr, u16, String, Option<UpnpMapping>) {
     let lan_ip = best_lan_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     if lan_only {
-        return (
-            lan_ip,
-            internal_port,
-            format!("LAN only — {lan_ip}"),
-            None,
-        );
+        return (lan_ip, internal_port, format!("LAN only — {lan_ip}"), None);
     }
 
     if let Some(ip) = best_global_ipv6() {
@@ -243,27 +253,63 @@ fn advertised_endpoint(
 }
 
 fn run_connect(args: CommandArgs) -> Result<(), String> {
-    if args.port.is_some() || args.lan_only || args.allow_writes {
-        return Err("connect accepts only --conns".to_owned());
+    if args.positional.is_empty() {
+        return Err("connect: missing <room-code-or-offline-blob>".to_owned());
     }
-    let code = args
-        .positional
-        .as_deref()
-        .ok_or_else(|| "connect: missing <room-code-or-offline-blob>".to_owned())?;
+    let code = args.positional.as_str();
     let token = resolve_share_code(code)?;
-    let connections = args.connections.unwrap_or(0);
-    let client = Arc::new(Client::connect(&token, connections)?);
-    let mount = match Mount::start(Arc::clone(&client), token.folder(), token.allow_writes()) {
-        Ok(mount) => mount,
-        Err(error) => {
-            client.disconnect();
-            return Err(error);
+    let mut quic_error = String::new();
+    let mut quic_client = None;
+    let mut mounted = None;
+
+    if looks_like_room_code(code) {
+        match NativeQuicClient::connect(code, &token) {
+            Ok(mut quic) => {
+                let client = quic.client();
+                match Mount::start(Arc::clone(&client), token.folder(), token.allow_writes()) {
+                    Ok(mount) => {
+                        mounted = Some((client, mount, "direct native QUIC via ICE/STUN"));
+                        quic_client = Some(quic);
+                    }
+                    Err(_) => quic.disconnect(),
+                }
+            }
+            Err(error) => quic_error = error,
         }
-    };
+    }
+
+    if mounted.is_none() {
+        let client = Arc::new(Client::connect_default(&token).map_err(|tcp_error| {
+            format!(
+                "Direct QUIC failed: {}; direct TCP failed: {tcp_error}",
+                if quic_error.is_empty() {
+                    "unavailable"
+                } else {
+                    quic_error.as_str()
+                }
+            )
+        })?);
+        match Mount::start(Arc::clone(&client), token.folder(), token.allow_writes()) {
+            Ok(mount) => mounted = Some((client, mount, "direct native TCP")),
+            Err(tcp_error) => {
+                client.disconnect();
+                return Err(format!(
+                    "Direct QUIC failed: {}; direct TCP failed: {tcp_error}",
+                    if quic_error.is_empty() {
+                        "unavailable"
+                    } else {
+                        quic_error.as_str()
+                    }
+                ));
+            }
+        }
+    }
+
+    let (client, mount, transport) = mounted.ok_or_else(|| "connect failed".to_owned())?;
     let mount_path: PathBuf = mount.mount_path().to_owned();
 
     println!(
-        "Mounted \"{}\" as {}\nTransport: direct native TCP.\nIt behaves like a local disk; only the bytes apps actually read cross the wire.\n\nPress Ctrl+C to unmount.",
+        "Mounted \"{}\" as {}\nTransport: {transport}.\nIt behaves like a local disk; only the bytes apps actually read cross the wire.\n\nPress Ctrl+C to unmount, or eject the drive/volume in the OS.",
         token.folder(),
         mount_path.display(),
     );
@@ -275,8 +321,44 @@ fn run_connect(args: CommandArgs) -> Result<(), String> {
 
     println!("\nUnmounting…");
     let unmount_result = mount.unmount();
-    client.disconnect();
+    if let Some(mut quic) = quic_client {
+        quic.disconnect();
+    } else {
+        client.disconnect();
+    }
     unmount_result
+}
+
+fn cxx_stoi(text: &str) -> Result<i32, String> {
+    let text = text.trim_start();
+    let bytes = text.as_bytes();
+    let mut index = 0_usize;
+    let negative = match bytes.first() {
+        Some(b'+') => {
+            index = 1;
+            false
+        }
+        Some(b'-') => {
+            index = 1;
+            true
+        }
+        _ => false,
+    };
+    let start = index;
+    let mut value = 0_i64;
+    while let Some(digit) = bytes.get(index).and_then(|byte| byte.is_ascii_digit().then_some(*byte))
+    {
+        value = value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(i64::from(digit - b'0')))
+            .ok_or_else(|| "stoi".to_owned())?;
+        index += 1;
+    }
+    if index == start {
+        return Err("stoi".to_owned());
+    }
+    let value = if negative { -value } else { value };
+    i32::try_from(value).map_err(|_| "stoi".to_owned())
 }
 
 fn install_stop_handler() -> Result<Arc<AtomicBool>, String> {
@@ -333,6 +415,42 @@ fn is_global_ipv6(ip: &Ipv6Addr) -> bool {
 
 fn print_usage() {
     println!(
-        "Folder Buddies — share a folder as a real, mounted disk.\n\nUsage:\n  folderbuddies host <folder> [options]\n      --lan               share on this LAN only (don't expose to the internet)\n      --port <n>          listen port (default: auto / OS-chosen)\n      --write             allow clients to upload, edit, and delete files\n\n  folderbuddies connect <room-code-or-offline-blob> [--conns <n>]\n      mounts automatically as a drive/volume\n\n  With no subcommand the graphical app is launched."
+        "Folder Buddies — share a folder as a real, mounted disk.\n\nUsage:\n  folderbuddies host <folder> [options]\n      --lan               share on this LAN only (don't expose to the internet)\n      --port <n>          listen port (default: auto / OS-chosen)\n      --write             allow clients to upload, edit, and delete files\n      (prints a connect code; a short room code when published via Cloudflare/Firebase,\n       or a longer self-contained offline Base91 blob when they are unavailable)\n\n  folderbuddies connect <room-code-or-offline-blob>\n      mounts automatically as a drive/volume at the platform default\n\n  With no subcommand the graphical app is launched."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parser_matches_cpp_unknown_flag_and_unused_conns_behavior() {
+        let parsed = parse_arguments(vec![
+            "share-code".to_owned(),
+            "--conns".to_owned(),
+            "not-a-number".to_owned(),
+            "--future-flag".to_owned(),
+        ])
+        .expect("parse");
+        assert_eq!(parsed.positional, "share-code");
+        assert_eq!(parsed.get("--conns"), Some("not-a-number"));
+        assert!(parsed.has("--future-flag"));
+    }
+
+    #[test]
+    fn parser_rejects_second_positional_like_cpp() {
+        assert_eq!(
+            parse_arguments(vec!["one".to_owned(), "two".to_owned()])
+                .expect_err("second positional")
+                .to_string(),
+            "unexpected argument: two"
+        );
+    }
+
+    #[test]
+    fn cxx_stoi_accepts_trailing_text() {
+        assert_eq!(cxx_stoi("  -123garbage").expect("stoi"), -123);
+        assert_eq!(cxx_stoi("+42x").expect("stoi"), 42);
+        assert!(cxx_stoi("x42").is_err());
+    }
 }
