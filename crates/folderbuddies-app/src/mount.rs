@@ -8,6 +8,7 @@ use std::{
 use folderbuddies_core::{
     client::{Client, RemoteError},
     protocol::{MAX_IO, WireAttr},
+    ram_cache::RamCache,
 };
 use fsk::{
     DirectoryEntry, DirectorySink, Error, FileType, Filesystem, Metadata, MountSession,
@@ -117,7 +118,7 @@ impl InodeIndex {
 }
 
 struct RemoteFilesystem {
-    client: Arc<Client>,
+    client: RamCache,
     allow_writes: bool,
     inodes: Mutex<InodeIndex>,
 }
@@ -125,7 +126,7 @@ struct RemoteFilesystem {
 impl RemoteFilesystem {
     fn new(client: Arc<Client>, allow_writes: bool) -> Self {
         Self {
-            client,
+            client: RamCache::new(client),
             allow_writes,
             inodes: Mutex::new(InodeIndex::new()),
         }
