@@ -22,6 +22,20 @@ enum Command {
     Close,
 }
 
+#[derive(Clone, Debug)]
+pub struct RoomSender {
+    commands: mpsc::UnboundedSender<Command>,
+}
+
+impl RoomSender {
+    pub fn send_signal(&self, peer_id: &str, payload: &Value) -> Result<(), String> {
+        let message = encode_signal_message(peer_id, payload)?;
+        self.commands
+            .send(Command::Text(message))
+            .map_err(|_| "room WebSocket is closed".to_owned())
+    }
+}
+
 pub struct RoomSocket {
     commands: mpsc::UnboundedSender<Command>,
     events: Receiver<Result<RoomEvent, String>>,
@@ -146,11 +160,15 @@ impl RoomSocket {
         }
     }
 
+    #[must_use]
+    pub fn sender(&self) -> RoomSender {
+        RoomSender {
+            commands: self.commands.clone(),
+        }
+    }
+
     pub fn send_signal(&self, peer_id: &str, payload: &Value) -> Result<(), String> {
-        let message = encode_signal_message(peer_id, payload)?;
-        self.commands
-            .send(Command::Text(message))
-            .map_err(|_| "room WebSocket is closed".to_owned())
+        self.sender().send_signal(peer_id, payload)
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<RoomEvent, String> {
