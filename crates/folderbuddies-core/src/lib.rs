@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod cached_remote;
 pub mod client;
 pub mod compat_host;
 pub mod crypto;
