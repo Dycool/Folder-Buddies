@@ -455,7 +455,7 @@ impl Mount {
 
     pub(crate) fn unmount(mut self) -> Result<(), String> {
         if let Some(session) = self.session.take() {
-            let _ = session.unmount();
+            unmount_session(session);
         }
         if self.owned_mount_dir {
             let _ = fs::remove_dir(&self.mount_path);
@@ -463,6 +463,16 @@ impl Mount {
         }
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn unmount_session(session: MountSession) {
+    let _ = session.unmount();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unmount_session(session: MountSession) {
+    session.unmount();
 }
 
 impl Drop for Mount {
