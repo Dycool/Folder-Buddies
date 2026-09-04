@@ -14,7 +14,10 @@ futures-util.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
 percent-encoding.workspace = true
+quinn.workspace = true
+rcgen.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -22,6 +25,8 @@ socket2.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+webrtc-ice.workspace = true
+webrtc-util.workspace = true
 
 [lints]
 workspace = true
