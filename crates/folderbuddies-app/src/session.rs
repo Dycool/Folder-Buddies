@@ -80,26 +80,76 @@ impl Drop for UpnpMapping {
     }
 }
 
-pub(crate) fn run() -> Result<(), String> {
+pub(crate) fn run() -> i32 {
     let args: Vec<String> = std::env::args().collect();
     if !is_cli_invocation(&args) {
-        return super::gui::run_gui();
+        return match super::gui::run_gui() {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("Folder Buddies: {error}");
+                1
+            }
+        };
     }
     let command = &args[1];
     if matches!(command.as_str(), "help" | "--help" | "-h") {
         print_usage();
-        return Ok(());
+        return 0;
     }
-    let parsed = parse_arguments(args[2..].to_vec()).map_err(|error| {
-        format!(
-            "{}: {error}",
-            if command == "host" { "host" } else { "connect" }
-        )
-    })?;
+    let parsed = match parse_arguments(args[2..].to_vec()) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!(
+                "{}: {error}",
+                if command == "host" { "host" } else { "connect" }
+            );
+            return 2;
+        }
+    };
     match command.as_str() {
-        "host" => run_host(parsed),
-        "connect" => run_connect(parsed),
-        _ => super::gui::run_gui(),
+        "host" => {
+            if parsed.positional.is_empty() {
+                eprintln!("host: missing <folder>");
+                return 2;
+            }
+            let port = match parsed.get("--port") {
+                Some(value) => match cxx_stoi(value) {
+                    Ok(port) => port as u16,
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        return 2;
+                    }
+                },
+                None => 0,
+            };
+            match run_host(parsed, port) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("host failed: {error}");
+                    1
+                }
+            }
+        }
+        "connect" => {
+            if parsed.positional.is_empty() {
+                eprintln!("connect: missing <room-code-or-offline-blob>");
+                return 2;
+            }
+            match run_connect(parsed) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("connect failed: {error}");
+                    1
+                }
+            }
+        }
+        _ => match super::gui::run_gui() {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("Folder Buddies: {error}");
+                1
+            }
+        },
     }
 }
 
@@ -141,14 +191,7 @@ fn takes_value(flag: &str) -> bool {
     matches!(flag, "--port" | "--conns")
 }
 
-fn run_host(args: CommandArgs) -> Result<(), String> {
-    if args.positional.is_empty() {
-        return Err("host: missing <folder>".to_owned());
-    }
-    let port = match args.get("--port") {
-        Some(value) => cxx_stoi(value)? as u16,
-        None => 0,
-    };
+fn run_host(args: CommandArgs, port: u16) -> Result<(), String> {
     let mut server = Server::start(&args.positional, port, args.has("--write"))?;
 
     let (advertised_ip, advertised_port, reach, _upnp_mapping) =
@@ -253,9 +296,6 @@ fn advertised_endpoint(
 }
 
 fn run_connect(args: CommandArgs) -> Result<(), String> {
-    if args.positional.is_empty() {
-        return Err("connect: missing <room-code-or-offline-blob>".to_owned());
-    }
     let code = args.positional.as_str();
     let token = resolve_share_code(code)?;
     let mut quic_error = String::new();
@@ -346,7 +386,9 @@ fn cxx_stoi(text: &str) -> Result<i32, String> {
     };
     let start = index;
     let mut value = 0_i64;
-    while let Some(digit) = bytes.get(index).and_then(|byte| byte.is_ascii_digit().then_some(*byte))
+    while let Some(digit) = bytes
+        .get(index)
+        .and_then(|byte| byte.is_ascii_digit().then_some(*byte))
     {
         value = value
             .checked_mul(10)
