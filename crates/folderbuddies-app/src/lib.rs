@@ -5,6 +5,7 @@ mod mount;
 mod runtime;
 mod session;
 
-pub fn run() -> Result<(), String> {
+#[must_use]
+pub fn run() -> i32 {
     session::run()
 }
