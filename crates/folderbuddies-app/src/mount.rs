@@ -402,10 +402,10 @@ impl Filesystem for RemoteFilesystem {
         let destination = self.child_path(destination_parent, destination_name)?;
         self.client.rename(&source, &destination).map_err(remote_error)?;
         let mut index = self.inodes.lock().map_err(|_| Error::IO)?;
-        if let Some(replaced) = replaced_inode {
-            if let Ok(record) = index.record(replaced) {
-                index.remove_subtree(&record.path);
-            }
+        if let Some(replaced) = replaced_inode
+            && let Ok(record) = index.record(replaced)
+        {
+            index.remove_subtree(&record.path);
         }
         index.rename_subtree(&source, &destination, destination_parent);
         Ok(())
