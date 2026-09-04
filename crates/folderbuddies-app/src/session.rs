@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     path::PathBuf,
     sync::{
         Arc,
@@ -12,8 +12,9 @@ use std::{
 use folderbuddies_core::{
     client::Client,
     server::Server,
-    signaling::{publish_share, remove_published_room, resolve_share_code},
+    signaling::{Token, publish_share, remove_published_room, resolve_share_code},
 };
+use igd_next::{Gateway, PortMappingProtocol, search_gateway};
 
 use super::mount::Mount;
 
@@ -26,6 +27,50 @@ struct CommandArgs {
     connections: Option<usize>,
     lan_only: bool,
     allow_writes: bool,
+}
+
+struct UpnpMapping {
+    gateway: Gateway,
+    external_port: u16,
+}
+
+impl UpnpMapping {
+    fn create(local_ip: Ipv4Addr, internal_port: u16) -> Result<(Self, IpAddr, u16), String> {
+        let gateway = search_gateway(Default::default())
+            .map_err(|error| format!("gateway discovery failed: {error}"))?;
+        let local_address = SocketAddr::new(IpAddr::V4(local_ip), internal_port);
+        let external_port = gateway
+            .add_any_port(
+                PortMappingProtocol::TCP,
+                local_address,
+                0,
+                "Folder Buddies",
+            )
+            .map_err(|error| format!("UPnP port mapping failed: {error}"))?;
+        let external_ip = match gateway.get_external_ip() {
+            Ok(ip) => ip,
+            Err(error) => {
+                let _ = gateway.remove_port(PortMappingProtocol::TCP, external_port);
+                return Err(format!("UPnP external address lookup failed: {error}"));
+            }
+        };
+        Ok((
+            Self {
+                gateway,
+                external_port,
+            },
+            external_ip,
+            external_port,
+        ))
+    }
+}
+
+impl Drop for UpnpMapping {
+    fn drop(&mut self) {
+        let _ = self
+            .gateway
+            .remove_port(PortMappingProtocol::TCP, self.external_port);
+    }
 }
 
 pub(crate) fn run() -> Result<(), String> {
@@ -99,15 +144,15 @@ fn run_host(args: CommandArgs) -> Result<(), String> {
         .ok_or_else(|| "host: missing <folder>".to_owned())?;
     let mut server = Server::start(folder, args.port.unwrap_or(0), args.allow_writes)?;
 
-    let advertised_ip = best_local_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    let reach = if args.lan_only {
-        format!("LAN only — {advertised_ip}")
-    } else {
-        format!(
-            "LAN reachable — {advertised_ip} (safe Rust UPnP/public endpoint discovery is not active yet)"
-        )
-    };
-    let token = server.token(advertised_ip)?;
+    let (advertised_ip, advertised_port, reach, _upnp_mapping) =
+        advertised_endpoint(server.bound_port(), args.lan_only);
+    let token = Token::new(
+        advertised_ip.to_string(),
+        advertised_port,
+        server.secret().to_vec(),
+        server.share_name().to_owned(),
+        args.allow_writes,
+    )?;
     let ticket = publish_share(&token, reach)?;
 
     println!(
@@ -143,6 +188,58 @@ fn run_host(args: CommandArgs) -> Result<(), String> {
     }
     server.stop();
     Ok(())
+}
+
+fn advertised_endpoint(
+    internal_port: u16,
+    lan_only: bool,
+) -> (IpAddr, u16, String, Option<UpnpMapping>) {
+    let lan_ip = best_lan_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    if lan_only {
+        return (
+            lan_ip,
+            internal_port,
+            format!("LAN only — {lan_ip}"),
+            None,
+        );
+    }
+
+    if let Some(ip) = best_global_ipv6() {
+        return (
+            IpAddr::V6(ip),
+            internal_port,
+            format!("Internet (IPv6) — {ip}"),
+            None,
+        );
+    }
+
+    if let Some(local_v4) = best_local_ipv4() {
+        match UpnpMapping::create(local_v4, internal_port) {
+            Ok((mapping, external_ip, external_port)) => {
+                return (
+                    external_ip,
+                    external_port,
+                    format!("Internet (IPv4/UPnP) — {external_ip} :{external_port}"),
+                    Some(mapping),
+                );
+            }
+            Err(error) => {
+                return (
+                    lan_ip,
+                    internal_port,
+                    format!("UPnP failed ({error}) — only reachable on LAN: {lan_ip}"),
+                    None,
+                );
+            }
+        }
+    }
+
+    (
+        lan_ip,
+        internal_port,
+        format!("No public route found — only reachable on LAN: {lan_ip}"),
+        None,
+    )
 }
 
 fn run_connect(args: CommandArgs) -> Result<(), String> {
@@ -190,10 +287,24 @@ fn install_stop_handler() -> Result<Arc<AtomicBool>, String> {
     Ok(stop)
 }
 
-fn best_local_ip() -> Option<IpAddr> {
-    route_local_ip("[2001:4860:4860::8888]:80")
-        .filter(is_usable_ip)
-        .or_else(|| route_local_ip("1.1.1.1:80").filter(is_usable_ip))
+fn best_lan_ip() -> Option<IpAddr> {
+    best_local_ipv4()
+        .map(IpAddr::V4)
+        .or_else(|| route_local_ip("[2001:4860:4860::8888]:80").filter(is_usable_ip))
+}
+
+fn best_local_ipv4() -> Option<Ipv4Addr> {
+    match route_local_ip("1.1.1.1:80")? {
+        IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
+}
+
+fn best_global_ipv6() -> Option<Ipv6Addr> {
+    match route_local_ip("[2001:4860:4860::8888]:80")? {
+        IpAddr::V6(ip) if is_global_ipv6(&ip) => Some(ip),
+        _ => None,
+    }
 }
 
 fn route_local_ip(destination: &str) -> Option<IpAddr> {
@@ -212,8 +323,16 @@ fn is_usable_ip(ip: &IpAddr) -> bool {
     !ip.is_loopback() && !ip.is_unspecified()
 }
 
+fn is_global_ipv6(ip: &Ipv6Addr) -> bool {
+    !ip.is_loopback()
+        && !ip.is_unspecified()
+        && !ip.is_unique_local()
+        && !ip.is_unicast_link_local()
+        && !ip.is_multicast()
+}
+
 fn print_usage() {
     println!(
-        "Folder Buddies — share a folder as a real, mounted disk.\n\nUsage:\n  folderbuddies host <folder> [options]\n      --lan               share on this LAN only\n      --port <n>          listen port (default: auto / OS-chosen)\n      --write             allow clients to upload, edit, and delete files\n\n  folderbuddies connect <room-code-or-offline-blob> [--conns <n>]\n      mounts automatically as a drive/volume\n\n  With no subcommand the graphical app is launched."
+        "Folder Buddies — share a folder as a real, mounted disk.\n\nUsage:\n  folderbuddies host <folder> [options]\n      --lan               share on this LAN only (don't expose to the internet)\n      --port <n>          listen port (default: auto / OS-chosen)\n      --write             allow clients to upload, edit, and delete files\n\n  folderbuddies connect <room-code-or-offline-blob> [--conns <n>]\n      mounts automatically as a drive/volume\n\n  With no subcommand the graphical app is launched."
     );
 }
