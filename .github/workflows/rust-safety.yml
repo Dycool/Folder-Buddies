@@ -1,0 +1,54 @@
+name: Rust safety gate
+
+on:
+  push:
+    branches: [rust-port]
+  pull_request:
+    branches: [rust-port]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stable:
+    name: Safe Rust / fmt / clippy / tests
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
+      - name: Enforce source policy
+        shell: bash
+        run: python3 policy/check_rust_policy.py
+      - name: Check formatting
+        shell: bash
+        run: cargo +1.98.0 fmt --all -- --check
+      - name: Clippy
+        shell: bash
+        run: cargo +1.98.0 clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        shell: bash
+        run: cargo +1.98.0 test --workspace --all-targets
+
+  miri:
+    name: Miri core tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pinned Miri toolchain
+        shell: bash
+        run: rustup toolchain install nightly-2026-09-03 --profile minimal --component miri
+      - name: Enforce source policy
+        shell: bash
+        run: python3 policy/check_rust_policy.py
+      - name: Miri
+        shell: bash
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+        run: cargo +nightly-2026-09-03 miri test -p folderbuddies-core --lib

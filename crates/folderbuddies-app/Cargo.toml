@@ -1,0 +1,17 @@
+[package]
+name = "folderbuddies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+
+[dependencies]
+ctrlc.workspace = true
+eframe.workspace = true
+folderbuddies-core = { path = "../folderbuddies-core" }
+fsk.workspace = true
+igd-next.workspace = true
+quinn.workspace = true
+
+[lints]
+workspace = true
