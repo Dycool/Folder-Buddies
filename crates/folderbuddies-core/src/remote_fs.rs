@@ -3,7 +3,6 @@ use std::fmt;
 use crate::{
     client::{Client, RemoteError},
     protocol::{WireAttr, WireStatFs},
-    ram_cache::RamCache,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,110 +97,103 @@ pub trait RemoteFs: Send + Sync {
     fn access(&self, path: &str, mode: u32) -> Result<(), RemoteFsError>;
 }
 
-macro_rules! impl_remote_fs {
-    ($type:ty) => {
-        impl RemoteFs for $type {
-            fn connected(&self) -> bool {
-                <$type>::connected(self)
-            }
+impl RemoteFs for Client {
+    fn connected(&self) -> bool {
+        Client::connected(self)
+    }
 
-            fn disconnect(&self) {
-                <$type>::disconnect(self);
-            }
+    fn disconnect(&self) {
+        Client::disconnect(self);
+    }
 
-            fn bytes_read(&self) -> u64 {
-                <$type>::bytes_read(self)
-            }
+    fn bytes_read(&self) -> u64 {
+        Client::bytes_read(self)
+    }
 
-            fn bytes_written(&self) -> u64 {
-                <$type>::bytes_written(self)
-            }
+    fn bytes_written(&self) -> u64 {
+        Client::bytes_written(self)
+    }
 
-            fn take_invalidations(&self) -> Vec<String> {
-                <$type>::take_invalidations(self)
-            }
+    fn take_invalidations(&self) -> Vec<String> {
+        Client::take_invalidations(self)
+    }
 
-            fn get_attr(&self, path: &str) -> Result<WireAttr, RemoteFsError> {
-                <$type>::get_attr(self, path).map_err(Into::into)
-            }
+    fn get_attr(&self, path: &str) -> Result<WireAttr, RemoteFsError> {
+        Client::get_attr(self, path).map_err(Into::into)
+    }
 
-            fn read_dir(&self, path: &str) -> Result<Vec<RemoteDirEntry>, RemoteFsError> {
-                <$type>::read_dir(self, path)
-                    .map(|entries| {
-                        entries
-                            .into_iter()
-                            .map(|entry| RemoteDirEntry::new(entry.name().to_owned(), *entry.attr()))
-                            .collect()
-                    })
-                    .map_err(Into::into)
-            }
+    fn read_dir(&self, path: &str) -> Result<Vec<RemoteDirEntry>, RemoteFsError> {
+        Client::read_dir(self, path)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| RemoteDirEntry::new(entry.name().to_owned(), *entry.attr()))
+                    .collect()
+            })
+            .map_err(Into::into)
+    }
 
-            fn open(&self, path: &str, flags: i32) -> Result<u64, RemoteFsError> {
-                <$type>::open(self, path, flags).map_err(Into::into)
-            }
+    fn open(&self, path: &str, flags: i32) -> Result<u64, RemoteFsError> {
+        Client::open(self, path, flags).map_err(Into::into)
+    }
 
-            fn create(&self, path: &str, flags: i32, mode: u32) -> Result<u64, RemoteFsError> {
-                <$type>::create(self, path, flags, mode).map_err(Into::into)
-            }
+    fn create(&self, path: &str, flags: i32, mode: u32) -> Result<u64, RemoteFsError> {
+        Client::create(self, path, flags, mode).map_err(Into::into)
+    }
 
-            fn read(&self, handle: u64, offset: u64, amount: u32) -> Result<Vec<u8>, RemoteFsError> {
-                <$type>::read(self, handle, offset, amount).map_err(Into::into)
-            }
+    fn read(&self, handle: u64, offset: u64, amount: u32) -> Result<Vec<u8>, RemoteFsError> {
+        Client::read(self, handle, offset, amount).map_err(Into::into)
+    }
 
-            fn write(&self, handle: u64, offset: u64, data: &[u8]) -> Result<u32, RemoteFsError> {
-                <$type>::write(self, handle, offset, data).map_err(Into::into)
-            }
+    fn write(&self, handle: u64, offset: u64, data: &[u8]) -> Result<u32, RemoteFsError> {
+        Client::write(self, handle, offset, data).map_err(Into::into)
+    }
 
-            fn release(&self, handle: u64) -> Result<(), RemoteFsError> {
-                <$type>::release(self, handle).map_err(Into::into)
-            }
+    fn release(&self, handle: u64) -> Result<(), RemoteFsError> {
+        Client::release(self, handle).map_err(Into::into)
+    }
 
-            fn fsync(&self, handle: u64) -> Result<(), RemoteFsError> {
-                <$type>::fsync(self, handle).map_err(Into::into)
-            }
+    fn fsync(&self, handle: u64) -> Result<(), RemoteFsError> {
+        Client::fsync(self, handle).map_err(Into::into)
+    }
 
-            fn flush(&self, handle: u64) -> Result<(), RemoteFsError> {
-                <$type>::flush(self, handle).map_err(Into::into)
-            }
+    fn flush(&self, handle: u64) -> Result<(), RemoteFsError> {
+        Client::flush(self, handle).map_err(Into::into)
+    }
 
-            fn mkdir(&self, path: &str, mode: u32) -> Result<(), RemoteFsError> {
-                <$type>::mkdir(self, path, mode).map_err(Into::into)
-            }
+    fn mkdir(&self, path: &str, mode: u32) -> Result<(), RemoteFsError> {
+        Client::mkdir(self, path, mode).map_err(Into::into)
+    }
 
-            fn unlink(&self, path: &str) -> Result<(), RemoteFsError> {
-                <$type>::unlink(self, path).map_err(Into::into)
-            }
+    fn unlink(&self, path: &str) -> Result<(), RemoteFsError> {
+        Client::unlink(self, path).map_err(Into::into)
+    }
 
-            fn rmdir(&self, path: &str) -> Result<(), RemoteFsError> {
-                <$type>::rmdir(self, path).map_err(Into::into)
-            }
+    fn rmdir(&self, path: &str) -> Result<(), RemoteFsError> {
+        Client::rmdir(self, path).map_err(Into::into)
+    }
 
-            fn rename(&self, from: &str, to: &str) -> Result<(), RemoteFsError> {
-                <$type>::rename(self, from, to).map_err(Into::into)
-            }
+    fn rename(&self, from: &str, to: &str) -> Result<(), RemoteFsError> {
+        Client::rename(self, from, to).map_err(Into::into)
+    }
 
-            fn truncate(&self, path: &str, size: u64) -> Result<(), RemoteFsError> {
-                <$type>::truncate(self, path, size).map_err(Into::into)
-            }
+    fn truncate(&self, path: &str, size: u64) -> Result<(), RemoteFsError> {
+        Client::truncate(self, path, size).map_err(Into::into)
+    }
 
-            fn stat_fs(&self, path: &str) -> Result<WireStatFs, RemoteFsError> {
-                <$type>::stat_fs(self, path).map_err(Into::into)
-            }
+    fn stat_fs(&self, path: &str) -> Result<WireStatFs, RemoteFsError> {
+        Client::stat_fs(self, path).map_err(Into::into)
+    }
 
-            fn utimens(&self, path: &str, atime: i64, mtime: i64) -> Result<(), RemoteFsError> {
-                <$type>::utimens(self, path, atime, mtime).map_err(Into::into)
-            }
+    fn utimens(&self, path: &str, atime: i64, mtime: i64) -> Result<(), RemoteFsError> {
+        Client::utimens(self, path, atime, mtime).map_err(Into::into)
+    }
 
-            fn chmod(&self, path: &str, mode: u32) -> Result<(), RemoteFsError> {
-                <$type>::chmod(self, path, mode).map_err(Into::into)
-            }
+    fn chmod(&self, path: &str, mode: u32) -> Result<(), RemoteFsError> {
+        Client::chmod(self, path, mode).map_err(Into::into)
+    }
 
-            fn access(&self, path: &str, mode: u32) -> Result<(), RemoteFsError> {
-                <$type>::access(self, path, mode).map_err(Into::into)
-            }
-        }
-    };
+    fn access(&self, path: &str, mode: u32) -> Result<(), RemoteFsError> {
+        Client::access(self, path, mode).map_err(Into::into)
+    }
 }
-
-impl_remote_fs!(Client);
-impl_remote_fs!(RamCache);
