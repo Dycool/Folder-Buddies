@@ -1,14 +1,75 @@
+use std::fmt;
+
 use crate::{
-    client::{Client, DirEntry, RemoteError},
-    protocol::WireAttr,
-    protocol::WireStatFs,
+    client::{Client, RemoteError},
+    protocol::{WireAttr, WireStatFs},
 };
 
-/// Transport-independent filesystem client contract.
-///
-/// The C++ implementation mounts any `RemoteFs` (native TCP, native QUIC, or
-/// WebRTC compatibility). Keeping the same boundary in Rust prevents the mount
-/// layer from accidentally making transport-specific assumptions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteFsError {
+    status: i16,
+    message: String,
+}
+
+impl RemoteFsError {
+    #[must_use]
+    pub fn new(status: i16, message: impl Into<String>) -> Self {
+        Self {
+            status: status.max(1),
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> i16 {
+        self.status
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl From<RemoteError> for RemoteFsError {
+    fn from(error: RemoteError) -> Self {
+        Self::new(error.status(), error.message())
+    }
+}
+
+impl fmt::Display for RemoteFsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} (status {})", self.message, self.status)
+    }
+}
+
+impl std::error::Error for RemoteFsError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteDirEntry {
+    name: String,
+    attr: WireAttr,
+}
+
+impl RemoteDirEntry {
+    #[must_use]
+    pub fn new(name: String, attr: WireAttr) -> Self {
+        Self { name, attr }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn attr(&self) -> &WireAttr {
+        &self.attr
+    }
+}
+
+/// Transport-independent filesystem client contract, mirroring the C++
+/// `RemoteFs` boundary used by native TCP, native QUIC and WebRTC clients.
 pub trait RemoteFs: Send + Sync {
     fn connected(&self) -> bool;
     fn disconnect(&self);
@@ -16,24 +77,24 @@ pub trait RemoteFs: Send + Sync {
     fn bytes_written(&self) -> u64;
     fn take_invalidations(&self) -> Vec<String>;
 
-    fn get_attr(&self, path: &str) -> Result<WireAttr, RemoteError>;
-    fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, RemoteError>;
-    fn open(&self, path: &str, flags: i32) -> Result<u64, RemoteError>;
-    fn create(&self, path: &str, flags: i32, mode: u32) -> Result<u64, RemoteError>;
-    fn read(&self, handle: u64, offset: u64, amount: u32) -> Result<Vec<u8>, RemoteError>;
-    fn write(&self, handle: u64, offset: u64, data: &[u8]) -> Result<u32, RemoteError>;
-    fn release(&self, handle: u64) -> Result<(), RemoteError>;
-    fn fsync(&self, handle: u64) -> Result<(), RemoteError>;
-    fn flush(&self, handle: u64) -> Result<(), RemoteError>;
-    fn mkdir(&self, path: &str, mode: u32) -> Result<(), RemoteError>;
-    fn unlink(&self, path: &str) -> Result<(), RemoteError>;
-    fn rmdir(&self, path: &str) -> Result<(), RemoteError>;
-    fn rename(&self, from: &str, to: &str) -> Result<(), RemoteError>;
-    fn truncate(&self, path: &str, size: u64) -> Result<(), RemoteError>;
-    fn stat_fs(&self, path: &str) -> Result<WireStatFs, RemoteError>;
-    fn utimens(&self, path: &str, atime: i64, mtime: i64) -> Result<(), RemoteError>;
-    fn chmod(&self, path: &str, mode: u32) -> Result<(), RemoteError>;
-    fn access(&self, path: &str, mode: u32) -> Result<(), RemoteError>;
+    fn get_attr(&self, path: &str) -> Result<WireAttr, RemoteFsError>;
+    fn read_dir(&self, path: &str) -> Result<Vec<RemoteDirEntry>, RemoteFsError>;
+    fn open(&self, path: &str, flags: i32) -> Result<u64, RemoteFsError>;
+    fn create(&self, path: &str, flags: i32, mode: u32) -> Result<u64, RemoteFsError>;
+    fn read(&self, handle: u64, offset: u64, amount: u32) -> Result<Vec<u8>, RemoteFsError>;
+    fn write(&self, handle: u64, offset: u64, data: &[u8]) -> Result<u32, RemoteFsError>;
+    fn release(&self, handle: u64) -> Result<(), RemoteFsError>;
+    fn fsync(&self, handle: u64) -> Result<(), RemoteFsError>;
+    fn flush(&self, handle: u64) -> Result<(), RemoteFsError>;
+    fn mkdir(&self, path: &str, mode: u32) -> Result<(), RemoteFsError>;
+    fn unlink(&self, path: &str) -> Result<(), RemoteFsError>;
+    fn rmdir(&self, path: &str) -> Result<(), RemoteFsError>;
+    fn rename(&self, from: &str, to: &str) -> Result<(), RemoteFsError>;
+    fn truncate(&self, path: &str, size: u64) -> Result<(), RemoteFsError>;
+    fn stat_fs(&self, path: &str) -> Result<WireStatFs, RemoteFsError>;
+    fn utimens(&self, path: &str, atime: i64, mtime: i64) -> Result<(), RemoteFsError>;
+    fn chmod(&self, path: &str, mode: u32) -> Result<(), RemoteFsError>;
+    fn access(&self, path: &str, mode: u32) -> Result<(), RemoteFsError>;
 }
 
 impl RemoteFs for Client {
@@ -57,75 +118,82 @@ impl RemoteFs for Client {
         Client::take_invalidations(self)
     }
 
-    fn get_attr(&self, path: &str) -> Result<WireAttr, RemoteError> {
-        Client::get_attr(self, path)
+    fn get_attr(&self, path: &str) -> Result<WireAttr, RemoteFsError> {
+        Client::get_attr(self, path).map_err(Into::into)
     }
 
-    fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, RemoteError> {
+    fn read_dir(&self, path: &str) -> Result<Vec<RemoteDirEntry>, RemoteFsError> {
         Client::read_dir(self, path)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| RemoteDirEntry::new(entry.name().to_owned(), *entry.attr()))
+                    .collect()
+            })
+            .map_err(Into::into)
     }
 
-    fn open(&self, path: &str, flags: i32) -> Result<u64, RemoteError> {
-        Client::open(self, path, flags)
+    fn open(&self, path: &str, flags: i32) -> Result<u64, RemoteFsError> {
+        Client::open(self, path, flags).map_err(Into::into)
     }
 
-    fn create(&self, path: &str, flags: i32, mode: u32) -> Result<u64, RemoteError> {
-        Client::create(self, path, flags, mode)
+    fn create(&self, path: &str, flags: i32, mode: u32) -> Result<u64, RemoteFsError> {
+        Client::create(self, path, flags, mode).map_err(Into::into)
     }
 
-    fn read(&self, handle: u64, offset: u64, amount: u32) -> Result<Vec<u8>, RemoteError> {
-        Client::read(self, handle, offset, amount)
+    fn read(&self, handle: u64, offset: u64, amount: u32) -> Result<Vec<u8>, RemoteFsError> {
+        Client::read(self, handle, offset, amount).map_err(Into::into)
     }
 
-    fn write(&self, handle: u64, offset: u64, data: &[u8]) -> Result<u32, RemoteError> {
-        Client::write(self, handle, offset, data)
+    fn write(&self, handle: u64, offset: u64, data: &[u8]) -> Result<u32, RemoteFsError> {
+        Client::write(self, handle, offset, data).map_err(Into::into)
     }
 
-    fn release(&self, handle: u64) -> Result<(), RemoteError> {
-        Client::release(self, handle)
+    fn release(&self, handle: u64) -> Result<(), RemoteFsError> {
+        Client::release(self, handle).map_err(Into::into)
     }
 
-    fn fsync(&self, handle: u64) -> Result<(), RemoteError> {
-        Client::fsync(self, handle)
+    fn fsync(&self, handle: u64) -> Result<(), RemoteFsError> {
+        Client::fsync(self, handle).map_err(Into::into)
     }
 
-    fn flush(&self, handle: u64) -> Result<(), RemoteError> {
-        Client::flush(self, handle)
+    fn flush(&self, handle: u64) -> Result<(), RemoteFsError> {
+        Client::flush(self, handle).map_err(Into::into)
     }
 
-    fn mkdir(&self, path: &str, mode: u32) -> Result<(), RemoteError> {
-        Client::mkdir(self, path, mode)
+    fn mkdir(&self, path: &str, mode: u32) -> Result<(), RemoteFsError> {
+        Client::mkdir(self, path, mode).map_err(Into::into)
     }
 
-    fn unlink(&self, path: &str) -> Result<(), RemoteError> {
-        Client::unlink(self, path)
+    fn unlink(&self, path: &str) -> Result<(), RemoteFsError> {
+        Client::unlink(self, path).map_err(Into::into)
     }
 
-    fn rmdir(&self, path: &str) -> Result<(), RemoteError> {
-        Client::rmdir(self, path)
+    fn rmdir(&self, path: &str) -> Result<(), RemoteFsError> {
+        Client::rmdir(self, path).map_err(Into::into)
     }
 
-    fn rename(&self, from: &str, to: &str) -> Result<(), RemoteError> {
-        Client::rename(self, from, to)
+    fn rename(&self, from: &str, to: &str) -> Result<(), RemoteFsError> {
+        Client::rename(self, from, to).map_err(Into::into)
     }
 
-    fn truncate(&self, path: &str, size: u64) -> Result<(), RemoteError> {
-        Client::truncate(self, path, size)
+    fn truncate(&self, path: &str, size: u64) -> Result<(), RemoteFsError> {
+        Client::truncate(self, path, size).map_err(Into::into)
     }
 
-    fn stat_fs(&self, path: &str) -> Result<WireStatFs, RemoteError> {
-        Client::stat_fs(self, path)
+    fn stat_fs(&self, path: &str) -> Result<WireStatFs, RemoteFsError> {
+        Client::stat_fs(self, path).map_err(Into::into)
     }
 
-    fn utimens(&self, path: &str, atime: i64, mtime: i64) -> Result<(), RemoteError> {
-        Client::utimens(self, path, atime, mtime)
+    fn utimens(&self, path: &str, atime: i64, mtime: i64) -> Result<(), RemoteFsError> {
+        Client::utimens(self, path, atime, mtime).map_err(Into::into)
     }
 
-    fn chmod(&self, path: &str, mode: u32) -> Result<(), RemoteError> {
-        Client::chmod(self, path, mode)
+    fn chmod(&self, path: &str, mode: u32) -> Result<(), RemoteFsError> {
+        Client::chmod(self, path, mode).map_err(Into::into)
     }
 
-    fn access(&self, path: &str, mode: u32) -> Result<(), RemoteError> {
-        Client::access(self, path, mode)
+    fn access(&self, path: &str, mode: u32) -> Result<(), RemoteFsError> {
+        Client::access(self, path, mode).map_err(Into::into)
     }
 }
