@@ -455,7 +455,7 @@ impl Mount {
 
     pub(crate) fn unmount(mut self) -> Result<(), String> {
         if let Some(session) = self.session.take() {
-            session.unmount();
+            let _ = session.unmount();
         }
         if self.owned_mount_dir {
             let _ = fs::remove_dir(&self.mount_path);
