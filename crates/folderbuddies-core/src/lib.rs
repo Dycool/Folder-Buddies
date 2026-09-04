@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod crypto;
+pub mod native_quic;
 pub mod protocol;
 pub mod ram_cache;
 pub mod room_signaling;
