@@ -319,14 +319,9 @@ impl IceQuinnSocket {
         let read_conn = Arc::clone(&conn);
         tokio::spawn(async move {
             let mut packet = vec![0_u8; 65_535];
-            loop {
-                match read_conn.recv(&mut packet).await {
-                    Ok(size) => {
-                        if incoming_tx.send(packet[..size].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+            while let Ok(size) = read_conn.recv(&mut packet).await {
+                if incoming_tx.send(packet[..size].to_vec()).is_err() {
+                    break;
                 }
             }
         });
