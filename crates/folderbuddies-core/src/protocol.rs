@@ -121,20 +121,70 @@ impl Header {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WireAttr {
-    pub ino: u64,
-    pub size: u64,
-    pub blocks: u64,
-    pub atime: i64,
-    pub mtime: i64,
-    pub ctime: i64,
-    pub mode: u32,
-    pub nlink: u32,
-    pub uid: u32,
-    pub gid: u32,
+    pub(crate) ino: u64,
+    pub(crate) size: u64,
+    pub(crate) blocks: u64,
+    pub(crate) atime: i64,
+    pub(crate) mtime: i64,
+    pub(crate) ctime: i64,
+    pub(crate) mode: u32,
+    pub(crate) nlink: u32,
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
 }
 
 impl WireAttr {
     pub const LEN: usize = 64;
+
+    #[must_use]
+    pub const fn ino(&self) -> u64 {
+        self.ino
+    }
+
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    #[must_use]
+    pub const fn blocks(&self) -> u64 {
+        self.blocks
+    }
+
+    #[must_use]
+    pub const fn atime(&self) -> i64 {
+        self.atime
+    }
+
+    #[must_use]
+    pub const fn mtime(&self) -> i64 {
+        self.mtime
+    }
+
+    #[must_use]
+    pub const fn ctime(&self) -> i64 {
+        self.ctime
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> u32 {
+        self.mode
+    }
+
+    #[must_use]
+    pub const fn nlink(&self) -> u32 {
+        self.nlink
+    }
+
+    #[must_use]
+    pub const fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    #[must_use]
+    pub const fn gid(&self) -> u32 {
+        self.gid
+    }
 
     pub fn write_to(&self, writer: &mut Writer) {
         writer.u64(self.ino);
@@ -167,18 +217,58 @@ impl WireAttr {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WireStatFs {
-    pub bsize: u64,
-    pub frsize: u64,
-    pub blocks: u64,
-    pub bfree: u64,
-    pub bavail: u64,
-    pub files: u64,
-    pub ffree: u64,
-    pub namemax: u64,
+    pub(crate) bsize: u64,
+    pub(crate) frsize: u64,
+    pub(crate) blocks: u64,
+    pub(crate) bfree: u64,
+    pub(crate) bavail: u64,
+    pub(crate) files: u64,
+    pub(crate) ffree: u64,
+    pub(crate) namemax: u64,
 }
 
 impl WireStatFs {
     pub const LEN: usize = 64;
+
+    #[must_use]
+    pub const fn block_size(&self) -> u64 {
+        self.bsize
+    }
+
+    #[must_use]
+    pub const fn fragment_size(&self) -> u64 {
+        self.frsize
+    }
+
+    #[must_use]
+    pub const fn blocks(&self) -> u64 {
+        self.blocks
+    }
+
+    #[must_use]
+    pub const fn blocks_free(&self) -> u64 {
+        self.bfree
+    }
+
+    #[must_use]
+    pub const fn blocks_available(&self) -> u64 {
+        self.bavail
+    }
+
+    #[must_use]
+    pub const fn files(&self) -> u64 {
+        self.files
+    }
+
+    #[must_use]
+    pub const fn files_free(&self) -> u64 {
+        self.ffree
+    }
+
+    #[must_use]
+    pub const fn name_max(&self) -> u64 {
+        self.namemax
+    }
 
     pub fn write_to(&self, writer: &mut Writer) {
         writer.u64(self.bsize);
@@ -294,23 +384,33 @@ impl<'a> Reader<'a> {
     }
 
     pub fn u16(&mut self) -> io::Result<u16> {
-        Ok(u16::from_le_bytes(self.raw(2)?.try_into().map_err(|_| invalid_data("u16"))?))
+        Ok(u16::from_le_bytes(
+            self.raw(2)?.try_into().map_err(|_| invalid_data("u16"))?,
+        ))
     }
 
     pub fn i32(&mut self) -> io::Result<i32> {
-        Ok(i32::from_le_bytes(self.raw(4)?.try_into().map_err(|_| invalid_data("i32"))?))
+        Ok(i32::from_le_bytes(
+            self.raw(4)?.try_into().map_err(|_| invalid_data("i32"))?,
+        ))
     }
 
     pub fn u32(&mut self) -> io::Result<u32> {
-        Ok(u32::from_le_bytes(self.raw(4)?.try_into().map_err(|_| invalid_data("u32"))?))
+        Ok(u32::from_le_bytes(
+            self.raw(4)?.try_into().map_err(|_| invalid_data("u32"))?,
+        ))
     }
 
     pub fn i64(&mut self) -> io::Result<i64> {
-        Ok(i64::from_le_bytes(self.raw(8)?.try_into().map_err(|_| invalid_data("i64"))?))
+        Ok(i64::from_le_bytes(
+            self.raw(8)?.try_into().map_err(|_| invalid_data("i64"))?,
+        ))
     }
 
     pub fn u64(&mut self) -> io::Result<u64> {
-        Ok(u64::from_le_bytes(self.raw(8)?.try_into().map_err(|_| invalid_data("u64"))?))
+        Ok(u64::from_le_bytes(
+            self.raw(8)?.try_into().map_err(|_| invalid_data("u64"))?,
+        ))
     }
 
     pub fn string(&mut self) -> io::Result<String> {
@@ -342,7 +442,8 @@ pub fn write_plain_message<W: Write>(
     request_id: u64,
     payload: &[u8],
 ) -> io::Result<()> {
-    let payload_len = u32::try_from(payload.len()).map_err(|_| invalid_data("payload too large"))?;
+    let payload_len =
+        u32::try_from(payload.len()).map_err(|_| invalid_data("payload too large"))?;
     if payload_len > MAX_HANDSHAKE_MESSAGE {
         return Err(invalid_data("handshake payload too large"));
     }
