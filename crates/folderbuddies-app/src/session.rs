@@ -181,10 +181,10 @@ fn run_host(args: CommandArgs) -> Result<(), String> {
     }
 
     println!("\nStopping…");
-    if ticket.cloud_published() {
-        if let Err(error) = remove_published_room(&ticket) {
-            eprintln!("Folder Buddies: failed to remove published room: {error}");
-        }
+    if ticket.cloud_published()
+        && let Err(error) = remove_published_room(&ticket)
+    {
+        eprintln!("Folder Buddies: failed to remove published room: {error}");
     }
     server.stop();
     Ok(())
