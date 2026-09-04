@@ -4,7 +4,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit},
 };
-use hmac::{Hmac, KeyInit as HmacKeyInit, Mac};
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 use crate::protocol::{HEADER_LEN, Header, MAX_SECURE_RECORD};
@@ -82,7 +82,8 @@ pub fn random_array<const N: usize>() -> Result<[u8; N], String> {
 }
 
 pub fn aead_seal(key: &Key256, nonce: &[u8; 12], plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| "invalid ChaCha20 key".to_owned())?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(key).map_err(|_| "invalid ChaCha20 key".to_owned())?;
     let nonce = Nonce::from(*nonce);
     cipher
         .encrypt(&nonce, plaintext)
@@ -90,7 +91,8 @@ pub fn aead_seal(key: &Key256, nonce: &[u8; 12], plaintext: &[u8]) -> Result<Vec
 }
 
 pub fn aead_open(key: &Key256, nonce: &[u8; 12], record: &[u8]) -> Result<Vec<u8>, String> {
-    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| "invalid ChaCha20 key".to_owned())?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(key).map_err(|_| "invalid ChaCha20 key".to_owned())?;
     let nonce = Nonce::from(*nonce);
     cipher
         .decrypt(&nonce, record)
@@ -132,7 +134,10 @@ impl SecureSender {
         let len = u32::try_from(record.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "secure record too large"))?;
         if len > MAX_SECURE_RECORD {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "secure record too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "secure record too large",
+            ));
         }
         writer.write_all(&len.to_le_bytes())?;
         writer.write_all(&record)
@@ -156,7 +161,10 @@ impl SecureReceiver {
         reader.read_exact(&mut len_bytes)?;
         let record_len = u32::from_le_bytes(len_bytes);
         if record_len < (HEADER_LEN + 16) as u32 || record_len > MAX_SECURE_RECORD {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid secure record length"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid secure record length",
+            ));
         }
         let mut record = vec![0_u8; record_len as usize];
         reader.read_exact(&mut record)?;
@@ -168,12 +176,18 @@ impl SecureReceiver {
         let plain = aead_open(&self.key, &nonce, &record)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         if plain.len() < HEADER_LEN {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated secure header"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated secure header",
+            ));
         }
         let header = Header::decode(&plain[..HEADER_LEN])?;
         let payload = plain[HEADER_LEN..].to_vec();
         if header.payload_len() as usize != payload.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "secure payload length mismatch"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "secure payload length mismatch",
+            ));
         }
         Ok((header, payload))
     }
@@ -194,14 +208,19 @@ mod tests {
     #[test]
     fn rfc8439_vector_matches() {
         let key: Key256 = [
-            0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b,
-            0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97,
-            0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f,
+            0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d,
+            0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b,
+            0x9c, 0x9d, 0x9e, 0x9f,
         ];
-        let nonce = [0x07, 0, 0, 0, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47];
+        let nonce = [
+            0x07, 0, 0, 0, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+        ];
         let message = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
         let record = aead_seal(&key, &nonce, message).expect("seal");
-        assert_eq!(&record[..8], &[0xd3, 0x1a, 0x8d, 0x34, 0x64, 0x8e, 0x60, 0xdb]);
+        assert_eq!(
+            &record[..8],
+            &[0xd3, 0x1a, 0x8d, 0x34, 0x64, 0x8e, 0x60, 0xdb]
+        );
         assert_eq!(aead_open(&key, &nonce, &record).expect("open"), message);
     }
 
