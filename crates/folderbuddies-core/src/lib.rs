@@ -11,5 +11,6 @@ pub mod room_signaling;
 pub mod room_socket;
 pub mod server;
 pub mod signaling;
+pub mod web_client;
 pub mod web_compat;
 pub mod web_protocol;
