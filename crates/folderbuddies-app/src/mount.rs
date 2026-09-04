@@ -454,15 +454,14 @@ impl Mount {
     }
 
     pub(crate) fn unmount(mut self) -> Result<(), String> {
-        let unmount_result = match self.session.take() {
-            Some(session) => session.unmount().map_err(|error| error.to_string()),
-            None => Ok(()),
-        };
+        if let Some(session) = self.session.take() {
+            session.unmount();
+        }
         if self.owned_mount_dir {
             let _ = fs::remove_dir(&self.mount_path);
             self.owned_mount_dir = false;
         }
-        unmount_result
+        Ok(())
     }
 }
 
