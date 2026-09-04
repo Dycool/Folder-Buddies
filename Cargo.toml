@@ -14,6 +14,7 @@ license-file = "LICENSE"
 [workspace.dependencies]
 argon2 = "=0.6.0"
 base64 = "=0.22.1"
+bytes = "=1.12.1"
 chacha20poly1305 = "=0.11.0"
 crossbeam-channel = "=0.5.15"
 ctrlc = "=3.5.0"
@@ -35,6 +36,7 @@ socket2 = "=0.6.5"
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
 tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+webrtc = "=0.17.2"
 webrtc-ice = "=0.17.2"
 webrtc-util = "=0.17.1"
 
