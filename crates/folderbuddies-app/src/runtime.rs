@@ -6,12 +6,16 @@ use std::{
 
 use folderbuddies_core::{
     client::Client,
-    native_transport::{NativeQuicClient, NativeQuicHost},
+    compat_host::CompatRoomHost,
+    native_transport::NativeQuicClient,
+    remote_fs::RemoteFs,
     server::Server,
     signaling::{
         HostedShareTicket, Token, looks_like_room_code, publish_share, remove_published_room,
         resolve_share_code,
     },
+    web_client::WebRtcRemoteClient,
+    web_compat::looks_like_web_compat_code,
 };
 use igd_next::{Gateway, PortMappingProtocol, search_gateway};
 
@@ -59,7 +63,7 @@ impl Drop for UpnpMapping {
 pub(crate) struct HostingSession {
     server: Option<Server>,
     ticket: Option<HostedShareTicket>,
-    quic_host: Option<NativeQuicHost>,
+    compat_host: Option<CompatRoomHost>,
     upnp_mapping: Option<UpnpMapping>,
 }
 
@@ -69,6 +73,7 @@ impl HostingSession {
         lan_only: bool,
         allow_writes: bool,
     ) -> Result<Self, String> {
+        let folder = folder.as_ref();
         let server = Server::start(folder, 0, allow_writes)?;
         let (advertised_ip, advertised_port, reach, upnp_mapping) =
             advertised_endpoint(server.bound_port(), lan_only);
@@ -80,15 +85,21 @@ impl HostingSession {
             allow_writes,
         )?;
         let ticket = publish_share(&token, reach)?;
-        let quic_host = if ticket.cloud_published() {
-            NativeQuicHost::start(ticket.room_code(), server.bound_port()).ok()
+        let compat_host = if ticket.cloud_published() {
+            CompatRoomHost::start(
+                folder,
+                ticket.room_code(),
+                allow_writes,
+                server.bound_port(),
+            )
+            .ok()
         } else {
             None
         };
         Ok(Self {
             server: Some(server),
             ticket: Some(ticket),
-            quic_host,
+            compat_host,
             upnp_mapping,
         })
     }
@@ -124,7 +135,12 @@ impl HostingSession {
 
     #[must_use]
     pub(crate) fn client_count(&self) -> usize {
-        self.server.as_ref().map_or(0, Server::client_count)
+        let native = self.server.as_ref().map_or(0, Server::client_count);
+        let browser = self
+            .compat_host
+            .as_ref()
+            .map_or(0, CompatRoomHost::browser_client_count);
+        native.saturating_add(browser)
     }
 
     #[must_use]
@@ -134,17 +150,27 @@ impl HostingSession {
 
     #[must_use]
     pub(crate) fn bytes_sent(&self) -> u64 {
-        self.server.as_ref().map_or(0, Server::bytes_sent)
+        let native = self.server.as_ref().map_or(0, Server::bytes_sent);
+        let browser = self
+            .compat_host
+            .as_ref()
+            .map_or(0, CompatRoomHost::bytes_out);
+        native.saturating_add(browser)
     }
 
     #[must_use]
     pub(crate) fn bytes_received(&self) -> u64 {
-        self.server.as_ref().map_or(0, Server::bytes_received)
+        let native = self.server.as_ref().map_or(0, Server::bytes_received);
+        let browser = self
+            .compat_host
+            .as_ref()
+            .map_or(0, CompatRoomHost::bytes_in);
+        native.saturating_add(browser)
     }
 
     pub(crate) fn stop(&mut self) {
-        if let Some(mut quic_host) = self.quic_host.take() {
-            quic_host.stop();
+        if let Some(mut compat_host) = self.compat_host.take() {
+            compat_host.stop();
         }
         if let Some(ticket) = self.ticket.take()
             && ticket.cloud_published()
@@ -164,8 +190,43 @@ impl Drop for HostingSession {
     }
 }
 
+enum ConnectedRemote {
+    Native(Arc<Client>),
+    Web(Arc<WebRtcRemoteClient>),
+}
+
+impl ConnectedRemote {
+    fn connected(&self) -> bool {
+        match self {
+            Self::Native(client) => client.connected(),
+            Self::Web(client) => client.connected(),
+        }
+    }
+
+    fn disconnect(&self) {
+        match self {
+            Self::Native(client) => client.disconnect(),
+            Self::Web(client) => client.disconnect(),
+        }
+    }
+
+    fn bytes_read(&self) -> u64 {
+        match self {
+            Self::Native(client) => client.bytes_read(),
+            Self::Web(client) => client.bytes_read(),
+        }
+    }
+
+    fn bytes_written(&self) -> u64 {
+        match self {
+            Self::Native(client) => client.bytes_written(),
+            Self::Web(client) => client.bytes_written(),
+        }
+    }
+}
+
 pub(crate) struct ConnectedSession {
-    client: Arc<Client>,
+    remote: ConnectedRemote,
     quic_client: Option<NativeQuicClient>,
     mount: Option<Mount>,
     mount_path: PathBuf,
@@ -175,70 +236,109 @@ pub(crate) struct ConnectedSession {
 
 impl ConnectedSession {
     pub(crate) fn start(code: &str, _connections: usize) -> Result<Self, String> {
-        let token = resolve_share_code(code)?;
-        let mut quic_error = String::new();
+        let mut decode_error = String::new();
+        let mut connection_error = String::new();
 
-        if looks_like_room_code(code) {
-            match NativeQuicClient::connect(code, &token) {
-                Ok(mut quic_client) => {
-                    let client = quic_client.client();
-                    match Mount::start(Arc::clone(&client), token.folder(), token.allow_writes()) {
+        match resolve_share_code(code) {
+            Ok(token) => {
+                let mut quic_error = String::new();
+                if looks_like_room_code(code) {
+                    match NativeQuicClient::connect(code, &token) {
+                        Ok(mut quic_client) => {
+                            let client = quic_client.client();
+                            match Mount::start(
+                                Arc::clone(&client),
+                                token.folder(),
+                                token.allow_writes(),
+                            ) {
+                                Ok(mount) => {
+                                    let mount_path = mount.mount_path().to_owned();
+                                    return Ok(Self {
+                                        remote: ConnectedRemote::Native(client),
+                                        quic_client: Some(quic_client),
+                                        mount: Some(mount),
+                                        mount_path,
+                                        folder: token.folder().to_owned(),
+                                        allow_writes: token.allow_writes(),
+                                    });
+                                }
+                                Err(_) => quic_client.disconnect(),
+                            }
+                        }
+                        Err(error) => quic_error = error,
+                    }
+                }
+
+                match Client::connect_default(&token) {
+                    Ok(client) => {
+                        let client = Arc::new(client);
+                        match Mount::start(
+                            Arc::clone(&client),
+                            token.folder(),
+                            token.allow_writes(),
+                        ) {
+                            Ok(mount) => {
+                                let mount_path = mount.mount_path().to_owned();
+                                return Ok(Self {
+                                    remote: ConnectedRemote::Native(client),
+                                    quic_client: None,
+                                    mount: Some(mount),
+                                    mount_path,
+                                    folder: token.folder().to_owned(),
+                                    allow_writes: token.allow_writes(),
+                                });
+                            }
+                            Err(tcp_error) => {
+                                client.disconnect();
+                                connection_error = direct_failure(&quic_error, &tcp_error);
+                            }
+                        }
+                    }
+                    Err(tcp_error) => {
+                        connection_error = direct_failure(&quic_error, &tcp_error);
+                    }
+                }
+            }
+            Err(error) => decode_error = error,
+        }
+
+        if !decode_error.is_empty() && looks_like_web_compat_code(code) {
+            match WebRtcRemoteClient::connect(code) {
+                Ok(client) => {
+                    let allow_writes = client.can_write();
+                    let remote_for_mount: Arc<dyn RemoteFs> = client.clone();
+                    match Mount::start_remote(remote_for_mount, "Web share", allow_writes) {
                         Ok(mount) => {
                             let mount_path = mount.mount_path().to_owned();
                             return Ok(Self {
-                                client,
-                                quic_client: Some(quic_client),
+                                remote: ConnectedRemote::Web(client),
+                                quic_client: None,
                                 mount: Some(mount),
                                 mount_path,
-                                folder: token.folder().to_owned(),
-                                allow_writes: token.allow_writes(),
+                                folder: "Web share".to_owned(),
+                                allow_writes,
                             });
                         }
-                        Err(_) => quic_client.disconnect(),
+                        Err(error) => {
+                            client.disconnect();
+                            connection_error = error;
+                        }
                     }
                 }
-                Err(error) => quic_error = error,
+                Err(error) => connection_error = error,
             }
         }
 
-        let client = Arc::new(Client::connect_default(&token).map_err(|tcp_error| {
-            format!(
-                "Direct QUIC failed: {}; direct TCP failed: {tcp_error}",
-                if quic_error.is_empty() {
-                    "unavailable"
-                } else {
-                    quic_error.as_str()
-                }
-            )
-        })?);
-        let mount = match Mount::start(Arc::clone(&client), token.folder(), token.allow_writes()) {
-            Ok(mount) => mount,
-            Err(tcp_error) => {
-                client.disconnect();
-                return Err(format!(
-                    "Direct QUIC failed: {}; direct TCP failed: {tcp_error}",
-                    if quic_error.is_empty() {
-                        "unavailable"
-                    } else {
-                        quic_error.as_str()
-                    }
-                ));
-            }
-        };
-        let mount_path = mount.mount_path().to_owned();
-        Ok(Self {
-            client,
-            quic_client: None,
-            mount: Some(mount),
-            mount_path,
-            folder: token.folder().to_owned(),
-            allow_writes: token.allow_writes(),
+        Err(if connection_error.is_empty() {
+            decode_error
+        } else {
+            connection_error
         })
     }
 
     #[must_use]
     pub(crate) fn connected(&self) -> bool {
-        self.client.connected()
+        self.remote.connected()
     }
 
     #[must_use]
@@ -258,12 +358,12 @@ impl ConnectedSession {
 
     #[must_use]
     pub(crate) fn bytes_read(&self) -> u64 {
-        self.client.bytes_read()
+        self.remote.bytes_read()
     }
 
     #[must_use]
     pub(crate) fn bytes_written(&self) -> u64 {
-        self.client.bytes_written()
+        self.remote.bytes_written()
     }
 
     pub(crate) fn disconnect(&mut self) {
@@ -273,7 +373,7 @@ impl ConnectedSession {
         if let Some(mut quic_client) = self.quic_client.take() {
             quic_client.disconnect();
         } else {
-            self.client.disconnect();
+            self.remote.disconnect();
         }
     }
 }
@@ -282,6 +382,17 @@ impl Drop for ConnectedSession {
     fn drop(&mut self) {
         self.disconnect();
     }
+}
+
+fn direct_failure(quic_error: &str, tcp_error: &str) -> String {
+    format!(
+        "Direct QUIC failed: {}; direct TCP failed: {tcp_error}",
+        if quic_error.is_empty() {
+            "unavailable"
+        } else {
+            quic_error
+        }
+    )
 }
 
 fn advertised_endpoint(
