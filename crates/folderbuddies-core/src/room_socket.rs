@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use crossbeam_channel::{Receiver, TryRecvError, unbounded};
+use crossbeam_channel::{Receiver, unbounded};
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::Value;
 use tokio::{runtime::Builder, sync::mpsc};
@@ -167,10 +167,7 @@ impl RoomSocket {
 
     #[must_use]
     pub fn try_recv(&self) -> Option<Result<RoomEvent, String>> {
-        match self.events.try_recv() {
-            Ok(event) => Some(event),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-        }
+        self.events.try_recv().ok()
     }
 
     pub fn close(&mut self) {
