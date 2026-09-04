@@ -52,6 +52,19 @@ enum NativeCommand {
     Stop,
 }
 
+#[derive(Clone)]
+struct HostContext {
+    sender: RoomSender,
+    runtime: Arc<Runtime>,
+    stop: Arc<AtomicBool>,
+    protocol: Arc<WebProtocolHost>,
+    native_port: u16,
+    browser_peers: Arc<Mutex<HashMap<String, Arc<RTCPeerConnection>>>>,
+    browser_clients: Arc<AtomicUsize>,
+    bytes_out: Arc<AtomicU64>,
+    bytes_in: Arc<AtomicU64>,
+}
+
 pub struct CompatRoomHost {
     runtime: Arc<Runtime>,
     stop: Arc<AtomicBool>,
@@ -84,7 +97,6 @@ impl CompatRoomHost {
         let lookup = room_lookup_id(room_code);
         let mut socket = RoomSocket::connect(&lookup, RoomRole::Host)?;
         wait_host_ready(&socket)?;
-        let sender = socket.sender();
         let runtime = Arc::new(
             Builder::new_multi_thread()
                 .worker_threads(2)
@@ -96,33 +108,22 @@ impl CompatRoomHost {
         let browser_clients = Arc::new(AtomicUsize::new(0));
         let bytes_out = Arc::new(AtomicU64::new(0));
         let bytes_in = Arc::new(AtomicU64::new(0));
-        let browser_peers = Arc::new(Mutex::new(HashMap::<String, Arc<RTCPeerConnection>>::new()));
-
-        let worker = {
-            let runtime = Arc::clone(&runtime);
-            let stop = Arc::clone(&stop);
-            let browser_clients = Arc::clone(&browser_clients);
-            let bytes_out = Arc::clone(&bytes_out);
-            let bytes_in = Arc::clone(&bytes_in);
-            let browser_peers = Arc::clone(&browser_peers);
-            thread::Builder::new()
-                .name("folderbuddies-compat-host".to_owned())
-                .spawn(move || {
-                    host_loop(
-                        &mut socket,
-                        sender,
-                        runtime,
-                        stop,
-                        protocol,
-                        native_port,
-                        browser_peers,
-                        browser_clients,
-                        bytes_out,
-                        bytes_in,
-                    );
-                })
-                .map_err(|error| format!("failed to start compatibility host: {error}"))?
+        let context = HostContext {
+            sender: socket.sender(),
+            runtime: Arc::clone(&runtime),
+            stop: Arc::clone(&stop),
+            protocol,
+            native_port,
+            browser_peers: Arc::new(Mutex::new(HashMap::new())),
+            browser_clients: Arc::clone(&browser_clients),
+            bytes_out: Arc::clone(&bytes_out),
+            bytes_in: Arc::clone(&bytes_in),
         };
+
+        let worker = thread::Builder::new()
+            .name("folderbuddies-compat-host".to_owned())
+            .spawn(move || host_loop(&mut socket, context))
+            .map_err(|error| format!("failed to start compatibility host: {error}"))?;
 
         Ok(Self {
             runtime,
@@ -191,22 +192,10 @@ fn wait_host_ready(socket: &RoomSocket) -> Result<(), String> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn host_loop(
-    socket: &mut RoomSocket,
-    sender: RoomSender,
-    runtime: Arc<Runtime>,
-    stop: Arc<AtomicBool>,
-    protocol: Arc<WebProtocolHost>,
-    native_port: u16,
-    browser_peers: Arc<Mutex<HashMap<String, Arc<RTCPeerConnection>>>>,
-    browser_clients: Arc<AtomicUsize>,
-    bytes_out: Arc<AtomicU64>,
-    bytes_in: Arc<AtomicU64>,
-) {
+fn host_loop(socket: &mut RoomSocket, context: HostContext) {
     let mut pending_browser = HashMap::<String, Instant>::new();
     let mut native_peers = HashMap::<String, mpsc::UnboundedSender<NativeCommand>>::new();
-    while !stop.load(Ordering::Acquire) {
+    while !context.stop.load(Ordering::Acquire) {
         match socket.try_recv() {
             Some(Ok(RoomEvent::ClientJoined { peer_id })) => {
                 pending_browser.insert(peer_id, Instant::now() + BROWSER_CLASSIFY_DELAY);
@@ -216,16 +205,7 @@ fn host_loop(
                 if let Some(commands) = native_peers.remove(&peer_id) {
                     let _ = commands.send(NativeCommand::Stop);
                 }
-                let peer = browser_peers
-                    .lock()
-                    .ok()
-                    .and_then(|mut peers| peers.remove(&peer_id));
-                if let Some(peer) = peer {
-                    browser_clients.fetch_sub(1, Ordering::Relaxed);
-                    runtime.spawn(async move {
-                        let _ = peer.close().await;
-                    });
-                }
+                remove_browser_peer(&context, &peer_id);
             }
             Some(Ok(RoomEvent::Signal { peer_id, payload })) => {
                 match payload.get("type").and_then(Value::as_str) {
@@ -234,9 +214,10 @@ fn host_loop(
                         if !native_peers.contains_key(&peer_id) {
                             let (commands, receiver) = mpsc::unbounded_channel();
                             native_peers.insert(peer_id.clone(), commands);
-                            let sender = sender.clone();
-                            let stop = Arc::clone(&stop);
-                            runtime.spawn(run_native_peer(
+                            let sender = context.sender.clone();
+                            let stop = Arc::clone(&context.stop);
+                            let native_port = context.native_port;
+                            context.runtime.spawn(run_native_peer(
                                 sender,
                                 peer_id,
                                 native_port,
@@ -257,22 +238,10 @@ fn host_loop(
                     }
                     Some("compat-hello") => {
                         pending_browser.remove(&peer_id);
-                        ensure_browser_peer(
-                            &runtime,
-                            &sender,
-                            &peer_id,
-                            &browser_peers,
-                            &protocol,
-                            &browser_clients,
-                            &bytes_out,
-                            &bytes_in,
-                        );
+                        ensure_browser_peer(&context, &peer_id);
                     }
                     Some("answer") => {
-                        if let Some(peer) = browser_peers
-                            .lock()
-                            .ok()
-                            .and_then(|peers| peers.get(&peer_id).cloned())
+                        if let Some(peer) = browser_peer(&context, &peer_id)
                             && let Some(sdp) = payload
                                 .get("sdp")
                                 .and_then(Value::as_object)
@@ -280,7 +249,7 @@ fn host_loop(
                                 .and_then(Value::as_str)
                                 .map(str::to_owned)
                         {
-                            runtime.spawn(async move {
+                            context.runtime.spawn(async move {
                                 if let Ok(answer) = RTCSessionDescription::answer(sdp) {
                                     let _ = peer.set_remote_description(answer).await;
                                 }
@@ -288,13 +257,10 @@ fn host_loop(
                         }
                     }
                     Some("candidate") => {
-                        if let Some(peer) = browser_peers
-                            .lock()
-                            .ok()
-                            .and_then(|peers| peers.get(&peer_id).cloned())
+                        if let Some(peer) = browser_peer(&context, &peer_id)
                             && let Some(candidate) = candidate_from_signal(&payload)
                         {
-                            runtime.spawn(async move {
+                            context.runtime.spawn(async move {
                                 let _ = peer.add_ice_candidate(candidate).await;
                             });
                         }
@@ -321,16 +287,7 @@ fn host_loop(
         for peer_id in ready {
             pending_browser.remove(&peer_id);
             if !native_peers.contains_key(&peer_id) {
-                ensure_browser_peer(
-                    &runtime,
-                    &sender,
-                    &peer_id,
-                    &browser_peers,
-                    &protocol,
-                    &browser_clients,
-                    &bytes_out,
-                    &bytes_in,
-                );
+                ensure_browser_peer(&context, &peer_id);
             }
         }
         thread::sleep(ROOM_POLL);
@@ -339,86 +296,82 @@ fn host_loop(
     for (_, commands) in native_peers {
         let _ = commands.send(NativeCommand::Stop);
     }
-    let peers = browser_peers
-        .lock()
-        .map_or_else(|_| Vec::new(), |mut peers| peers.drain().map(|(_, peer)| peer).collect());
-    browser_clients.store(0, Ordering::Relaxed);
+    let peers = context.browser_peers.lock().map_or_else(
+        |_| Vec::new(),
+        |mut peers| peers.drain().map(|(_, peer)| peer).collect(),
+    );
+    context.browser_clients.store(0, Ordering::Relaxed);
     for peer in peers {
-        runtime.spawn(async move {
+        context.runtime.spawn(async move {
             let _ = peer.close().await;
         });
     }
     socket.close();
-    stop.store(true, Ordering::Release);
+    context.stop.store(true, Ordering::Release);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn ensure_browser_peer(
-    runtime: &Arc<Runtime>,
-    sender: &RoomSender,
-    peer_id: &str,
-    peers: &Arc<Mutex<HashMap<String, Arc<RTCPeerConnection>>>>,
-    protocol: &Arc<WebProtocolHost>,
-    browser_clients: &Arc<AtomicUsize>,
-    bytes_out: &Arc<AtomicU64>,
-    bytes_in: &Arc<AtomicU64>,
-) {
-    if peers
+fn browser_peer(context: &HostContext, peer_id: &str) -> Option<Arc<RTCPeerConnection>> {
+    context
+        .browser_peers
+        .lock()
+        .ok()
+        .and_then(|peers| peers.get(peer_id).cloned())
+}
+
+fn remove_browser_peer(context: &HostContext, peer_id: &str) {
+    let peer = context
+        .browser_peers
+        .lock()
+        .ok()
+        .and_then(|mut peers| peers.remove(peer_id));
+    if let Some(peer) = peer {
+        context.browser_clients.fetch_sub(1, Ordering::Relaxed);
+        context.runtime.spawn(async move {
+            let _ = peer.close().await;
+        });
+    }
+}
+
+fn ensure_browser_peer(context: &HostContext, peer_id: &str) {
+    if context
+        .browser_peers
         .lock()
         .is_ok_and(|peers| peers.contains_key(peer_id))
     {
         return;
     }
-    let sender = sender.clone();
+    let context = context.clone();
     let peer_id = peer_id.to_owned();
-    let peers = Arc::clone(peers);
-    let protocol = Arc::clone(protocol);
-    let browser_clients = Arc::clone(browser_clients);
-    let bytes_out = Arc::clone(bytes_out);
-    let bytes_in = Arc::clone(bytes_in);
-    runtime.spawn(async move {
-        let peer = match create_browser_peer(
-            sender.clone(),
-            peer_id.clone(),
-            protocol,
-            bytes_out,
-            bytes_in,
-        )
-        .await
-        {
+    context.runtime.clone().spawn(async move {
+        let peer = match create_browser_peer(&context, &peer_id).await {
             Ok(peer) => peer,
             Err(error) => {
                 eprintln!("Folder Buddies: WebRTC peer failed: {error}");
                 return;
             }
         };
-        let inserted = peers
-            .lock()
-            .is_ok_and(|mut peers| {
-                if peers.contains_key(&peer_id) {
-                    false
-                } else {
-                    peers.insert(peer_id.clone(), Arc::clone(&peer));
-                    true
-                }
-            });
+        let inserted = context.browser_peers.lock().is_ok_and(|mut peers| {
+            if peers.contains_key(&peer_id) {
+                false
+            } else {
+                peers.insert(peer_id.clone(), Arc::clone(&peer));
+                true
+            }
+        });
         if !inserted {
             let _ = peer.close().await;
             return;
         }
-        browser_clients.fetch_add(1, Ordering::Relaxed);
-        if let Err(error) = send_offer(&sender, &peer_id, &peer).await {
+        context.browser_clients.fetch_add(1, Ordering::Relaxed);
+        if let Err(error) = send_offer(&context.sender, &peer_id, &peer).await {
             eprintln!("Folder Buddies: WebRTC offer failed: {error}");
         }
     });
 }
 
 async fn create_browser_peer(
-    _sender: RoomSender,
-    _peer_id: String,
-    protocol: Arc<WebProtocolHost>,
-    bytes_out: Arc<AtomicU64>,
-    bytes_in: Arc<AtomicU64>,
+    context: &HostContext,
+    peer_id: &str,
 ) -> Result<Arc<RTCPeerConnection>, String> {
     let mut media = MediaEngine::default();
     media
@@ -445,10 +398,10 @@ async fn create_browser_peer(
         .create_data_channel("folderbuddies-files", None)
         .await
         .map_err(|error| error.to_string())?;
-    let message_protocol = Arc::clone(&protocol);
+    let message_protocol = Arc::clone(&context.protocol);
     let message_channel = Arc::clone(&channel);
-    let message_out = Arc::clone(&bytes_out);
-    let message_in = Arc::clone(&bytes_in);
+    let message_out = Arc::clone(&context.bytes_out);
+    let message_in = Arc::clone(&context.bytes_in);
     channel.on_message(Box::new(move |message: DataChannelMessage| {
         let protocol = Arc::clone(&message_protocol);
         let channel = Arc::clone(&message_channel);
@@ -463,6 +416,22 @@ async fn create_browser_peer(
             } else {
                 let received = protocol.handle_binary(&message.data);
                 bytes_in.fetch_add(received, Ordering::Relaxed);
+            }
+        })
+    }));
+    let close_peers = Arc::clone(&context.browser_peers);
+    let close_clients = Arc::clone(&context.browser_clients);
+    let close_peer_id = peer_id.to_owned();
+    channel.on_close(Box::new(move || {
+        let peers = Arc::clone(&close_peers);
+        let clients = Arc::clone(&close_clients);
+        let peer_id = close_peer_id.clone();
+        Box::pin(async move {
+            let removed = peers
+                .lock()
+                .is_ok_and(|mut peers| peers.remove(&peer_id).is_some());
+            if removed {
+                clients.fetch_sub(1, Ordering::Relaxed);
             }
         })
     }));
