@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   stable:
-    name: Safe Rust / fmt / clippy / tests
+    name: Safe Rust / clippy / tests / fmt
     strategy:
       fail-fast: false
       matrix:
@@ -26,15 +26,15 @@ jobs:
       - name: Enforce source policy
         shell: bash
         run: python3 policy/check_rust_policy.py
-      - name: Check formatting
-        shell: bash
-        run: cargo +1.98.0 fmt --all -- --check
       - name: Clippy
         shell: bash
         run: cargo +1.98.0 clippy --workspace --all-targets -- -D warnings
       - name: Tests
         shell: bash
         run: cargo +1.98.0 test --workspace --all-targets
+      - name: Check formatting
+        shell: bash
+        run: cargo +1.98.0 fmt --all -- --check
 
   miri:
     name: Miri core tests
