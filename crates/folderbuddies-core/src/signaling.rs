@@ -5,6 +5,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::blocking::Client as HttpClient;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     crypto::{Key256, aead_open, aead_seal, random_array, random_bytes},
@@ -29,6 +30,14 @@ const ARGON_MEMORY_KIB: u32 = 64 * 1024;
 const ARGON_ITERATIONS: u32 = 3;
 const ARGON_SALT_LEN: usize = 16;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const HARDCODED_SIGNALING_URL: &str = match option_env!("FB_SIGNALING_URL") {
+    Some(value) => value,
+    None => "",
+};
+const HARDCODED_FIREBASE_URL: &str = match option_env!("FB_FIREBASE_DATABASE_URL") {
+    Some(value) => value,
+    None => "",
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Token {
@@ -47,7 +56,7 @@ impl Token {
         folder: String,
         allow_writes: bool,
     ) -> Result<Self, String> {
-        if ip.is_empty() || port == 0 || secret.is_empty() || folder.is_empty() {
+        if ip.is_empty() || port == 0 || secret.is_empty() {
             return Err("token fields must not be empty".to_owned());
         }
         Ok(Self {
@@ -147,6 +156,11 @@ impl HostedShareTicket {
     }
 
     #[must_use]
+    pub fn signaling_backend(&self) -> &str {
+        &self.signaling_backend
+    }
+
+    #[must_use]
     pub const fn cloud_published(&self) -> bool {
         self.cloud_published
     }
@@ -173,7 +187,7 @@ struct CloudGet {
     payload: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct FirebaseRecord {
     v: u32,
     lookup: String,
@@ -260,9 +274,8 @@ pub fn base91_decode(text: &str) -> Result<Vec<u8>, String> {
 
 #[must_use]
 pub fn base91_is_clean(text: &str) -> bool {
-    text.bytes().all(|byte| {
-        byte.is_ascii_whitespace() || BASE91_ALPHABET.contains(&byte)
-    })
+    text.bytes()
+        .all(|byte| byte.is_ascii_whitespace() || BASE91_ALPHABET.contains(&byte))
 }
 
 pub fn random_room_code(long_code: bool) -> Result<String, String> {
@@ -316,14 +329,14 @@ pub fn seal_for_offline(token: &Token) -> Result<String, String> {
 }
 
 pub fn open_offline_blob(blob: &str) -> Result<Token, String> {
-    let raw = base91_decode(blob)?;
+    let raw = base91_decode(blob).map_err(|_| "not a valid offline blob".to_owned())?;
     let header = OFFLINE_MAGIC.len() + 32;
     if raw.len() < header || raw.get(..OFFLINE_MAGIC.len()) != Some(OFFLINE_MAGIC) {
         return Err("not a valid offline blob".to_owned());
     }
     let key: Key256 = raw[OFFLINE_MAGIC.len()..header]
         .try_into()
-        .map_err(|_| "bad offline key".to_owned())?;
+        .map_err(|_| "not a valid offline blob".to_owned())?;
     open_bundle(&key, &raw[header..])
 }
 
@@ -357,16 +370,19 @@ pub fn open_cloud_record(
     let (lookup_len, key_len) =
         code_split(room_code.len()).ok_or_else(|| "bad room code".to_owned())?;
     let key_part = &room_code[lookup_len..lookup_len + key_len];
-    let salt = base91_decode(salt_text)?;
-    let wrapped = base91_decode(wrapped_text)?;
-    let bundle = base91_decode(payload_text)?;
-    if salt.len() != ARGON_SALT_LEN || wrapped.len() != 12 + 32 + 16 {
-        return Err("malformed cloud record".to_owned());
+    let salt = base91_decode(salt_text).map_err(|_| "bad record salt".to_owned())?;
+    if salt.len() != ARGON_SALT_LEN {
+        return Err("bad record salt".to_owned());
     }
+    let wrapped = base91_decode(wrapped_text).map_err(|_| "bad wrapped key".to_owned())?;
+    if wrapped.len() != 12 + 32 + 16 {
+        return Err("bad wrapped key".to_owned());
+    }
+    let bundle = base91_decode(payload_text)?;
     let wrap_key = argon2id_key(key_part.as_bytes(), &salt)?;
     let nonce: [u8; 12] = wrapped[..12]
         .try_into()
-        .map_err(|_| "bad wrapped nonce".to_owned())?;
+        .map_err(|_| "bad wrapped key".to_owned())?;
     let blob_key_plain =
         aead_open(&wrap_key, &nonce, &wrapped[12..]).map_err(|_| "wrong code".to_owned())?;
     let blob_key: Key256 = blob_key_plain
@@ -383,8 +399,19 @@ pub struct SignalingClient {
 
 impl SignalingClient {
     pub fn from_environment() -> Result<Option<Self>, String> {
-        let base_url = env::var("FOLDERBUDDIES_SIGNALING_URL").unwrap_or_default();
-        Self::new(base_url)
+        let base_url = env::var("FOLDERBUDDIES_SIGNALING_URL")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| HARDCODED_SIGNALING_URL.to_owned());
+        let mut base_url = base_url;
+        trim_trailing_slashes(&mut base_url);
+        if base_url.is_empty() || !base_url.starts_with("https://") {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            http: http_client()?,
+            base_url,
+        }))
     }
 
     pub fn new(mut base_url: String) -> Result<Option<Self>, String> {
@@ -414,11 +441,15 @@ impl SignalingClient {
             .json(&request)
             .send()
             .map_err(|error| error.to_string())?;
-        match response.status().as_u16() {
-            200 | 201 => Ok(()),
-            409 => Err("room code collision".to_owned()),
-            status => Err(format!("Cloudflare create failed (HTTP {status})")),
+        let status = response.status().as_u16();
+        if status == 200 || status == 201 {
+            return Ok(());
         }
+        if status == 409 {
+            return Err("room code collision".to_owned());
+        }
+        let body = response.text().unwrap_or_default();
+        Err(format!("Cloudflare create failed (HTTP {status}): {body}"))
     }
 
     pub fn get(&self, lookup_id: &str) -> Result<(String, String, String), String> {
@@ -436,7 +467,9 @@ impl SignalingClient {
                 _ => format!("Cloudflare room lookup failed (HTTP {status})"),
             });
         }
-        let record: CloudGet = response.json().map_err(|error| error.to_string())?;
+        let record: CloudGet = response
+            .json()
+            .map_err(|_| "Cloudflare returned invalid JSON".to_owned())?;
         if record.salt.is_empty() || record.wrapped.is_empty() || record.payload.is_empty() {
             return Err("Cloudflare returned an incomplete record".to_owned());
         }
@@ -465,8 +498,22 @@ pub struct FirebaseSignalingClient {
 
 impl FirebaseSignalingClient {
     pub fn from_environment() -> Result<Option<Self>, String> {
-        let base_url = env::var("FOLDERBUDDIES_FIREBASE_DATABASE_URL").unwrap_or_default();
-        Self::new(base_url)
+        let base_url = env::var("FOLDERBUDDIES_FIREBASE_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| HARDCODED_FIREBASE_URL.to_owned());
+        let mut base_url = base_url;
+        trim_trailing_slashes(&mut base_url);
+        if base_url.is_empty()
+            || !base_url.starts_with("https://")
+            || !(base_url.contains("firebasedatabase.app") || base_url.contains("firebaseio.com"))
+        {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            http: http_client()?,
+            base_url,
+        }))
     }
 
     pub fn new(mut base_url: String) -> Result<Option<Self>, String> {
@@ -496,11 +543,9 @@ impl FirebaseSignalingClient {
             .get(&url)
             .send()
             .map_err(|error| error.to_string())?;
-        if !existing.status().is_success() {
-            return Err(format!(
-                "Firebase room check failed (HTTP {})",
-                existing.status().as_u16()
-            ));
+        let status = existing.status().as_u16();
+        if status != 200 {
+            return Err(format!("Firebase fallback room check failed (HTTP {status})"));
         }
         if existing.text().map_err(|error| error.to_string())?.trim() != "null" {
             return Err("Firebase fallback room code collision".to_owned());
@@ -513,7 +558,7 @@ impl FirebaseSignalingClient {
             wrapped: record.wrapped.clone(),
             payload: record.payload.clone(),
             owner: record.owner.clone(),
-            created_at: unix_millis()?,
+            created_at: unix_seconds()?,
         };
         let response = self
             .http
@@ -521,12 +566,13 @@ impl FirebaseSignalingClient {
             .json(&record)
             .send()
             .map_err(|error| error.to_string())?;
-        if response.status().is_success() {
+        let status = response.status().as_u16();
+        if status == 200 {
             Ok(())
         } else {
+            let body = response.text().unwrap_or_default();
             Err(format!(
-                "Firebase fallback create failed (HTTP {})",
-                response.status().as_u16()
+                "Firebase fallback create failed (HTTP {status}): {body}"
             ))
         }
     }
@@ -537,53 +583,66 @@ impl FirebaseSignalingClient {
             .get(self.room_url(lookup_id))
             .send()
             .map_err(|error| error.to_string())?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "Firebase fallback lookup failed (HTTP {})",
-                response.status().as_u16()
-            ));
+        let status = response.status().as_u16();
+        if status != 200 {
+            return Err(format!("Firebase fallback lookup failed (HTTP {status})"));
         }
         let text = response.text().map_err(|error| error.to_string())?;
         if text.trim() == "null" {
             return Err("no Firebase fallback share found for that code".to_owned());
         }
-        let record: FirebaseRecord =
-            serde_json::from_str(&text).map_err(|error| error.to_string())?;
-        validate_firebase_record(lookup_id, &record)?;
-        Ok((record.salt, record.wrapped, record.payload))
+        let value: Value = serde_json::from_str(&text)
+            .map_err(|_| "Firebase fallback returned invalid JSON".to_owned())?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "Firebase fallback returned invalid JSON".to_owned())?;
+        let created_at_raw = object
+            .get("createdAt")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let created_at_ms = firebase_created_at_ms(created_at_raw);
+        let now = unix_millis()?;
+        let max_age = i64::try_from(ROOM_TTL_SECONDS)
+            .map_err(|_| "TTL overflow".to_owned())?
+            .saturating_mul(1000);
+        if created_at_ms <= 0 || created_at_ms < now.saturating_sub(max_age) {
+            let mut ignored = String::new();
+            if let Err(error) = self.remove(lookup_id, "") {
+                ignored = error;
+            }
+            drop(ignored);
+            return Err("Firebase fallback room expired".to_owned());
+        }
+        let salt = object
+            .get("salt")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let wrapped = object
+            .get("wrapped")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let payload = object
+            .get("payload")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if salt.is_empty() || wrapped.is_empty() || payload.is_empty() {
+            return Err("Firebase fallback returned an incomplete record".to_owned());
+        }
+        Ok((salt, wrapped, payload))
     }
 
-    pub fn remove(&self, lookup_id: &str, owner: &str) -> Result<(), String> {
-        let url = self.room_url(lookup_id);
-        let response = self
-            .http
-            .get(&url)
-            .send()
-            .map_err(|error| error.to_string())?;
-        if response.status().as_u16() == 404 {
-            return Ok(());
-        }
-        let text = response.text().map_err(|error| error.to_string())?;
-        if text.trim() == "null" {
-            return Ok(());
-        }
-        let record: FirebaseRecord =
-            serde_json::from_str(&text).map_err(|error| error.to_string())?;
-        if record.owner != owner {
-            return Err("Firebase owner credential rejected".to_owned());
-        }
+    pub fn remove(&self, lookup_id: &str, _owner: &str) -> Result<(), String> {
         let deleted = self
             .http
-            .delete(url)
+            .delete(self.room_url(lookup_id))
             .send()
             .map_err(|error| error.to_string())?;
-        if deleted.status().is_success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "Firebase delete failed (HTTP {})",
-                deleted.status().as_u16()
-            ))
+        match deleted.status().as_u16() {
+            200 | 204 => Ok(()),
+            status => Err(format!("Firebase fallback delete failed (HTTP {status})")),
         }
     }
 }
@@ -593,36 +652,37 @@ pub fn resolve_share_code(code_or_blob: &str) -> Result<Token, String> {
         || code_or_blob.starts_with("FBW2O:")
         || code_or_blob.starts_with("FBW2A:")
     {
-        return Err("web-browser WebRTC codes require the compatibility transport".to_owned());
+        return Err(
+            "that is a web-browser WebRTC code. Native clients need a native room code (6 or 16 chars) or native offline Base91 blob."
+                .to_owned(),
+        );
     }
     if !looks_like_room_code(code_or_blob) {
         return open_offline_blob(code_or_blob);
     }
 
     let lookup = room_lookup_id(code_or_blob);
-    let mut failures = Vec::new();
-    if let Some(client) = SignalingClient::from_environment()? {
-        match client.get(&lookup) {
+    let cloud_error = match SignalingClient::from_environment()? {
+        Some(client) => match client.get(&lookup) {
             Ok((salt, wrapped, payload)) => {
                 return open_cloud_record(code_or_blob, &salt, &wrapped, &payload);
             }
-            Err(error) => failures.push(format!("Cloudflare: {error}")),
-        }
-    }
-    if let Some(client) = FirebaseSignalingClient::from_environment()? {
-        match client.get(&lookup) {
+            Err(error) => error,
+        },
+        None => "Cloudflare signaling URL is not configured".to_owned(),
+    };
+    let firebase_error = match FirebaseSignalingClient::from_environment()? {
+        Some(client) => match client.get(&lookup) {
             Ok((salt, wrapped, payload)) => {
                 return open_cloud_record(code_or_blob, &salt, &wrapped, &payload);
             }
-            Err(error) => failures.push(format!("Firebase: {error}")),
-        }
-    }
-
-    Err(if failures.is_empty() {
-        "room lookup failed: no signaling backend is configured".to_owned()
-    } else {
-        format!("room lookup failed. {}", failures.join("; "))
-    })
+            Err(error) => error,
+        },
+        None => "Firebase fallback URL is not configured".to_owned(),
+    };
+    Err(format!(
+        "room lookup failed. Cloudflare: {cloud_error}; Firebase: {firebase_error}"
+    ))
 }
 
 pub fn publish_share(token: &Token, reach: String) -> Result<HostedShareTicket, String> {
@@ -733,9 +793,6 @@ fn deserialize_token(bytes: &[u8]) -> Result<Token, String> {
         true
     };
     let secret = reader.bytes().map_err(|error| error.to_string())?;
-    if !reader.is_empty() {
-        return Err("trailing token bytes".to_owned());
-    }
     Token::new(ip, port, secret, folder, allow_writes)
 }
 
@@ -761,10 +818,10 @@ fn open_bundle(key: &Key256, bundle: &[u8]) -> Result<Token, String> {
     let nonce_end = nonce_start + 12;
     let nonce: [u8; 12] = bundle[nonce_start..nonce_end]
         .try_into()
-        .map_err(|_| "bad payload nonce".to_owned())?;
+        .map_err(|_| "malformed payload bundle".to_owned())?;
     let plaintext = aead_open(key, &nonce, &bundle[nonce_end..])
         .map_err(|_| "wrong code or tampered payload".to_owned())?;
-    deserialize_token(&plaintext)
+    deserialize_token(&plaintext).map_err(|_| "decrypted payload is malformed".to_owned())
 }
 
 fn argon2id_key(password: &[u8], salt: &[u8]) -> Result<Key256, String> {
@@ -803,30 +860,22 @@ fn require_https(value: &str, label: &str) -> Result<(), String> {
     }
 }
 
-fn validate_firebase_record(lookup_id: &str, record: &FirebaseRecord) -> Result<(), String> {
-    if record.v != 1 || record.lookup != lookup_id {
-        return Err("Firebase fallback returned a mismatched record".to_owned());
+fn firebase_created_at_ms(raw: f64) -> i64 {
+    if raw <= 0.0 {
+        0
+    } else if raw < 20_000_000_000.0 {
+        (raw * 1000.0) as i64
+    } else {
+        raw as i64
     }
-    let created_at = normalize_firebase_timestamp(record.created_at)?;
-    let now = unix_millis()?;
-    let max_age = i64::try_from(ROOM_TTL_SECONDS)
-        .map_err(|_| "TTL overflow".to_owned())?
-        .saturating_mul(1000);
-    if created_at <= 0 || now.saturating_sub(created_at) > max_age {
-        return Err("Firebase fallback share expired".to_owned());
-    }
-    Ok(())
 }
 
-fn normalize_firebase_timestamp(raw: i64) -> Result<i64, String> {
-    if raw <= 0 {
-        return Err("Firebase fallback record has an invalid timestamp".to_owned());
-    }
-    Ok(if raw < 20_000_000_000 {
-        raw.saturating_mul(1000)
-    } else {
-        raw
-    })
+fn unix_seconds() -> Result<i64, String> {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs();
+    i64::try_from(seconds).map_err(|_| "clock overflow".to_owned())
 }
 
 fn unix_millis() -> Result<i64, String> {
@@ -873,5 +922,28 @@ mod tests {
         .expect("token");
         let blob = seal_for_offline(&token).expect("seal");
         assert_eq!(open_offline_blob(&blob).expect("open"), token);
+    }
+
+    #[test]
+    fn legacy_empty_folder_and_trailing_payload_are_accepted() {
+        let token = Token::new(
+            "127.0.0.1".to_owned(),
+            4242,
+            vec![1; SECRET_BYTES],
+            String::new(),
+            true,
+        )
+        .expect("token");
+        let mut payload = serialize_token(&token).expect("serialize");
+        payload.extend_from_slice(b"ignored");
+        assert_eq!(deserialize_token(&payload).expect("deserialize"), token);
+    }
+
+    #[test]
+    fn browser_code_native_error_matches_cpp() {
+        assert_eq!(
+            resolve_share_code("FBS2:anything").expect_err("must reject"),
+            "that is a web-browser WebRTC code. Native clients need a native room code (6 or 16 chars) or native offline Base91 blob."
+        );
     }
 }
