@@ -23,12 +23,14 @@ use crate::{
     native_quic::{NativeQuicEndpoint, NativeQuicRole},
     room_signaling::{RoomEvent, RoomRole},
     room_socket::{RoomSender, RoomSocket},
-    signaling::{Token, room_lookup_id},
+    signaling::{SignalingClient, Token, looks_like_room_code, room_lookup_id},
 };
 
 const ROOM_POLL: Duration = Duration::from_millis(20);
-const SIGNAL_TIMEOUT: Duration = Duration::from_secs(20);
-const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(55);
+const HOST_SIGNAL_TIMEOUT: Duration = Duration::from_secs(20);
+const CLIENT_SIGNAL_TIMEOUT: Duration = Duration::from_secs(8);
+const CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
+const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug)]
 enum PeerCommand {
@@ -83,47 +85,44 @@ fn host_signaling_loop(
     let mut peer_threads = Vec::new();
     while !stop.load(Ordering::Acquire) {
         match socket.try_recv() {
-            Some(Ok(RoomEvent::Signal { peer_id, payload })) => {
-                match signal_type(&payload) {
-                    Some("native-quic-hello") => {
-                        if !peers.contains_key(&peer_id) {
-                            let (commands, receiver) = mpsc::unbounded_channel();
-                            peers.insert(peer_id.clone(), commands);
-                            let room_sender = sender.clone();
-                            let peer_stop = Arc::clone(&stop);
-                            let thread_peer_id = peer_id.clone();
-                            match thread::Builder::new()
-                                .name("folderbuddies-quic-peer".to_owned())
-                                .spawn(move || {
-                                    run_host_peer(
-                                        room_sender,
-                                        thread_peer_id,
-                                        native_port,
-                                        receiver,
-                                        peer_stop,
-                                    );
-                                })
-                            {
-                                Ok(handle) => peer_threads.push(handle),
-                                Err(error) => {
-                                    eprintln!(
-                                        "Folder Buddies: failed to start native QUIC peer: {error}"
-                                    );
-                                    peers.remove(&peer_id);
-                                }
+            Some(Ok(RoomEvent::Signal { peer_id, payload })) => match signal_type(&payload) {
+                Some("native-quic-hello") => {
+                    if !peers.contains_key(&peer_id) {
+                        let (commands, receiver) = mpsc::unbounded_channel();
+                        peers.insert(peer_id.clone(), commands);
+                        let room_sender = sender.clone();
+                        let peer_stop = Arc::clone(&stop);
+                        let thread_peer_id = peer_id.clone();
+                        match thread::Builder::new()
+                            .name("folderbuddies-quic-peer".to_owned())
+                            .spawn(move || {
+                                run_host_peer(
+                                    room_sender,
+                                    thread_peer_id,
+                                    native_port,
+                                    receiver,
+                                    peer_stop,
+                                );
+                            }) {
+                            Ok(handle) => peer_threads.push(handle),
+                            Err(error) => {
+                                eprintln!(
+                                    "Folder Buddies: failed to start native QUIC peer: {error}"
+                                );
+                                peers.remove(&peer_id);
                             }
                         }
                     }
-                    Some("native-quic-description") => {
-                        if let Some(description) = signal_description(&payload)
-                            && let Some(commands) = peers.get(&peer_id)
-                        {
-                            let _ = commands.send(PeerCommand::Description(description.to_owned()));
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                Some("native-quic-description") => {
+                    if let Some(description) = signal_description(&payload)
+                        && let Some(commands) = peers.get(&peer_id)
+                    {
+                        let _ = commands.send(PeerCommand::Description(description.to_owned()));
+                    }
+                }
+                _ => {}
+            },
             Some(Ok(RoomEvent::ClientLeft { peer_id })) => {
                 if let Some(commands) = peers.remove(&peer_id) {
                     let _ = commands.send(PeerCommand::Stop);
@@ -163,7 +162,13 @@ fn run_host_peer(
         }
     };
     if let Err(error) = runtime.block_on(async move {
-        let mut endpoint = NativeQuicEndpoint::start(NativeQuicRole::Server).await?;
+        let mut endpoint = match NativeQuicEndpoint::start(NativeQuicRole::Server).await {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                send_quic_error(&sender, &peer_id, &error);
+                return Ok::<(), String>(());
+            }
+        };
         sender.send_signal(
             &peer_id,
             &json!({
@@ -173,7 +178,11 @@ fn run_host_peer(
         )?;
 
         let description = receive_description(&mut commands, &stop).await?;
-        endpoint.set_remote_description(&description).await?;
+        if let Err(error) = endpoint.set_remote_description(&description).await {
+            send_quic_error(&sender, &peer_id, &error);
+            endpoint.close().await;
+            return Ok(());
+        }
 
         loop {
             if stop.load(Ordering::Acquire) {
@@ -197,17 +206,27 @@ fn run_host_peer(
             }
         }
         endpoint.close().await;
-        Ok::<(), String>(())
+        Ok(())
     }) {
         eprintln!("Folder Buddies: native QUIC peer failed: {error}");
     }
+}
+
+fn send_quic_error(sender: &RoomSender, peer_id: &str, message: &str) {
+    let _ = sender.send_signal(
+        peer_id,
+        &json!({
+            "type": "native-quic-error",
+            "message": message,
+        }),
+    );
 }
 
 async fn receive_description(
     commands: &mut mpsc::UnboundedReceiver<PeerCommand>,
     stop: &AtomicBool,
 ) -> Result<String, String> {
-    let deadline = Instant::now() + SIGNAL_TIMEOUT;
+    let deadline = Instant::now() + HOST_SIGNAL_TIMEOUT;
     loop {
         if stop.load(Ordering::Acquire) {
             return Err("native QUIC host stopped".to_owned());
@@ -235,6 +254,14 @@ pub struct NativeQuicClient {
 
 impl NativeQuicClient {
     pub fn connect(room_code: &str, token: &Token) -> Result<Self, String> {
+        if !looks_like_room_code(room_code)
+            || !matches!(SignalingClient::from_environment(), Ok(Some(_)))
+        {
+            return Err(
+                "native QUIC needs a published room code and Cloudflare signaling".to_owned(),
+            );
+        }
+
         let lookup = room_lookup_id(room_code);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
@@ -254,7 +281,7 @@ impl NativeQuicClient {
             Err(_) => {
                 stop.store(true, Ordering::Release);
                 let _ = worker.join();
-                return Err("native QUIC connection timed out".to_owned());
+                return Err("direct QUIC/ICE connection timed out".to_owned());
             }
         };
         let proxy_token = Token::new(
@@ -345,7 +372,15 @@ fn client_worker(
             }),
         )?;
         let remote = wait_for_remote_description(&socket, &peer_id, &stop).await?;
-        endpoint.set_remote_description(&remote).await?;
+        match tokio::time::timeout(
+            CLIENT_CONNECT_TIMEOUT,
+            endpoint.set_remote_description(&remote),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => return Err("direct QUIC/ICE connection timed out".to_owned()),
+        }
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|error| format!("native QUIC proxy bind failed: {error}"))?;
@@ -379,13 +414,13 @@ fn client_worker(
 }
 
 fn wait_for_client_ready(socket: &RoomSocket, stop: &AtomicBool) -> Result<String, String> {
-    let deadline = Instant::now() + SIGNAL_TIMEOUT;
+    let deadline = Instant::now() + CLIENT_SIGNAL_TIMEOUT;
     loop {
         if stop.load(Ordering::Acquire) {
             return Err("native QUIC client stopped".to_owned());
         }
         if Instant::now() >= deadline {
-            return Err("native QUIC room readiness timed out".to_owned());
+            return Err("native QUIC signaling timed out".to_owned());
         }
         match socket.try_recv() {
             Some(Ok(RoomEvent::Ready {
@@ -393,6 +428,9 @@ fn wait_for_client_ready(socket: &RoomSocket, stop: &AtomicBool) -> Result<Strin
                 peer_id: Some(peer_id),
                 ..
             })) => return Ok(peer_id),
+            Some(Ok(RoomEvent::HostLeft)) => {
+                return Err("host left during QUIC negotiation".to_owned());
+            }
             Some(Ok(RoomEvent::Error { error })) => return Err(error),
             Some(Err(error)) => return Err(error),
             Some(Ok(_)) | None => thread::sleep(ROOM_POLL),
@@ -405,24 +443,36 @@ async fn wait_for_remote_description(
     peer_id: &str,
     stop: &AtomicBool,
 ) -> Result<String, String> {
-    let deadline = Instant::now() + SIGNAL_TIMEOUT;
+    let deadline = Instant::now() + CLIENT_CONNECT_TIMEOUT;
     loop {
         if stop.load(Ordering::Acquire) {
             return Err("native QUIC client stopped".to_owned());
         }
         if Instant::now() >= deadline {
-            return Err("native QUIC remote description timed out".to_owned());
+            return Err("direct QUIC/ICE connection timed out".to_owned());
         }
         match socket.try_recv() {
             Some(Ok(RoomEvent::Signal {
                 peer_id: signal_peer,
                 payload,
-            })) if signal_peer == peer_id && signal_type(&payload) == Some("native-quic-description") => {
-                return signal_description(&payload)
-                    .map(ToOwned::to_owned)
-                    .ok_or_else(|| "native QUIC description is missing description".to_owned());
+            })) if signal_peer == peer_id => match signal_type(&payload) {
+                Some("native-quic-description") => {
+                    return signal_description(&payload)
+                        .map(ToOwned::to_owned)
+                        .ok_or_else(|| "native QUIC endpoint closed".to_owned());
+                }
+                Some("native-quic-error") => {
+                    return payload
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .ok_or_else(|| "native QUIC endpoint closed".to_owned());
+                }
+                _ => {}
+            },
+            Some(Ok(RoomEvent::HostLeft)) => {
+                return Err("host left during QUIC negotiation".to_owned());
             }
-            Some(Ok(RoomEvent::HostLeft)) => return Err("native QUIC host left the room".to_owned()),
             Some(Ok(RoomEvent::Error { error })) => return Err(error),
             Some(Err(error)) => return Err(error),
             Some(Ok(_)) | None => tokio::time::sleep(ROOM_POLL).await,
