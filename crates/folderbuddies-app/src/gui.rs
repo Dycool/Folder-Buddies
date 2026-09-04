@@ -394,7 +394,7 @@ fn choose_folder() -> Result<Option<PathBuf>, String> {
         if !output.status.success() {
             return Ok(None);
         }
-        return path_from_stdout(&output.stdout);
+        path_from_stdout(&output.stdout)
     }
 
     #[cfg(target_os = "macos")]
@@ -409,7 +409,7 @@ fn choose_folder() -> Result<Option<PathBuf>, String> {
         if !output.status.success() {
             return Ok(None);
         }
-        return path_from_stdout(&output.stdout);
+        path_from_stdout(&output.stdout)
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
