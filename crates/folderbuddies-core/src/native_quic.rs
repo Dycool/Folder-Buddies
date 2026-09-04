@@ -33,6 +33,7 @@ const STUN_SERVER: &str = "stun:stun.l.google.com:19302";
 const ICE_GATHER_TIMEOUT: Duration = Duration::from_secs(15);
 const ICE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const QUIC_ALPN: &[u8] = b"fbq";
 const STREAM_WINDOW: u64 = 16 * 1024 * 1024;
 const CONNECTION_WINDOW: u64 = 128 * 1024 * 1024;
@@ -440,6 +441,11 @@ fn transport_config() -> Result<Arc<TransportConfig>, String> {
     transport.receive_window(
         VarInt::from_u64(CONNECTION_WINDOW).map_err(|error| error.to_string())?,
     );
+    transport.max_idle_timeout(Some(
+        QUIC_IDLE_TIMEOUT
+            .try_into()
+            .map_err(|error: quinn::VarIntBoundsExceeded| error.to_string())?,
+    ));
     transport.initial_mtu(MAX_DATAGRAM as u16);
     transport.min_mtu(MAX_DATAGRAM as u16);
     transport.mtu_discovery_config(None);
@@ -459,6 +465,7 @@ fn server_config() -> Result<ServerConfig, String> {
     let crypto = QuicServerConfig::try_from(tls).map_err(|error| error.to_string())?;
     let mut config = ServerConfig::with_crypto(Arc::new(crypto));
     config.transport = transport_config()?;
+    config.migration(false);
     Ok(config)
 }
 
