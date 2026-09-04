@@ -12,11 +12,15 @@ use std::{
 
 use folderbuddies_core::{
     client::Client,
-    native_transport::{NativeQuicClient, NativeQuicHost},
+    compat_host::CompatRoomHost,
+    native_transport::NativeQuicClient,
+    remote_fs::RemoteFs,
     server::Server,
     signaling::{
         Token, looks_like_room_code, publish_share, remove_published_room, resolve_share_code,
     },
+    web_client::WebRtcRemoteClient,
+    web_compat::looks_like_web_compat_code,
 };
 use igd_next::{Gateway, PortMappingProtocol, search_gateway};
 
@@ -77,6 +81,27 @@ impl Drop for UpnpMapping {
         let _ = self
             .gateway
             .remove_port(PortMappingProtocol::TCP, self.external_port);
+    }
+}
+
+enum ConnectedRemote {
+    Native(Arc<Client>),
+    Web(Arc<WebRtcRemoteClient>),
+}
+
+impl ConnectedRemote {
+    fn connected(&self) -> bool {
+        match self {
+            Self::Native(client) => client.connected(),
+            Self::Web(client) => client.connected(),
+        }
+    }
+
+    fn disconnect(&self) {
+        match self {
+            Self::Native(client) => client.disconnect(),
+            Self::Web(client) => client.disconnect(),
+        }
     }
 }
 
@@ -204,11 +229,18 @@ fn run_host(args: CommandArgs, port: u16) -> Result<(), String> {
         args.has("--write"),
     )?;
     let ticket = publish_share(&token, reach)?;
-    let mut quic_host = if ticket.cloud_published() {
-        NativeQuicHost::start(ticket.room_code(), server.bound_port()).ok()
-    } else {
-        None
-    };
+    let mut compat_host = None;
+    if ticket.cloud_published() {
+        match CompatRoomHost::start(
+            &args.positional,
+            ticket.room_code(),
+            args.has("--write"),
+            server.bound_port(),
+        ) {
+            Ok(host) => compat_host = Some(host),
+            Err(error) => println!("  WebRTC compatibility disabled: {error}"),
+        }
+    }
 
     println!(
         "Sharing \"{}\" on port {}\n  {}\n  signaling: {}\n  access: {}\n  encryption: ChaCha20-Poly1305 (always on)\n\nConnect code:\n  {}\n\nShare only that code — no password. Cloudflare never receives the\nIP, port, data-path secret, or the secret half of the code.\nPress Ctrl+C to stop sharing.",
@@ -225,18 +257,28 @@ fn run_host(args: CommandArgs, port: u16) -> Result<(), String> {
     );
 
     let stop = install_stop_handler()?;
-    let mut last_clients = server.client_count();
+    let mut last_clients = usize::MAX;
     while !stop.load(Ordering::Acquire) && server.running() {
-        let clients = server.client_count();
-        if clients != last_clients {
-            println!("[clients: {clients}]");
-            last_clients = clients;
+        let native_clients = server.client_count();
+        let browser_clients = compat_host
+            .as_ref()
+            .map_or(0, CompatRoomHost::browser_client_count);
+        let total_clients = native_clients.saturating_add(browser_clients);
+        if total_clients != last_clients {
+            if browser_clients > 0 {
+                println!(
+                    "[clients: {total_clients} ({native_clients} native, {browser_clients} browser)]"
+                );
+            } else if last_clients != usize::MAX {
+                println!("[clients: {total_clients}]");
+            }
+            last_clients = total_clients;
         }
         thread::sleep(POLL_INTERVAL);
     }
 
     println!("\nStopping…");
-    if let Some(host) = quic_host.as_mut() {
+    if let Some(host) = compat_host.as_mut() {
         host.stop();
     }
     if ticket.cloud_published()
@@ -297,65 +339,123 @@ fn advertised_endpoint(
 
 fn run_connect(args: CommandArgs) -> Result<(), String> {
     let code = args.positional.as_str();
-    let token = resolve_share_code(code)?;
-    let mut quic_error = String::new();
+    let mut decode_error = String::new();
+    let mut connection_error = String::new();
+    let mut mount = None;
+    let mut remote = None;
     let mut quic_client = None;
-    let mut mounted = None;
+    let mut label = "share".to_owned();
+    let mut transport = "direct native TCP";
 
-    if looks_like_room_code(code) {
-        match NativeQuicClient::connect(code, &token) {
-            Ok(mut quic) => {
-                let client = quic.client();
-                match Mount::start(Arc::clone(&client), token.folder(), token.allow_writes()) {
-                    Ok(mount) => {
-                        mounted = Some((client, mount, "direct native QUIC via ICE/STUN"));
-                        quic_client = Some(quic);
+    match resolve_share_code(code) {
+        Ok(token) => {
+            let mut quic_error = String::new();
+            if looks_like_room_code(code) {
+                match NativeQuicClient::connect(code, &token) {
+                    Ok(mut quic) => {
+                        let client = quic.client();
+                        match Mount::start(
+                            Arc::clone(&client),
+                            token.folder(),
+                            token.allow_writes(),
+                        ) {
+                            Ok(native_mount) => {
+                                label = token.folder().to_owned();
+                                transport = "direct native QUIC via ICE/STUN";
+                                remote = Some(ConnectedRemote::Native(client));
+                                mount = Some(native_mount);
+                                quic_client = Some(quic);
+                            }
+                            Err(_) => quic.disconnect(),
+                        }
                     }
-                    Err(_) => quic.disconnect(),
+                    Err(error) => quic_error = error,
                 }
             }
-            Err(error) => quic_error = error,
+
+            if mount.is_none() {
+                match Client::connect_default(&token) {
+                    Ok(client) => {
+                        let client = Arc::new(client);
+                        match Mount::start(
+                            Arc::clone(&client),
+                            token.folder(),
+                            token.allow_writes(),
+                        ) {
+                            Ok(native_mount) => {
+                                label = token.folder().to_owned();
+                                transport = "direct native TCP";
+                                remote = Some(ConnectedRemote::Native(client));
+                                mount = Some(native_mount);
+                            }
+                            Err(tcp_error) => {
+                                client.disconnect();
+                                connection_error = format!(
+                                    "Direct QUIC failed: {}; direct TCP failed: {tcp_error}",
+                                    if quic_error.is_empty() {
+                                        "unavailable"
+                                    } else {
+                                        quic_error.as_str()
+                                    }
+                                );
+                            }
+                        }
+                    }
+                    Err(tcp_error) => {
+                        connection_error = format!(
+                            "Direct QUIC failed: {}; direct TCP failed: {tcp_error}",
+                            if quic_error.is_empty() {
+                                "unavailable"
+                            } else {
+                                quic_error.as_str()
+                            }
+                        );
+                    }
+                }
+            }
+        }
+        Err(error) => decode_error = error,
+    }
+
+    if mount.is_none() && !decode_error.is_empty() && looks_like_web_compat_code(code) {
+        match WebRtcRemoteClient::connect(code) {
+            Ok(client) => {
+                let allow_writes = client.can_write();
+                let mount_client: Arc<dyn RemoteFs> = client.clone();
+                match Mount::start_remote(mount_client, "Web share", allow_writes) {
+                    Ok(web_mount) => {
+                        label = "Web share".to_owned();
+                        transport = "WebRTC browser compatibility";
+                        remote = Some(ConnectedRemote::Web(client));
+                        mount = Some(web_mount);
+                    }
+                    Err(error) => {
+                        client.disconnect();
+                        connection_error = error;
+                    }
+                }
+            }
+            Err(error) => connection_error = error,
         }
     }
 
-    if mounted.is_none() {
-        let client = Arc::new(Client::connect_default(&token).map_err(|tcp_error| {
-            format!(
-                "Direct QUIC failed: {}; direct TCP failed: {tcp_error}",
-                if quic_error.is_empty() {
-                    "unavailable"
-                } else {
-                    quic_error.as_str()
-                }
-            )
-        })?);
-        match Mount::start(Arc::clone(&client), token.folder(), token.allow_writes()) {
-            Ok(mount) => mounted = Some((client, mount, "direct native TCP")),
-            Err(tcp_error) => {
-                client.disconnect();
-                return Err(format!(
-                    "Direct QUIC failed: {}; direct TCP failed: {tcp_error}",
-                    if quic_error.is_empty() {
-                        "unavailable"
-                    } else {
-                        quic_error.as_str()
-                    }
-                ));
-            }
+    let mount = mount.ok_or_else(|| {
+        if connection_error.is_empty() {
+            decode_error
+        } else {
+            connection_error
         }
-    }
-
-    let (client, mount, transport) = mounted.ok_or_else(|| "connect failed".to_owned())?;
+    })?;
+    let remote = remote.ok_or_else(|| "connect failed".to_owned())?;
     let mount_path: PathBuf = mount.mount_path().to_owned();
 
     println!(
-        "Mounted \"{}\" as {}\nTransport: {transport}.\nIt behaves like a local disk; only the bytes apps actually read cross the wire.\n\nPress Ctrl+C to unmount, or eject the drive/volume in the OS.",
-        token.folder(),
+        "Mounted \"{label}\" as {}\nTransport: {transport}.\nIt behaves like a local disk; only the bytes apps actually read cross the wire.\n\nPress Ctrl+C to unmount, or eject the drive/volume in the OS.",
         mount_path.display(),
     );
 
     let stop = install_stop_handler()?;
-    while !stop.load(Ordering::Acquire) && client.connected() {
+    while !stop.load(Ordering::Acquire) && remote.connected() {
         thread::sleep(POLL_INTERVAL);
     }
 
@@ -364,7 +464,7 @@ fn run_connect(args: CommandArgs) -> Result<(), String> {
     if let Some(mut quic) = quic_client {
         quic.disconnect();
     } else {
-        client.disconnect();
+        remote.disconnect();
     }
     unmount_result
 }
