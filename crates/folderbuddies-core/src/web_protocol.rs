@@ -28,7 +28,7 @@ pub struct WebProtocolHost {
 impl WebProtocolHost {
     pub fn new(root: impl AsRef<Path>, allow_writes: bool) -> Result<Self, String> {
         let root = root.as_ref();
-        if is_boundary_link(root)? {
+        if is_boundary_link(root).map_err(|error| error.to_string())? {
             return Err("Cannot host a symlink, junction, or projected filesystem root".to_owned());
         }
         let root = fs::canonicalize(root).map_err(|error| error.to_string())?;
@@ -96,7 +96,9 @@ impl WebProtocolHost {
 
     fn list(&self, id: i64, message: &Value) -> Result<Vec<WebOutbound>, String> {
         let path = message.get("path").and_then(Value::as_str).unwrap_or("/");
-        let absolute = self.resolve(path).ok_or_else(|| "Not a directory".to_owned())?;
+        let absolute = self
+            .resolve(path)
+            .ok_or_else(|| "Not a directory".to_owned())?;
         if !absolute.is_dir() {
             return Err("Not a directory".to_owned());
         }
@@ -154,7 +156,7 @@ impl WebProtocolHost {
         let size = fs::metadata(&absolute)
             .map_err(|_| "Not a file".to_owned())?
             .len();
-        let mut offset = nonnegative_u64(message.get("offset")).min(size);
+        let offset = nonnegative_u64(message.get("offset")).min(size);
         let mut remaining = size.saturating_sub(offset);
         if message.get("length").is_some() {
             remaining = remaining.min(nonnegative_u64(message.get("length")));
@@ -168,7 +170,7 @@ impl WebProtocolHost {
             "name": name,
             "size": remaining as f64,
             "offset": offset as f64,
-        })) )];
+        })))];
         let mut file = File::open(&absolute).map_err(|_| "Not a file".to_owned())?;
         file.seek(SeekFrom::Start(offset))
             .map_err(|_| "Not a file".to_owned())?;
@@ -185,7 +187,6 @@ impl WebProtocolHost {
                 u32::try_from(id).unwrap_or_default(),
                 &buffer[..read],
             )));
-            offset = offset.saturating_add(read as u64);
             remaining = remaining.saturating_sub(read as u64);
         }
         output.push(WebOutbound::Text(compact(&json!({
@@ -242,7 +243,9 @@ impl WebProtocolHost {
         self.require_writes()?;
         let path = message.get("path").and_then(Value::as_str).unwrap_or_default();
         let absolute = self.resolve(path).ok_or_else(|| "Bad path".to_owned())?;
-        let result = if absolute.is_dir() {
+        let result = if !absolute.exists() {
+            Ok(())
+        } else if absolute.is_dir() {
             fs::remove_dir_all(absolute)
         } else {
             fs::remove_file(absolute)
