@@ -232,7 +232,6 @@ impl NativeQuicEndpoint {
     }
 }
 
-#[derive(Debug)]
 struct RemoteDescription {
     ufrag: String,
     password: String,
