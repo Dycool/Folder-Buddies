@@ -6,6 +6,7 @@ pub mod native_quic;
 pub mod native_transport;
 pub mod protocol;
 pub mod ram_cache;
+pub mod remote_fs;
 pub mod room_signaling;
 pub mod room_socket;
 pub mod server;
