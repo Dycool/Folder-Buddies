@@ -1042,13 +1042,15 @@ fn unix_time(seconds: i64) -> io::Result<SystemTime> {
     }
 }
 
-fn stat_fs(_path: &Path) -> Result<WireStatFs, i16> {
+fn stat_fs(path: &Path) -> Result<WireStatFs, i16> {
+    const BLOCK_SIZE: u64 = 4096;
+    let stats = fs2::statvfs(path).map_err(io_status)?;
     Ok(WireStatFs {
-        bsize: 4096,
-        frsize: 4096,
-        blocks: 0,
-        bfree: 0,
-        bavail: 0,
+        bsize: BLOCK_SIZE,
+        frsize: BLOCK_SIZE,
+        blocks: stats.total_space() / BLOCK_SIZE,
+        bfree: stats.free_space() / BLOCK_SIZE,
+        bavail: stats.available_space() / BLOCK_SIZE,
         files: 0,
         ffree: 0,
         namemax: 255,
@@ -1148,5 +1150,15 @@ mod tests {
         assert!(constant_time_equal(&[1, 2, 3], &[1, 2, 3]));
         assert!(!constant_time_equal(&[1, 2, 3], &[1, 2, 4]));
         assert!(!constant_time_equal(&[1, 2], &[1, 2, 3]));
+    }
+
+    #[test]
+    fn statfs_reports_real_capacity() {
+        let stat = stat_fs(&std::env::temp_dir()).expect("filesystem stats");
+        assert_eq!(stat.bsize(), 4096);
+        assert_eq!(stat.frsize(), 4096);
+        assert!(stat.blocks() > 0);
+        assert!(stat.bfree() >= stat.bavail());
+        assert_eq!(stat.namemax(), 255);
     }
 }
