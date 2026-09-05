@@ -16,5 +16,8 @@ quinn.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 fuser = { workspace = true, features = ["libfuse3"] }
 
+[target.'cfg(windows)'.dependencies]
+folderbuddies-platform-windows = { path = "../folderbuddies-platform-windows" }
+
 [lints]
 workspace = true
