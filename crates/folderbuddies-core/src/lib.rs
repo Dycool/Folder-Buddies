@@ -16,3 +16,6 @@ pub mod signaling;
 pub mod web_client;
 pub mod web_compat;
 pub mod web_protocol;
+
+#[cfg(test)]
+mod test_support;
