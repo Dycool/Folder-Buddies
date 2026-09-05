@@ -3,7 +3,7 @@ use std::mem::size_of;
 use libloading::Library;
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HWND},
+        Foundation::CloseHandle,
         System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject},
         UI::{
             Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
@@ -84,7 +84,7 @@ pub fn prompt_enable_projfs_if_missing() {
     // SAFETY: all UTF-16 strings are NUL-terminated and remain live for the synchronous dialog.
     let response = unsafe {
         MessageBoxW(
-            HWND::default(),
+            None,
             PCWSTR(question.as_ptr()),
             PCWSTR(title.as_ptr()),
             MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1,
@@ -103,7 +103,7 @@ pub fn prompt_enable_projfs_if_missing() {
             // SAFETY: all UTF-16 strings are NUL-terminated and remain live for the synchronous dialog.
             unsafe {
                 MessageBoxW(
-                    HWND::default(),
+                    None,
                     PCWSTR(text.as_ptr()),
                     PCWSTR(title.as_ptr()),
                     MB_OK | MB_ICONINFORMATION,
@@ -116,7 +116,7 @@ pub fn prompt_enable_projfs_if_missing() {
             // SAFETY: all UTF-16 strings are NUL-terminated and remain live for the synchronous dialog.
             unsafe {
                 MessageBoxW(
-                    HWND::default(),
+                    None,
                     PCWSTR(text.as_ptr()),
                     PCWSTR(title.as_ptr()),
                     MB_OK | MB_ICONWARNING,
