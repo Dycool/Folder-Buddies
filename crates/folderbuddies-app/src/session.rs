@@ -439,12 +439,10 @@ fn run_connect(args: CommandArgs) -> Result<(), String> {
         }
     }
 
-    let mount = mount.ok_or_else(|| {
-        if connection_error.is_empty() {
-            decode_error
-        } else {
-            connection_error
-        }
+    let mount = mount.ok_or(if connection_error.is_empty() {
+        decode_error
+    } else {
+        connection_error
     })?;
     let remote = remote.ok_or_else(|| "connect failed".to_owned())?;
     let mount_path: PathBuf = mount.mount_path().to_owned();
