@@ -24,6 +24,7 @@ struct FolderBuddiesApp {
     connect_code: String,
     hosting: Option<HostingSession>,
     connected: Option<ConnectedSession>,
+    browser_warning: Option<String>,
     status: String,
     status_is_error: bool,
     last_sample: Instant,
@@ -47,6 +48,7 @@ impl Default for FolderBuddiesApp {
             connect_code: String::new(),
             hosting: None,
             connected: None,
+            browser_warning: None,
             status: "Idle".to_owned(),
             status_is_error: false,
             last_sample: Instant::now(),
@@ -70,7 +72,8 @@ impl FolderBuddiesApp {
             return;
         }
         match HostingSession::start(folder, self.lan_only, self.allow_writes) {
-            Ok(session) => {
+            Ok(mut session) => {
+                self.browser_warning = session.take_browser_warning();
                 self.hosting = Some(session);
                 self.reset_rates();
                 self.set_status("Hosting started.");
@@ -83,6 +86,7 @@ impl FolderBuddiesApp {
         if let Some(mut session) = self.hosting.take() {
             session.stop();
         }
+        self.browser_warning = None;
         self.reset_rates();
         self.set_status("Hosting stopped.");
     }
@@ -126,8 +130,14 @@ impl FolderBuddiesApp {
             .as_ref()
             .is_some_and(|session| !session.connected())
         {
+            let ejected = self.connected.as_ref().is_some_and(ConnectedSession::ejected);
             self.connected.take();
-            self.set_error("The remote share disconnected.");
+            self.reset_rates();
+            if ejected {
+                self.set_status("Disconnected (ejected).");
+            } else {
+                self.set_error("The remote share disconnected.");
+            }
         }
     }
 
@@ -337,6 +347,27 @@ impl eframe::App for FolderBuddiesApp {
             egui::Color32::from_rgb(70, 90, 70)
         };
         ui.colored_label(color, &self.status);
+
+        if let Some(warning) = self.browser_warning.clone() {
+            let mut open = true;
+            let mut dismissed = false;
+            egui::Window::new("Browser Compatibility Unavailable")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label("Native sharing is running, but browser clients cannot connect:");
+                    ui.add_space(8.0);
+                    ui.label(warning);
+                    ui.add_space(8.0);
+                    if ui.button("OK").clicked() {
+                        dismissed = true;
+                    }
+                });
+            if dismissed || !open {
+                self.browser_warning = None;
+            }
+        }
     }
 }
 
