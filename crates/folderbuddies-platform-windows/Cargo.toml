@@ -1,0 +1,28 @@
+[package]
+name = "folderbuddies-platform-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+folderbuddies-core = { path = "../folderbuddies-core" }
+getrandom.workspace = true
+libloading.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_ProjectedFileSystem",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+transmute_ptr_to_ptr = "forbid"
+allow_attributes = "deny"
