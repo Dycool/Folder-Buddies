@@ -42,10 +42,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/1024x1024/apps
           install -m755 target/release/folderbuddies AppDir/usr/bin/folderbuddies
           install -m644 client/src/folderbuddies.desktop AppDir/usr/share/applications/folderbuddies.desktop
-          install -m644 client/src/icons/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/folderbuddies.png
+          install -m644 client/src/icons/icon.png AppDir/usr/share/icons/hicolor/1024x1024/apps/folderbuddies.png
       - name: Package AppImage
         shell: bash
         env:
@@ -60,7 +60,7 @@ jobs:
             --appdir AppDir \
             -e AppDir/usr/bin/folderbuddies \
             -d AppDir/usr/share/applications/folderbuddies.desktop \
-            -i AppDir/usr/share/icons/hicolor/256x256/apps/folderbuddies.png \
+            -i AppDir/usr/share/icons/hicolor/1024x1024/apps/folderbuddies.png \
             --output appimage
           test -s folderbuddies-linux.AppImage
       - uses: actions/upload-artifact@v4
