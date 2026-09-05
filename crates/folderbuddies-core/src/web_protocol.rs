@@ -396,13 +396,18 @@ fn unix_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
+
+    static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
 
     fn temporary_root() -> PathBuf {
         let unique = format!(
-            "folderbuddies-web-protocol-{}-{}",
+            "folderbuddies-web-protocol-{}-{}-{}",
             std::process::id(),
-            unix_millis()
+            unix_millis(),
+            NEXT_TEMP_ROOT.fetch_add(1, Ordering::Relaxed)
         );
         let root = std::env::temp_dir().join(unique);
         fs::create_dir_all(&root).expect("temp root");
