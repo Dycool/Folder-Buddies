@@ -1,8 +1,8 @@
-name: Build Windows (Dynamic)
+name: Build Windows (Portable Zip)
 
 on:
   push:
-    branches: [main]
+    branches: [main, rust-port]
   pull_request:
   workflow_call:
     inputs:
@@ -11,127 +11,40 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 concurrency:
-  group: build-windows-dynamic-${{ github.ref }}
+  group: build-windows-portable-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  BUILD_TYPE: Release
-  # aqtinstall 3.3.0 does not understand Qt 6.11's arch-split online repo layout yet.
-  QT_VERSION: "6.10.3"
   FB_SIGNALING_URL: ${{ vars.FB_SIGNALING_URL }}
-  FIREBASE_DATABASE_URL: ${{ vars.FIREBASE_DATABASE_URL }}
-  VCPKG_COMMIT: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
+  FB_FIREBASE_DATABASE_URL: ${{ vars.FB_FIREBASE_DATABASE_URL }}
 
 jobs:
-  build-windows-dynamic:
-    name: Windows dynamic .exe
+  build-windows-portable:
+    name: Windows portable zip
     runs-on: windows-2025
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
-
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Install Qt (pre-built)
-        shell: pwsh
-        run: |
-          pip install aqtinstall
-          aqt install-qt -O "${{ github.workspace }}\qt" windows desktop "${{ env.QT_VERSION }}" win64_msvc2022_64
-          $qtBin = "${{ github.workspace }}\qt\${{ env.QT_VERSION }}\msvc2022_64\bin"
-          Add-Content $env:GITHUB_PATH "$qtBin"
-
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@v5
-        with:
-          path: _cache/vcpkg-bincache
-          key: vcpkg-windows-dynamic-miniupnpc-libsodium-libdatachannel-${{ env.VCPKG_COMMIT }}
-          restore-keys: |
-            vcpkg-windows-dynamic-miniupnpc-libsodium-libdatachannel-
-            vcpkg-windows-dynamic-miniupnpc-libsodium-
-
-      - name: Bootstrap vcpkg
-        shell: pwsh
-        run: |
-          git clone https://github.com/microsoft/vcpkg.git _deps/vcpkg
-          cd _deps/vcpkg
-          git checkout $env:VCPKG_COMMIT
-          cd ../..
-          .\_deps\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-
-      - name: Install vcpkg dependencies
-        shell: pwsh
-        env:
-          VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/_cache/vcpkg-bincache,readwrite"
-        run: |
-          .\_deps\vcpkg\vcpkg.exe install `
-            "miniupnpc:x64-windows" `
-            "libsodium:x64-windows" `
-            "libdatachannel:x64-windows" `
-            --clean-after-build
-
-      - name: Configure
-        shell: pwsh
-        env:
-          VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/_cache/vcpkg-bincache,readwrite"
-        run: |
-          $qtDir = "${{ github.workspace }}\qt\${{ env.QT_VERSION }}\msvc2022_64"
-          $args = @(
-            '-G', 'Ninja',
-            '-S', 'client',
-            '-B', 'build',
-            "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE",
-            '-DCMAKE_CXX_STANDARD=23',
-            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL',
-            "-DCMAKE_PREFIX_PATH=$qtDir",
-            "-DCMAKE_TOOLCHAIN_FILE=$PWD/_deps/vcpkg/scripts/buildsystems/vcpkg.cmake",
-            '-DVCPKG_TARGET_TRIPLET=x64-windows'
-          )
-          if ($env:FB_SIGNALING_URL) { $args += "-DFB_SIGNALING_URL=$env:FB_SIGNALING_URL" }
-          if ($env:FIREBASE_DATABASE_URL) { $args += "-DFB_FIREBASE_DATABASE_URL=$env:FIREBASE_DATABASE_URL" }
-          cmake @args
-
-      - name: Build and test
-        shell: pwsh
-        run: |
-          cmake --build build --config $env:BUILD_TYPE --parallel
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ctest --test-dir build --output-on-failure -C $env:BUILD_TYPE --timeout 120
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
+      - name: Install Rust
+        shell: bash
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Enforce safe Rust policy
+        shell: bash
+        run: python3 policy/check_rust_policy.py
+      - name: Build Rust client
+        shell: bash
+        run: cargo +1.98.0 build --release -p folderbuddies
       - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path package -Force
-          Copy-Item build/folderbuddies.exe package/
-          # vcpkg (x64-windows) app-local deps such as miniupnpc.dll / libsodium.dll
-          # and now datachannel.dll (+ OpenSSL) are placed next to the exe in build/
-          # by CMake's vcpkg integration; carry them over.
-          if (Test-Path build/*.dll) { Copy-Item build/*.dll package/ }
-          # Fallback: ensure the libdatachannel runtime and its OpenSSL deps are
-          # present even if app-local deployment missed them, copying from the
-          # vcpkg install tree. Without these the exe fails to start.
-          $vcpkgBin = "_deps/vcpkg/installed/x64-windows/bin"
-          foreach ($dll in 'datachannel.dll','libcrypto-3-x64.dll','libssl-3-x64.dll') {
-            if (-not (Test-Path "package/$dll") -and (Test-Path "$vcpkgBin/$dll")) {
-              Copy-Item "$vcpkgBin/$dll" package/
-            }
-          }
-          if (-not (Test-Path "package/datachannel.dll")) { Write-Error "Missing datachannel.dll in package"; exit 1 }
-          # Deploy the Qt runtime (Qt6Core/Gui/Widgets/Network + plugins) straight
-          # into the package directory. Running windeployqt on the packaged exe and
-          # checking the exit code ensures a failure here fails the job instead of
-          # silently shipping an archive missing the Qt DLLs.
-          $qtBin = "${{ github.workspace }}\qt\${{ env.QT_VERSION }}\msvc2022_64\bin"
-          & "$qtBin\windeployqt.exe" --release --no-translations --compiler-runtime package/folderbuddies.exe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Sanity check: the four Qt modules the app links must be present.
-          foreach ($dll in 'Qt6Core.dll','Qt6Gui.dll','Qt6Widgets.dll','Qt6Network.dll') {
-            if (-not (Test-Path "package/$dll")) { Write-Error "Missing $dll in package"; exit 1 }
-          }
+          New-Item -ItemType Directory -Path package -Force | Out-Null
+          Copy-Item target/release/folderbuddies.exe package/folderbuddies.exe
+          Copy-Item LICENSE package/LICENSE
           Compress-Archive -Path package\* -DestinationPath folderbuddies-windows-dynamic.zip
-
       - uses: actions/upload-artifact@v4
         with:
           name: folderbuddies-windows-dynamic
