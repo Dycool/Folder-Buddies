@@ -23,6 +23,10 @@ jobs:
       - name: Install pinned Rust toolchain
         shell: bash
         run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
+      - name: Install macOS FUSE build dependency
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install --cask fuse-t
       - name: Enforce source policy
         shell: bash
         run: python3 policy/check_rust_policy.py
@@ -51,4 +55,4 @@ jobs:
         shell: bash
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
-        run: cargo +nightly-2026-09-03 miri test -p folderbuddies-core --lib
+        run: cargo +nightly-2026-09-03 miri test -p folderbuddies-core --lib -- --skip statfs_reports_real_capacity

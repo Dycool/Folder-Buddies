@@ -85,6 +85,9 @@ jobs:
       - name: Install Rust
         shell: bash
         run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Install FUSE-T build dependency
+        shell: bash
+        run: brew install --cask fuse-t
       - name: Enforce safe Rust policy
         shell: bash
         run: python3 policy/check_rust_policy.py
