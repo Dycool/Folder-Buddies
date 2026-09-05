@@ -50,6 +50,17 @@ impl Mount {
         self.inner.mount_path()
     }
 
+    pub(crate) fn ejected(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.inner.ejected()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     pub(crate) fn unmount(self) -> Result<(), String> {
         #[cfg(windows)]
         {
