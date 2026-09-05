@@ -453,7 +453,7 @@ fn run_connect(args: CommandArgs) -> Result<(), String> {
     );
 
     let stop = install_stop_handler()?;
-    while !stop.load(Ordering::Acquire) && remote.connected() {
+    while !stop.load(Ordering::Acquire) && remote.connected() && !mount.ejected() {
         thread::sleep(POLL_INTERVAL);
     }
 
