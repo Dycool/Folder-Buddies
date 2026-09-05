@@ -41,6 +41,8 @@ impl Mount {
         }
         #[cfg(not(windows))]
         {
+            #[cfg(target_os = "macos")]
+            crate::macos_prerequisite::ensure_fuse_backend()?;
             fsk_backend::PortableMount::start_remote(client, share_name, allow_writes)
                 .map(|inner| Self { inner })
         }
