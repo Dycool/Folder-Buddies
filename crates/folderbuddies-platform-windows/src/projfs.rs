@@ -442,8 +442,10 @@ unsafe extern "system" fn placeholder_cb(callback_data: *const PRJ_CALLBACK_DATA
         // SAFETY: FilePathName belongs to the live callback data.
         let path = unsafe { remote_path(data.FilePathName) };
         let attr = state.client.get_attr(&path).map_err(remote_hresult)?;
-        let mut info = PRJ_PLACEHOLDER_INFO::default();
-        info.FileBasicInfo = apply_readonly(to_basic_info(&attr), state.allow_writes);
+        let info = PRJ_PLACEHOLDER_INFO {
+            FileBasicInfo: apply_readonly(to_basic_info(&attr), state.allow_writes),
+            ..Default::default()
+        };
         // SAFETY: callback context and path remain live for the call; `info` has the SDK layout.
         let result = unsafe {
             (state.api.write_placeholder_info)(
@@ -834,6 +836,7 @@ unsafe fn wide_to_vec(text: PCWSTR) -> Vec<u16> {
 /// # Safety
 /// `text` must either be null or point to a NUL-terminated UTF-16 string valid for this call.
 unsafe fn wide_to_string(text: PCWSTR) -> String {
+    // SAFETY: this function has the same input contract as wide_to_vec and forwards it unchanged.
     let wide = unsafe { wide_to_vec(text) };
     let slice = wide.strip_suffix(&[0]).unwrap_or(&wide);
     String::from_utf16_lossy(slice)
@@ -842,6 +845,7 @@ unsafe fn wide_to_string(text: PCWSTR) -> String {
 /// # Safety
 /// `text` follows the ProjFS callback lifetime rules described by `wide_to_string`.
 unsafe fn remote_path(text: PCWSTR) -> String {
+    // SAFETY: the caller supplies a live ProjFS path pointer satisfying wide_to_string's contract.
     let raw = unsafe { wide_to_string(text) }.replace('\\', "/");
     if raw.is_empty() {
         "/".to_owned()
@@ -855,6 +859,7 @@ unsafe fn remote_path(text: PCWSTR) -> String {
 /// # Safety
 /// `text` follows the ProjFS callback lifetime rules described by `wide_to_string`.
 unsafe fn remote_optional_path(text: PCWSTR) -> String {
+    // SAFETY: the caller supplies a live optional ProjFS path pointer satisfying wide_to_string's contract.
     let raw = unsafe { wide_to_string(text) }.replace('\\', "/");
     if raw.is_empty() {
         String::new()
