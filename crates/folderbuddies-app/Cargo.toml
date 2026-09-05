@@ -13,5 +13,8 @@ fsk.workspace = true
 igd-next.workspace = true
 quinn.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+fuser = { workspace = true, features = ["libfuse3"] }
+
 [lints]
 workspace = true
