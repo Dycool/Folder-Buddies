@@ -7,6 +7,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 CRATES = ROOT / "crates"
+UNSAFE_BOUNDARY = CRATES / "folderbuddies-platform-windows"
 
 errors: list[str] = []
 
@@ -22,7 +23,12 @@ for marker in required_cargo:
 crate_roots = list(CRATES.glob("*/src/lib.rs")) + list(CRATES.glob("*/src/main.rs"))
 for root in crate_roots:
     first = root.read_text(encoding="utf-8").splitlines()[:1]
-    if first != ["#![forbid(unsafe_code)]"]:
+    if root.is_relative_to(UNSAFE_BOUNDARY):
+        if first != ["#![deny(unsafe_op_in_unsafe_fn)]"]:
+            errors.append(
+                f"{root.relative_to(ROOT)} must begin with #![deny(unsafe_op_in_unsafe_fn)]"
+            )
+    elif first != ["#![forbid(unsafe_code)]"]:
         errors.append(f"{root.relative_to(ROOT)} must begin with #![forbid(unsafe_code)]")
 
 attribute_override = re.compile(r"#\s*!?\s*\[\s*(allow|warn)\s*\(")
@@ -32,15 +38,27 @@ raw_pointer = re.compile(r"\*\s*(?:const|mut)\b")
 for path in CRATES.rglob("*.rs"):
     text = path.read_text(encoding="utf-8")
     rel = path.relative_to(ROOT)
+    native_boundary = path.is_relative_to(UNSAFE_BOUNDARY)
     for line_no, line in enumerate(text.splitlines(), 1):
         if attribute_override.search(line):
             errors.append(f"{rel}:{line_no}: allow/warn lint overrides are forbidden")
-        if unsafe_construct.search(line):
+        if unsafe_construct.search(line) and not native_boundary:
             errors.append(f"{rel}:{line_no}: unsafe Rust construct is forbidden")
-        if raw_pointer.search(line):
+        if raw_pointer.search(line) and not native_boundary:
             errors.append(f"{rel}:{line_no}: raw pointer type is forbidden")
         if "std::mem::transmute" in line or "core::mem::transmute" in line:
             errors.append(f"{rel}:{line_no}: transmute is forbidden")
+
+if UNSAFE_BOUNDARY.exists():
+    manifest = (UNSAFE_BOUNDARY / "Cargo.toml").read_text(encoding="utf-8")
+    if '[lints.rust]\nunsafe_op_in_unsafe_fn = "deny"' not in manifest:
+        errors.append(
+            "Windows native boundary must deny unsafe_op_in_unsafe_fn in its Cargo.toml"
+        )
+    if '[lints.clippy]\nundocumented_unsafe_blocks = "deny"' not in manifest:
+        errors.append(
+            "Windows native boundary must deny undocumented_unsafe_blocks in its Cargo.toml"
+        )
 
 for build_script in ROOT.rglob("build.rs"):
     if ".git" not in build_script.parts and "target" not in build_script.parts:
@@ -52,4 +70,7 @@ if errors:
         print(f"  - {error}", file=sys.stderr)
     raise SystemExit(1)
 
-print(f"Rust safety policy OK ({len(crate_roots)} crate roots checked)")
+print(
+    f"Rust safety policy OK ({len(crate_roots)} crate roots checked; "
+    "unsafe limited to crates/folderbuddies-platform-windows)"
+)
