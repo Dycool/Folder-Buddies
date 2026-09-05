@@ -64,6 +64,7 @@ pub(crate) struct HostingSession {
     server: Option<Server>,
     ticket: Option<HostedShareTicket>,
     compat_host: Option<CompatRoomHost>,
+    browser_warning: Option<String>,
     upnp_mapping: Option<UpnpMapping>,
 }
 
@@ -85,21 +86,24 @@ impl HostingSession {
             allow_writes,
         )?;
         let ticket = publish_share(&token, reach)?;
-        let compat_host = if ticket.cloud_published() {
-            CompatRoomHost::start(
+        let (compat_host, browser_warning) = if ticket.cloud_published() {
+            match CompatRoomHost::start(
                 folder,
                 ticket.room_code(),
                 allow_writes,
                 server.bound_port(),
-            )
-            .ok()
+            ) {
+                Ok(host) => (Some(host), None),
+                Err(error) => (None, Some(error)),
+            }
         } else {
-            None
+            (None, None)
         };
         Ok(Self {
             server: Some(server),
             ticket: Some(ticket),
             compat_host,
+            browser_warning,
             upnp_mapping,
         })
     }
@@ -131,6 +135,10 @@ impl HostingSession {
         self.ticket
             .as_ref()
             .map_or("", HostedShareTicket::cloud_status)
+    }
+
+    pub(crate) fn take_browser_warning(&mut self) -> Option<String> {
+        self.browser_warning.take()
     }
 
     #[must_use]
@@ -338,7 +346,12 @@ impl ConnectedSession {
 
     #[must_use]
     pub(crate) fn connected(&self) -> bool {
-        self.remote.connected() && self.mount.as_ref().is_some_and(|mount| !mount.ejected())
+        self.remote.connected() && !self.ejected()
+    }
+
+    #[must_use]
+    pub(crate) fn ejected(&self) -> bool {
+        self.mount.as_ref().is_some_and(Mount::ejected)
     }
 
     #[must_use]
