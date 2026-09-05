@@ -298,7 +298,11 @@ impl WebProtocolHost {
                 Err(_) => return None,
             }
         }
-        let candidate = current.join(tail);
+        let candidate = if tail.as_os_str().is_empty() {
+            current
+        } else {
+            current.join(tail)
+        };
         path_within(&self.root, &candidate).then_some(candidate)
     }
 }
