@@ -2,6 +2,7 @@
 #![cfg(windows)]
 
 mod drive;
+mod prerequisite;
 mod projfs;
 
 use std::{
@@ -19,6 +20,8 @@ use folderbuddies_core::remote_fs::RemoteFs;
 use drive::{DriveMapping, clone_drive_name, wait_for_mapping_loss};
 use projfs::Projection;
 
+pub use prerequisite::{enable_projfs, ensure_projfs, projfs_available, prompt_enable_projfs_if_missing};
+
 pub struct WindowsMount {
     projection: Option<Projection>,
     drive: Option<DriveMapping>,
@@ -35,6 +38,7 @@ impl WindowsMount {
         share_name: &str,
         allow_writes: bool,
     ) -> Result<Self, String> {
+        ensure_projfs()?;
         let base = default_backing_base();
         fs::create_dir_all(&base)
             .map_err(|error| format!("failed to create ProjFS mount base: {error}"))?;
