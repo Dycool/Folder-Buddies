@@ -338,7 +338,7 @@ impl ConnectedSession {
 
     #[must_use]
     pub(crate) fn connected(&self) -> bool {
-        self.remote.connected()
+        self.remote.connected() && self.mount.as_ref().is_some_and(|mount| !mount.ejected())
     }
 
     #[must_use]
