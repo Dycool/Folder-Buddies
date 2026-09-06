@@ -88,7 +88,7 @@ impl FolderBuddiesApp {
         }
         self.browser_warning = None;
         self.reset_rates();
-        self.set_status("Hosting stopped.");
+        self.set_status("Not hosting.");
     }
 
     fn connect(&mut self) {
@@ -100,9 +100,13 @@ impl FolderBuddiesApp {
         match ConnectedSession::start(code, 0) {
             Ok(session) => {
                 let mount = session.mount_path().display().to_string();
+                let displayed_mount = mount
+                    .strip_suffix('/')
+                    .or_else(|| mount.strip_suffix('\\'))
+                    .unwrap_or(&mount);
                 self.connected = Some(session);
                 self.reset_rates();
-                self.set_status(format!("Connected and mounted at {mount}"));
+                self.set_status(format!("Connected - Mounted in {displayed_mount}"));
             }
             Err(error) => self.set_error(format!("Connect failed: {error}")),
         }
@@ -113,7 +117,7 @@ impl FolderBuddiesApp {
             session.disconnect();
         }
         self.reset_rates();
-        self.set_status("Disconnected.");
+        self.set_status("Not connected.");
     }
 
     fn refresh_runtime_state(&mut self) {
@@ -130,7 +134,10 @@ impl FolderBuddiesApp {
             .as_ref()
             .is_some_and(|session| !session.connected())
         {
-            let ejected = self.connected.as_ref().is_some_and(ConnectedSession::ejected);
+            let ejected = self
+                .connected
+                .as_ref()
+                .is_some_and(ConnectedSession::ejected);
             self.connected.take();
             self.reset_rates();
             if ejected {
@@ -208,7 +215,7 @@ impl FolderBuddiesApp {
             {
                 match choose_folder() {
                     Ok(Some(path)) => self.folder_path = path.display().to_string(),
-                    Ok(None) => self.set_status("Folder selection cancelled."),
+                    Ok(None) => {}
                     Err(error) => self.set_error(error),
                 }
             }
@@ -255,9 +262,8 @@ impl FolderBuddiesApp {
             ui.add_space(6.0);
             ui.label("Connect code:");
             ui.monospace(hosting.connect_code());
-            if ui.button("Copy connect code").clicked() {
+            if ui.button("Copy").clicked() {
                 ui.ctx().copy_text(hosting.connect_code().to_owned());
-                self.set_status("Connect code copied.");
             }
         }
     }
@@ -308,10 +314,7 @@ impl FolderBuddiesApp {
             ));
             let mount_path = session.mount_path().to_owned();
             if ui.button("Open mounted folder").clicked() {
-                match open_path(&mount_path) {
-                    Ok(()) => self.set_status("Opened mounted folder."),
-                    Err(error) => self.set_error(error),
-                }
+                let _ = open_path(&mount_path);
             }
         }
     }
@@ -447,7 +450,11 @@ fn choose_folder() -> Result<Option<PathBuf>, String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         if let Ok(output) = Command::new("zenity")
-            .args(["--file-selection", "--directory", "--title=Choose folder to host"])
+            .args([
+                "--file-selection",
+                "--directory",
+                "--title=Choose folder to host",
+            ])
             .output()
         {
             if output.status.success() {
@@ -456,7 +463,12 @@ fn choose_folder() -> Result<Option<PathBuf>, String> {
             return Ok(None);
         }
         if let Ok(output) = Command::new("kdialog")
-            .args(["--getexistingdirectory", ".", "--title", "Choose folder to host"])
+            .args([
+                "--getexistingdirectory",
+                ".",
+                "--title",
+                "Choose folder to host",
+            ])
             .output()
         {
             if output.status.success() {
