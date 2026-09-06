@@ -198,9 +198,10 @@ impl FolderBuddiesApp {
         ui.horizontal(|ui| {
             ui.label("Folder:");
             let editor = egui::TextEdit::singleline(&mut self.folder_path)
-                .hint_text("Choose or type a folder path")
-                .desired_width(f32::INFINITY);
-            ui.add_enabled(!running, editor);
+                .hint_text("Choose a folder to host")
+                .desired_width(f32::INFINITY)
+                .interactive(false);
+            ui.add(editor);
             if ui
                 .add_enabled(!running, egui::Button::new("Browse…"))
                 .clicked()
@@ -216,7 +217,7 @@ impl FolderBuddiesApp {
             ui.checkbox(&mut self.lan_only, "Share on this LAN only");
             ui.checkbox(
                 &mut self.allow_writes,
-                "Allow clients to upload, edit, and delete files",
+                "Allow clients to upload and delete files",
             );
         });
         ui.add_space(8.0);
@@ -464,14 +465,14 @@ fn choose_folder() -> Result<Option<PathBuf>, String> {
             return Ok(None);
         }
         Err(
-            "No native folder chooser was found. Install zenity/kdialog or type the folder path directly."
+            "No native folder chooser was found. Install zenity or kdialog to choose a folder."
                 .to_owned(),
         )
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
     {
-        Err("Folder chooser is unavailable on this platform; type the folder path directly.".to_owned())
+        Err("Folder chooser is unavailable on this platform.".to_owned())
     }
 }
 
