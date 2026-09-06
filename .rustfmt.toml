@@ -1,4 +1,3 @@
 # Keep formatting stable independently of the Rust language edition.
-# The workspace uses Rust 2024 semantics, while the existing source layout
-# follows the pre-2024 rustfmt style.
-style_edition = "2021"
+# The workspace and existing source layout use Rust 2024 rustfmt style.
+style_edition = "2024"
