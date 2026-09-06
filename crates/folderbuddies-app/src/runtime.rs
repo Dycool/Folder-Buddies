@@ -242,8 +242,17 @@ pub(crate) struct ConnectedSession {
     allow_writes: bool,
 }
 
-impl ConnectedSession {
-    pub(crate) fn start(code: &str, _connections: usize) -> Result<Self, String> {
+// Network connections can cross threads; the platform mount stays on the UI
+// thread, matching the C++ connect worker/result handoff.
+pub(crate) struct PendingConnection {
+    remote: Option<ConnectedRemote>,
+    quic_client: Option<NativeQuicClient>,
+    folder: String,
+    allow_writes: bool,
+}
+
+impl PendingConnection {
+    pub(crate) fn start(code: &str) -> Result<Self, String> {
         let mut decode_error = String::new();
         let mut connection_error = String::new();
 
@@ -252,26 +261,14 @@ impl ConnectedSession {
                 let mut quic_error = String::new();
                 if looks_like_room_code(code) {
                     match NativeQuicClient::connect(code, &token) {
-                        Ok(mut quic_client) => {
+                        Ok(quic_client) => {
                             let client = quic_client.client();
-                            match Mount::start(
-                                Arc::clone(&client),
-                                token.folder(),
-                                token.allow_writes(),
-                            ) {
-                                Ok(mount) => {
-                                    let mount_path = mount.mount_path().to_owned();
-                                    return Ok(Self {
-                                        remote: ConnectedRemote::Native(client),
-                                        quic_client: Some(quic_client),
-                                        mount: Some(mount),
-                                        mount_path,
-                                        folder: token.folder().to_owned(),
-                                        allow_writes: token.allow_writes(),
-                                    });
-                                }
-                                Err(_) => quic_client.disconnect(),
-                            }
+                            return Ok(Self {
+                                remote: Some(ConnectedRemote::Native(client)),
+                                quic_client: Some(quic_client),
+                                folder: token.folder().to_owned(),
+                                allow_writes: token.allow_writes(),
+                            });
                         }
                         Err(error) => quic_error = error,
                     }
@@ -280,27 +277,12 @@ impl ConnectedSession {
                 match Client::connect_default(&token) {
                     Ok(client) => {
                         let client = Arc::new(client);
-                        match Mount::start(
-                            Arc::clone(&client),
-                            token.folder(),
-                            token.allow_writes(),
-                        ) {
-                            Ok(mount) => {
-                                let mount_path = mount.mount_path().to_owned();
-                                return Ok(Self {
-                                    remote: ConnectedRemote::Native(client),
-                                    quic_client: None,
-                                    mount: Some(mount),
-                                    mount_path,
-                                    folder: token.folder().to_owned(),
-                                    allow_writes: token.allow_writes(),
-                                });
-                            }
-                            Err(tcp_error) => {
-                                client.disconnect();
-                                connection_error = direct_failure(&quic_error, &tcp_error);
-                            }
-                        }
+                        return Ok(Self {
+                            remote: Some(ConnectedRemote::Native(client)),
+                            quic_client: None,
+                            folder: token.folder().to_owned(),
+                            allow_writes: token.allow_writes(),
+                        });
                     }
                     Err(tcp_error) => {
                         connection_error = direct_failure(&quic_error, &tcp_error);
@@ -314,24 +296,12 @@ impl ConnectedSession {
             match WebRtcRemoteClient::connect(code) {
                 Ok(client) => {
                     let allow_writes = client.can_write();
-                    let remote_for_mount: Arc<dyn RemoteFs> = client.clone();
-                    match Mount::start_remote(remote_for_mount, "Web share", allow_writes) {
-                        Ok(mount) => {
-                            let mount_path = mount.mount_path().to_owned();
-                            return Ok(Self {
-                                remote: ConnectedRemote::Web(client),
-                                quic_client: None,
-                                mount: Some(mount),
-                                mount_path,
-                                folder: "Web share".to_owned(),
-                                allow_writes,
-                            });
-                        }
-                        Err(error) => {
-                            client.disconnect();
-                            connection_error = error;
-                        }
-                    }
+                    return Ok(Self {
+                        remote: Some(ConnectedRemote::Web(client)),
+                        quic_client: None,
+                        folder: "Web share".to_owned(),
+                        allow_writes,
+                    });
                 }
                 Err(error) => connection_error = error,
             }
@@ -344,6 +314,40 @@ impl ConnectedSession {
         })
     }
 
+    pub(crate) fn mount(mut self) -> Result<ConnectedSession, String> {
+        let remote = self.remote.as_ref().ok_or("Connection already consumed")?;
+        let mount = match remote {
+            ConnectedRemote::Native(client) => {
+                Mount::start(Arc::clone(client), &self.folder, self.allow_writes)
+            }
+            ConnectedRemote::Web(client) => {
+                let remote_for_mount: Arc<dyn RemoteFs> = client.clone();
+                Mount::start_remote(remote_for_mount, &self.folder, self.allow_writes)
+            }
+        }?;
+        let mount_path = mount.mount_path().to_owned();
+        Ok(ConnectedSession {
+            remote: self.remote.take().ok_or("Connection already consumed")?,
+            quic_client: self.quic_client.take(),
+            mount: Some(mount),
+            mount_path,
+            folder: std::mem::take(&mut self.folder),
+            allow_writes: self.allow_writes,
+        })
+    }
+}
+
+impl Drop for PendingConnection {
+    fn drop(&mut self) {
+        if let Some(mut client) = self.quic_client.take() {
+            client.disconnect();
+        } else if let Some(remote) = self.remote.take() {
+            remote.disconnect();
+        }
+    }
+}
+
+impl ConnectedSession {
     #[must_use]
     pub(crate) fn connected(&self) -> bool {
         self.remote.connected() && !self.ejected()
