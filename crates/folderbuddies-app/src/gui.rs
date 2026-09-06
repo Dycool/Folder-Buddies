@@ -160,10 +160,10 @@ impl FolderBuddiesApp {
             .connected
             .as_ref()
             .map_or(0, ConnectedSession::bytes_written);
-        self.host_send_rate = per_second(host_sent, &mut self.last_host_sent, elapsed);
-        self.host_receive_rate = per_second(host_received, &mut self.last_host_received, elapsed);
-        self.read_rate = per_second(read, &mut self.last_read, elapsed);
-        self.write_rate = per_second(written, &mut self.last_written, elapsed);
+        self.host_send_rate = per_second(host_sent, &mut self.last_host_sent);
+        self.host_receive_rate = per_second(host_received, &mut self.last_host_received);
+        self.read_rate = per_second(read, &mut self.last_read);
+        self.write_rate = per_second(written, &mut self.last_written);
         self.last_sample = now;
     }
 
@@ -375,8 +375,8 @@ impl eframe::App for FolderBuddiesApp {
 pub(crate) fn run_gui() -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([600.0, 430.0])
-            .with_min_inner_size([520.0, 360.0]),
+            .with_inner_size([560.0, 430.0])
+            .with_resizable(false),
         centered: true,
         ..Default::default()
     };
@@ -388,10 +388,10 @@ pub(crate) fn run_gui() -> Result<(), String> {
     .map_err(|error| format!("failed to launch GUI: {error}"))
 }
 
-fn per_second(current: u64, last: &mut u64, elapsed: f64) -> f64 {
+fn per_second(current: u64, last: &mut u64) -> f64 {
     let delta = current.saturating_sub(*last);
     *last = current;
-    delta as f64 / elapsed
+    delta as f64 * 2.0
 }
 
 fn human_rate(mut bytes_per_second: f64) -> String {
