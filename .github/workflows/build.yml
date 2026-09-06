@@ -42,10 +42,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/1024x1024/apps
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
           install -m755 target/release/folderbuddies AppDir/usr/bin/folderbuddies
           install -m644 client/src/folderbuddies.desktop AppDir/usr/share/applications/folderbuddies.desktop
-          install -m644 client/src/icons/icon.png AppDir/usr/share/icons/hicolor/1024x1024/apps/folderbuddies.png
+          convert client/src/icons/icon.png -resize 256x256 AppDir/usr/share/icons/hicolor/256x256/apps/folderbuddies.png
       - name: Package AppImage
         shell: bash
         env:
@@ -60,7 +60,7 @@ jobs:
             --appdir AppDir \
             -e AppDir/usr/bin/folderbuddies \
             -d AppDir/usr/share/applications/folderbuddies.desktop \
-            -i AppDir/usr/share/icons/hicolor/1024x1024/apps/folderbuddies.png \
+            -i AppDir/usr/share/icons/hicolor/256x256/apps/folderbuddies.png \
             --output appimage
           test -s folderbuddies-linux.AppImage
       - uses: actions/upload-artifact@v4
@@ -87,7 +87,23 @@ jobs:
         run: rustup toolchain install 1.98.0 --profile minimal
       - name: Install FUSE-T build dependency
         shell: bash
-        run: brew install --cask fuse-t
+        run: |
+          brew install --cask fuse-t
+          brew install pkgconf
+          mkdir -p "$RUNNER_TEMP/fuse-t-pkgconfig"
+          cat > "$RUNNER_TEMP/fuse-t-pkgconfig/fuse.pc" <<'EOF'
+          prefix=/usr/local
+          exec_prefix=${prefix}
+          libdir=${exec_prefix}/lib
+          includedir=${prefix}/include
+
+          Name: fuse
+          Description: FUSE-T libfuse compatibility
+          Version: 2.9.9
+          Libs: -L${libdir} -lfuse-t
+          Cflags: -I${includedir}/fuse
+          EOF
+          echo "PKG_CONFIG_PATH=$RUNNER_TEMP/fuse-t-pkgconfig" >> "$GITHUB_ENV"
       - name: Enforce safe Rust policy
         shell: bash
         run: python3 policy/check_rust_policy.py
