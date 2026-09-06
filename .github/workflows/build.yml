@@ -32,6 +32,11 @@ jobs:
       - name: Install Rust
         shell: bash
         run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Install Linux packaging dependency
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends imagemagick
       - name: Enforce safe Rust policy
         shell: bash
         run: python3 policy/check_rust_policy.py
