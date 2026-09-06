@@ -40,11 +40,7 @@ pub(crate) fn ensure_fuse_backend() -> Result<(), String> {
     }
 
     let cache = Command::new(&brew)
-        .args([
-            "--cache",
-            "--cask",
-            "macos-fuse-t/homebrew-cask/fuse-t",
-        ])
+        .args(["--cache", "--cask", "macos-fuse-t/homebrew-cask/fuse-t"])
         .output()
         .map_err(|_| "FUSE-T package was downloaded but could not be located.".to_owned())?;
     let package = String::from_utf8_lossy(&cache.stdout).trim().to_owned();
@@ -69,7 +65,9 @@ pub(crate) fn ensure_fuse_backend() -> Result<(), String> {
     }
 
     if !backend_present() {
-        return Err("FUSE-T was installed but is not active yet — a reboot may be required.".to_owned());
+        return Err(
+            "FUSE-T was installed but is not active yet — a reboot may be required.".to_owned(),
+        );
     }
     Ok(())
 }
@@ -103,7 +101,10 @@ fn install_homebrew() -> Result<String, String> {
         "mkdir -p {prefix} 2>/dev/null; chown {}:staff {prefix} 2>/dev/null",
         shell_quote(&user)
     );
-    let _ = run_admin_osascript(&setup, "Folder Buddies needs to create the Homebrew directory");
+    let _ = run_admin_osascript(
+        &setup,
+        "Folder Buddies needs to create the Homebrew directory",
+    );
 
     let download = format!(
         "curl -fsSL https://github.com/Homebrew/brew/tarball/master | tar xz --strip 1 -C {prefix} 2>/dev/null"
@@ -111,7 +112,9 @@ fn install_homebrew() -> Result<String, String> {
     let status = Command::new("sh")
         .args(["-c", &download])
         .status()
-        .map_err(|_| "Failed to download Homebrew. FUSE-T installation cannot proceed.".to_owned())?;
+        .map_err(|_| {
+            "Failed to download Homebrew. FUSE-T installation cannot proceed.".to_owned()
+        })?;
     if !status.success() {
         return Err("Failed to download Homebrew. FUSE-T installation cannot proceed.".to_owned());
     }

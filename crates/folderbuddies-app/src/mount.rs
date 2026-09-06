@@ -1,10 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use folderbuddies_core::{
-    cached_remote::CachedRemoteFs,
-    client::Client,
-    remote_fs::RemoteFs,
-};
+use folderbuddies_core::{cached_remote::CachedRemoteFs, client::Client, remote_fs::RemoteFs};
 
 #[cfg(not(windows))]
 #[path = "mount_fsk.rs"]
