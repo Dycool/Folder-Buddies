@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 fn main() {
     let code = folderbuddies::run();
