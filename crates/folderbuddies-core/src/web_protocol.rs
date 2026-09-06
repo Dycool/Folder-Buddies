@@ -447,18 +447,24 @@ mod tests {
         let reply = host.handle_text(
             r#"{"t":"download","id":9,"path":"/file.bin","offset":2,"length":4}"#,
         );
-        assert_eq!(reply.len(), 3);
+        assert!(reply.len() >= 3);
         let WebOutbound::Text(start) = &reply[0] else {
             panic!("start");
         };
         assert!(start.contains("\"size\":4.0"));
-        let WebOutbound::Binary(binary) = &reply[1] else {
-            panic!("binary");
-        };
-        let (id, payload) = decode_binary_frame(binary).expect("frame");
-        assert_eq!(id, 9);
+
+        let mut payload = Vec::new();
+        for frame in &reply[1..reply.len() - 1] {
+            let WebOutbound::Binary(binary) = frame else {
+                panic!("binary");
+            };
+            let (id, chunk) = decode_binary_frame(binary).expect("frame");
+            assert_eq!(id, 9);
+            payload.extend_from_slice(chunk);
+        }
         assert_eq!(payload, b"2345");
-        let WebOutbound::Text(end) = &reply[2] else {
+
+        let WebOutbound::Text(end) = &reply[reply.len() - 1] else {
             panic!("end");
         };
         assert!(end.contains("\"t\":\"fileEnd\""));
