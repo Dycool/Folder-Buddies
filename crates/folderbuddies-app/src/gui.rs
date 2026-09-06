@@ -279,15 +279,15 @@ impl FolderBuddiesApp {
         let running = self.hosting.as_ref().is_some_and(HostingSession::running);
         let busy = self.host_worker.is_some();
         form_label(ui, 62.0, "Folder:");
+        let mut folder_text = self.folder_path.as_str();
         edit_control(
             ui,
             [108.0, 62.0, 348.0, 32.0],
             !running && !busy,
             true,
-            egui::TextEdit::singleline(&mut self.folder_path)
+            egui::TextEdit::singleline(&mut folder_text)
                 .hint_text("Choose a folder to host")
-                .background_color(egui::Color32::from_gray(240))
-                .interactive(false),
+                .background_color(egui::Color32::from_gray(240)),
         );
         if control(
             ui,
@@ -346,17 +346,17 @@ impl FolderBuddiesApp {
             }
         }
         form_label(ui, 212.0, "Connect code:");
-        let mut code = self
+        let code = self
             .hosting
             .as_ref()
             .map_or(String::new(), |s| s.connect_code().to_owned());
+        let mut code_text = code.as_str();
         edit_control(
             ui,
             [108.0, 212.0, 368.0, 70.0],
             true,
             true,
-            egui::TextEdit::multiline(&mut code)
-                .interactive(false)
+            egui::TextEdit::multiline(&mut code_text)
                 .background_color(egui::Color32::from_gray(240))
                 .font(egui::TextStyle::Monospace),
         );
@@ -659,22 +659,18 @@ impl eframe::App for FolderBuddiesApp {
         }
 
         if let Some(warning) = self.browser_warning.clone() {
-            let mut open = true;
-            let mut dismissed = false;
-            egui::Window::new("Browser Compatibility Unavailable")
-                .collapsible(false)
-                .resizable(false)
-                .open(&mut open)
-                .show(ui.ctx(), |ui| {
+            let modal = egui::Modal::new(egui::Id::new("browser_compatibility_warning")).show(
+                ui.ctx(),
+                |ui| {
+                    ui.heading("Browser Compatibility Unavailable");
                     ui.label("Native sharing is running, but browser clients cannot connect:");
                     ui.add_space(8.0);
                     ui.label(warning);
                     ui.add_space(8.0);
-                    if ui.button("OK").clicked() {
-                        dismissed = true;
-                    }
-                });
-            if dismissed || !open {
+                    ui.button("OK").clicked()
+                },
+            );
+            if modal.inner || modal.should_close() {
                 self.browser_warning = None;
             }
         }
