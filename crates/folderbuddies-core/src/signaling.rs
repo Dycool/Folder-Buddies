@@ -545,7 +545,9 @@ impl FirebaseSignalingClient {
             .map_err(|error| error.to_string())?;
         let status = existing.status().as_u16();
         if status != 200 {
-            return Err(format!("Firebase fallback room check failed (HTTP {status})"));
+            return Err(format!(
+                "Firebase fallback room check failed (HTTP {status})"
+            ));
         }
         if existing.text().map_err(|error| error.to_string())?.trim() != "null" {
             return Err("Firebase fallback room code collision".to_owned());

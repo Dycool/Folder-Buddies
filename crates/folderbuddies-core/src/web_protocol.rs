@@ -148,7 +148,10 @@ impl WebProtocolHost {
     }
 
     fn download(&self, id: i64, message: &Value) -> Result<Vec<WebOutbound>, String> {
-        let path = message.get("path").and_then(Value::as_str).unwrap_or_default();
+        let path = message
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let absolute = self.resolve(path).ok_or_else(|| "Not a file".to_owned())?;
         if !absolute.is_file() {
             return Err("Not a file".to_owned());
@@ -198,7 +201,10 @@ impl WebProtocolHost {
 
     fn upload_start(&self, id: i64, message: &Value) -> Result<Vec<WebOutbound>, String> {
         self.require_writes()?;
-        let path = message.get("path").and_then(Value::as_str).unwrap_or_default();
+        let path = message
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let absolute = self
             .resolve_write(path)
             .ok_or_else(|| "Bad upload path".to_owned())?;
@@ -223,7 +229,10 @@ impl WebProtocolHost {
 
     fn mkdir(&self, id: i64, message: &Value) -> Result<Vec<WebOutbound>, String> {
         self.require_writes()?;
-        let path = message.get("path").and_then(Value::as_str).unwrap_or_default();
+        let path = message
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let absolute = self
             .resolve_write(path)
             .ok_or_else(|| "Bad path".to_owned())?;
@@ -241,7 +250,10 @@ impl WebProtocolHost {
 
     fn delete(&self, id: i64, message: &Value) -> Result<Vec<WebOutbound>, String> {
         self.require_writes()?;
-        let path = message.get("path").and_then(Value::as_str).unwrap_or_default();
+        let path = message
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let absolute = self.resolve(path).ok_or_else(|| "Bad path".to_owned())?;
         let result = if !absolute.exists() {
             Ok(())
@@ -371,7 +383,10 @@ fn is_boundary_link(path: &Path) -> Result<bool, std::io::Error> {
 }
 
 fn json_id(message: &Value) -> i64 {
-    message.get("id").and_then(Value::as_i64).unwrap_or_default()
+    message
+        .get("id")
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
 }
 
 fn nonnegative_u64(value: Option<&Value>) -> u64 {
@@ -444,9 +459,8 @@ mod tests {
         let root = temporary_root();
         fs::write(root.join("file.bin"), b"0123456789").expect("write");
         let host = WebProtocolHost::new(&root, false).expect("host");
-        let reply = host.handle_text(
-            r#"{"t":"download","id":9,"path":"/file.bin","offset":2,"length":4}"#,
-        );
+        let reply =
+            host.handle_text(r#"{"t":"download","id":9,"path":"/file.bin","offset":2,"length":4}"#);
         assert!(reply.len() >= 3);
         let WebOutbound::Text(start) = &reply[0] else {
             panic!("start");

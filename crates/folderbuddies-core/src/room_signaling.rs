@@ -89,7 +89,8 @@ pub fn room_websocket_url(
     role: RoomRole,
 ) -> Result<String, String> {
     validate_lookup_id(lookup_id)?;
-    let mut url = Url::parse(base_url).map_err(|error| format!("invalid signaling URL: {error}"))?;
+    let mut url =
+        Url::parse(base_url).map_err(|error| format!("invalid signaling URL: {error}"))?;
     if url.scheme() != "https" {
         return Err("signaling URL must use https://".to_owned());
     }
@@ -142,7 +143,8 @@ pub fn decode_plain_payload(ciphertext: &str) -> Result<Value, String> {
     let decoded = URL_SAFE_NO_PAD
         .decode(encoded)
         .map_err(|error| format!("invalid signaling Base64URL payload: {error}"))?;
-    serde_json::from_slice(&decoded).map_err(|error| format!("invalid signaling JSON payload: {error}"))
+    serde_json::from_slice(&decoded)
+        .map_err(|error| format!("invalid signaling JSON payload: {error}"))
 }
 
 pub fn parse_room_event(text: &str) -> Result<RoomEvent, String> {
@@ -234,12 +236,8 @@ mod tests {
 
     #[test]
     fn websocket_url_matches_native_compat_contract() {
-        let url = room_websocket_url(
-            "https://signal.example/api/",
-            "A+B?",
-            RoomRole::Client,
-        )
-        .expect("URL");
+        let url = room_websocket_url("https://signal.example/api/", "A+B?", RoomRole::Client)
+            .expect("URL");
         assert_eq!(
             url,
             "wss://signal.example/api/room?code=A%2BB%3F&role=client&web=1&compat=native"

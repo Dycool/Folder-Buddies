@@ -215,7 +215,10 @@ impl Server {
 
     #[must_use]
     pub fn client_count(&self) -> usize {
-        self.inner.sessions.lock().map_or(0, |sessions| sessions.len())
+        self.inner
+            .sessions
+            .lock()
+            .map_or(0, |sessions| sessions.len())
     }
 
     #[must_use]
@@ -308,8 +311,11 @@ fn bind_listener(port: u16) -> io::Result<TcpListener> {
 }
 
 fn bind_one(port: u16) -> io::Result<TcpListener> {
-    match bind_socket(Domain::IPV6, SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port), true)
-    {
+    match bind_socket(
+        Domain::IPV6,
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port),
+        true,
+    ) {
         Ok(listener) => Ok(listener),
         Err(ipv6_error) => bind_socket(
             Domain::IPV4,
@@ -423,7 +429,9 @@ fn handle_stream(inner: Arc<ServerInner>, connection_id: u64, mut stream: TcpStr
             Err(error)
                 if matches!(
                     error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
                 ) =>
             {
                 if error.kind() == io::ErrorKind::Interrupted {
@@ -599,17 +607,13 @@ fn dispatch_inner(inner: &ServerInner, op: u16, payload: &[u8]) -> Result<Dispat
             let absolute = resolve_path(&inner.root, &path)?;
             let file = open_portable(&absolute, flags, mode).map_err(io_status)?;
             let handle = inner.next_handle_id.fetch_add(1, Ordering::Relaxed);
-            inner
-                .handles
-                .lock()
-                .map_err(|_| EIO)?
-                .insert(
-                    handle,
-                    OpenHandle {
-                        file: Arc::new(file),
-                        path: path.clone(),
-                    },
-                );
+            inner.handles.lock().map_err(|_| EIO)?.insert(
+                handle,
+                OpenHandle {
+                    file: Arc::new(file),
+                    path: path.clone(),
+                },
+            );
             let mut writer = Writer::new();
             writer.u64(handle);
             let mut result = DispatchResult::ok(writer.into_inner());
@@ -640,9 +644,7 @@ fn dispatch_inner(inner: &ServerInner, op: u16, payload: &[u8]) -> Result<Dispat
             }
             let open = get_handle(inner, handle)?;
             let written = write_at(&open.file, data, offset).map_err(io_status)?;
-            inner
-                .bytes_in
-                .fetch_add(written as u64, Ordering::Relaxed);
+            inner.bytes_in.fetch_add(written as u64, Ordering::Relaxed);
             let written = u32::try_from(written).map_err(|_| EIO)?;
             let mut writer = Writer::new();
             writer.u32(written);
@@ -693,9 +695,7 @@ fn dispatch_inner(inner: &ServerInner, op: u16, payload: &[u8]) -> Result<Dispat
             let absolute_from = resolve_path(&inner.root, &from)?;
             let absolute_to = resolve_path(&inner.root, &to)?;
             fs::rename(absolute_from, absolute_to).map_err(io_status)?;
-            Ok(DispatchResult::empty()
-                .invalidate(from)
-                .invalidate(to))
+            Ok(DispatchResult::empty().invalidate(from).invalidate(to))
         }
         value if value == Op::Truncate.code() => {
             require_writes(inner)?;

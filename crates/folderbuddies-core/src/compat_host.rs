@@ -20,9 +20,7 @@ use tokio::{
 };
 use webrtc::{
     api::{
-        APIBuilder,
-        interceptor_registry::register_default_interceptors,
-        media_engine::MediaEngine,
+        APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
     },
     data_channel::{RTCDataChannel, data_channel_message::DataChannelMessage},
     ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
@@ -177,7 +175,9 @@ fn wait_host_ready(socket: &RoomSocket) -> Result<(), String> {
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err("Cloudflare WebRTC compatibility signaling did not become ready".to_owned());
+            return Err(
+                "Cloudflare WebRTC compatibility signaling did not become ready".to_owned(),
+            );
         }
         match socket.recv_timeout(remaining.min(Duration::from_millis(250))) {
             Ok(RoomEvent::Ready {
@@ -579,7 +579,8 @@ async fn receive_native_description(
         if remaining.is_zero() {
             return Err("native QUIC remote description timed out".to_owned());
         }
-        match tokio::time::timeout(remaining.min(Duration::from_millis(250)), commands.recv()).await {
+        match tokio::time::timeout(remaining.min(Duration::from_millis(250)), commands.recv()).await
+        {
             Ok(Some(NativeCommand::Description(description))) => return Ok(description),
             Ok(Some(NativeCommand::Stop)) | Ok(None) => {
                 return Err("native QUIC peer disconnected".to_owned());

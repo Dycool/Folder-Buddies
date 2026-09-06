@@ -1,6 +1,5 @@
 use std::{
-    fmt,
-    io,
+    fmt, io,
     net::{IpAddr, Shutdown, SocketAddr, TcpStream},
     sync::{
         Mutex,
@@ -10,9 +9,7 @@ use std::{
 };
 
 use crate::{
-    crypto::{
-        SecureReceiver, SecureSender, auth_proof, derive_session_keys, random_array, sha256,
-    },
+    crypto::{SecureReceiver, SecureSender, auth_proof, derive_session_keys, random_array, sha256},
     protocol::{
         DEFAULT_CONNECTIONS, MAX_IO, Op, PROTOCOL_VERSION, Reader, WireAttr, WireStatFs, Writer,
         read_plain_message, write_plain_message,
@@ -244,7 +241,9 @@ impl Client {
         let mut reader = Reader::new(&response);
         let count = reader.u32().map_err(RemoteError::io)?;
         if count > MAX_DIRECTORY_ENTRIES {
-            return Err(RemoteError::protocol("directory response is unreasonably large"));
+            return Err(RemoteError::protocol(
+                "directory response is unreasonably large",
+            ));
         }
         let mut entries = Vec::with_capacity(count as usize);
         for _ in 0..count {

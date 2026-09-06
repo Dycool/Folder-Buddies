@@ -1,4 +1,8 @@
-use std::{path::{Path, PathBuf}, thread, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
 
 use windows::{
     Win32::{
@@ -193,9 +197,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn drive_icon_key(letter: char) -> String {
-    format!(
-        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}"
-    )
+    format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}")
 }
 
 fn set_drive_label(drive: &str, label: &str) {

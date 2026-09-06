@@ -235,7 +235,8 @@ async fn receive_description(
         if remaining.is_zero() {
             return Err("native QUIC remote description timed out".to_owned());
         }
-        match tokio::time::timeout(remaining.min(Duration::from_millis(250)), commands.recv()).await {
+        match tokio::time::timeout(remaining.min(Duration::from_millis(250)), commands.recv()).await
+        {
             Ok(Some(PeerCommand::Description(description))) => return Ok(description),
             Ok(Some(PeerCommand::Stop)) | Ok(None) => {
                 return Err("native QUIC peer disconnected".to_owned());

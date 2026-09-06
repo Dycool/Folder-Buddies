@@ -81,7 +81,11 @@ impl NativeQuicEndpoint {
             include_loopback: true,
             ..AgentConfig::default()
         };
-        let agent = Arc::new(Agent::new(config).await.map_err(|error| error.to_string())?);
+        let agent = Arc::new(
+            Agent::new(config)
+                .await
+                .map_err(|error| error.to_string())?,
+        );
 
         let (gathered_tx, gathered_rx) = oneshot::channel::<()>();
         let gathered_tx = Arc::new(Mutex::new(Some(gathered_tx)));
@@ -96,7 +100,9 @@ impl NativeQuicEndpoint {
                 }
             })
         }));
-        agent.gather_candidates().map_err(|error| error.to_string())?;
+        agent
+            .gather_candidates()
+            .map_err(|error| error.to_string())?;
         tokio::time::timeout(ICE_GATHER_TIMEOUT, gathered_rx)
             .await
             .map_err(|_| "ICE candidate gathering timed out".to_owned())?
@@ -199,7 +205,10 @@ impl NativeQuicEndpoint {
             .connection
             .as_ref()
             .ok_or_else(|| "native QUIC endpoint is not connected".to_owned())?;
-        connection.open_bi().await.map_err(|error| error.to_string())
+        connection
+            .open_bi()
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub async fn open_streams(
@@ -218,7 +227,10 @@ impl NativeQuicEndpoint {
             .connection
             .as_ref()
             .ok_or_else(|| "native QUIC endpoint is not connected".to_owned())?;
-        connection.accept_bi().await.map_err(|error| error.to_string())
+        connection
+            .accept_bi()
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub async fn close(&mut self) {
@@ -435,12 +447,10 @@ fn transport_config() -> Result<Arc<TransportConfig>, String> {
         VarInt::from_u64(MAX_BIDI_STREAMS).map_err(|error| error.to_string())?,
     );
     transport.max_concurrent_uni_streams(VarInt::from_u32(0));
-    transport.stream_receive_window(
-        VarInt::from_u64(STREAM_WINDOW).map_err(|error| error.to_string())?,
-    );
-    transport.receive_window(
-        VarInt::from_u64(CONNECTION_WINDOW).map_err(|error| error.to_string())?,
-    );
+    transport
+        .stream_receive_window(VarInt::from_u64(STREAM_WINDOW).map_err(|error| error.to_string())?);
+    transport
+        .receive_window(VarInt::from_u64(CONNECTION_WINDOW).map_err(|error| error.to_string())?);
     transport.max_idle_timeout(Some(
         QUIC_IDLE_TIMEOUT
             .try_into()

@@ -11,7 +11,10 @@ pub fn looks_like_web_compat_code(text: &str) -> bool {
 
 #[must_use]
 pub fn extract_web_room(text: &str) -> Option<String> {
-    let clean: String = text.chars().filter(|character| !character.is_whitespace()).collect();
+    let clean: String = text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
     if looks_like_room_code(&clean) {
         return Some(clean);
     }

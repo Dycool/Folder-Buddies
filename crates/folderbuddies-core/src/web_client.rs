@@ -13,9 +13,7 @@ use serde_json::{Value, json};
 use tokio::runtime::{Builder, Runtime};
 use webrtc::{
     api::{
-        APIBuilder,
-        interceptor_registry::register_default_interceptors,
-        media_engine::MediaEngine,
+        APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
     },
     data_channel::{RTCDataChannel, data_channel_message::DataChannelMessage},
     ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
@@ -176,17 +174,11 @@ impl WebRtcRemoteClient {
 
     #[must_use]
     pub fn can_write(&self) -> bool {
-        self.shared
-            .state
-            .lock()
-            .is_ok_and(|state| state.can_write)
+        self.shared.state.lock().is_ok_and(|state| state.can_write)
     }
 
     fn can_range(&self) -> bool {
-        self.shared
-            .state
-            .lock()
-            .is_ok_and(|state| state.can_range)
+        self.shared.state.lock().is_ok_and(|state| state.can_range)
     }
 
     fn wait_open(&self, timeout: Duration) -> bool {
@@ -212,11 +204,7 @@ impl WebRtcRemoteClient {
             .ok_or_else(|| RemoteFsError::new(EIO, "WebRTC data channel is closed"))
     }
 
-    fn send_json_wait(
-        &self,
-        mut value: Value,
-        timeout: Duration,
-    ) -> Result<Value, RemoteFsError> {
+    fn send_json_wait(&self, mut value: Value, timeout: Duration) -> Result<Value, RemoteFsError> {
         let id = value
             .get("id")
             .and_then(Value::as_u64)
@@ -294,12 +282,7 @@ impl WebRtcRemoteClient {
         self.send_download(json!({"t": "download", "path": path}))
     }
 
-    fn fetch_range(
-        &self,
-        path: &str,
-        offset: u64,
-        length: u32,
-    ) -> Result<Vec<u8>, RemoteFsError> {
+    fn fetch_range(&self, path: &str, offset: u64, length: u32) -> Result<Vec<u8>, RemoteFsError> {
         self.send_download(json!({
             "t": "download",
             "path": path,
@@ -327,10 +310,7 @@ impl WebRtcRemoteClient {
                 .block_on(channel.send(&Bytes::from(frame)))
                 .map_err(|error| RemoteFsError::new(EIO, error.to_string()))?;
         }
-        let done = self.send_json_wait(
-            json!({"t": "uploadEnd", "id": id}),
-            UPLOAD_END_TIMEOUT,
-        )?;
+        let done = self.send_json_wait(json!({"t": "uploadEnd", "id": id}), UPLOAD_END_TIMEOUT)?;
         require_web_ok(&done)
     }
 
@@ -387,9 +367,9 @@ impl WebRtcRemoteClient {
                     .get("entries")
                     .and_then(Value::as_array)
                     .and_then(|entries| {
-                        entries.iter().find(|entry| {
-                            entry.get("name").and_then(Value::as_str) == Some(wanted)
-                        })
+                        entries
+                            .iter()
+                            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(wanted))
                     })
                     .ok_or_else(|| RemoteFsError::new(ENOENT, "not found"))?;
                 write_entry_attr(&mut writer, entry);
@@ -397,10 +377,8 @@ impl WebRtcRemoteClient {
             }
             Op::ReadDir => {
                 let path = reader.string().map_err(invalid_request)?;
-                let reply = self.send_json_wait(
-                    json!({"t": "list", "path": path}),
-                    REQUEST_TIMEOUT,
-                )?;
+                let reply =
+                    self.send_json_wait(json!({"t": "list", "path": path}), REQUEST_TIMEOUT)?;
                 require_web_ok(&reply)?;
                 let entries = reply
                     .get("entries")
@@ -410,7 +388,10 @@ impl WebRtcRemoteClient {
                 let mut writer = Writer::new();
                 writer.u32(u32::try_from(entries.len()).unwrap_or(u32::MAX));
                 for entry in entries {
-                    let name = entry.get("name").and_then(Value::as_str).unwrap_or_default();
+                    let name = entry
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     writer.string(name).map_err(invalid_request)?;
                     write_entry_attr(&mut writer, &entry);
                 }
@@ -557,20 +538,16 @@ impl WebRtcRemoteClient {
             }
             Op::Unlink | Op::Rmdir => {
                 let path = reader.string().map_err(invalid_request)?;
-                let reply = self.send_json_wait(
-                    json!({"t": "delete", "path": path}),
-                    REQUEST_TIMEOUT,
-                )?;
+                let reply =
+                    self.send_json_wait(json!({"t": "delete", "path": path}), REQUEST_TIMEOUT)?;
                 require_web_ok(&reply)?;
                 Ok(Vec::new())
             }
             Op::Mkdir => {
                 let path = reader.string().map_err(invalid_request)?;
                 let _mode = reader.u32().map_err(invalid_request)?;
-                let reply = self.send_json_wait(
-                    json!({"t": "mkdir", "path": path}),
-                    REQUEST_TIMEOUT,
-                )?;
+                let reply =
+                    self.send_json_wait(json!({"t": "mkdir", "path": path}), REQUEST_TIMEOUT)?;
                 require_web_ok(&reply)?;
                 Ok(Vec::new())
             }

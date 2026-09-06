@@ -20,7 +20,9 @@ use folderbuddies_core::remote_fs::RemoteFs;
 use drive::{DriveMapping, clone_drive_name, wait_for_mapping_loss};
 use projfs::Projection;
 
-pub use prerequisite::{enable_projfs, ensure_projfs, projfs_available, prompt_enable_projfs_if_missing};
+pub use prerequisite::{
+    enable_projfs, ensure_projfs, projfs_available, prompt_enable_projfs_if_missing,
+};
 
 pub struct WindowsMount {
     projection: Option<Projection>,
@@ -140,7 +142,10 @@ fn default_backing_base() -> PathBuf {
 fn sanitize(name: &str) -> String {
     let mut result = String::with_capacity(name.len());
     for character in name.chars() {
-        if matches!(character, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+        if matches!(
+            character,
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+        ) {
             result.push('_');
         } else {
             result.push(character);

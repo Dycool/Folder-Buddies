@@ -8,8 +8,8 @@ use windows::{
         UI::{
             Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
             WindowsAndMessaging::{
-                IDYES, MB_DEFBUTTON1, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING,
-                MB_OK, MB_YESNO, MessageBoxW, SW_HIDE,
+                IDYES, MB_DEFBUTTON1, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK,
+                MB_YESNO, MessageBoxW, SW_HIDE,
             },
         },
     },

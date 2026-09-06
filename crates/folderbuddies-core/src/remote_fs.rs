@@ -144,7 +144,9 @@ pub trait RemoteFs: Send + Sync {
         writer.u32(amount);
         let response = self.request(Op::Read, &writer.into_inner())?;
         if response.len() > amount as usize {
-            return Err(RemoteFsError::protocol("server returned too many read bytes"));
+            return Err(RemoteFsError::protocol(
+                "server returned too many read bytes",
+            ));
         }
         Ok(response)
     }
@@ -162,7 +164,9 @@ pub trait RemoteFs: Send + Sync {
         let written = reader.u32().map_err(RemoteFsError::io)?;
         require_empty(&reader)?;
         if written as usize > data.len() {
-            return Err(RemoteFsError::protocol("server reported an oversized write"));
+            return Err(RemoteFsError::protocol(
+                "server reported an oversized write",
+            ));
         }
         Ok(written)
     }
@@ -271,7 +275,9 @@ pub trait RemoteFs: Send + Sync {
         if response.is_empty() {
             Ok(())
         } else {
-            Err(RemoteFsError::protocol("expected an empty response payload"))
+            Err(RemoteFsError::protocol(
+                "expected an empty response payload",
+            ))
         }
     }
 }

@@ -10,8 +10,8 @@ use folderbuddies_core::{
     remote_fs::{RemoteFs, RemoteFsError},
 };
 use fsk::{
-    DirectoryEntry, DirectorySink, Error, FileType, Filesystem, Metadata, MountSession,
-    ReadDirectoryResult, ROOT_INODE, SetMetadata, StatFs,
+    DirectoryEntry, DirectorySink, Error, FileType, Filesystem, Metadata, MountSession, ROOT_INODE,
+    ReadDirectoryResult, SetMetadata, StatFs,
 };
 
 const ENOENT: i32 = 2;
@@ -501,11 +501,7 @@ impl Drop for PortableMount {
 
 fn remote_error(error: RemoteFsError) -> Error {
     let status = i32::from(error.status());
-    if status > 0 {
-        Error(status)
-    } else {
-        Error::IO
-    }
+    if status > 0 { Error(status) } else { Error::IO }
 }
 
 fn file_type(attr: &WireAttr) -> FileType {

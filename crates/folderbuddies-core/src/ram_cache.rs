@@ -282,7 +282,9 @@ impl Shared {
         if let Ok(mut fetch) = self.fetch.lock() {
             fetch.inflight.remove(key);
             if let Ok(data) = &result {
-                fetch.cache.insert(key.clone(), version, data.clone(), budget);
+                fetch
+                    .cache
+                    .insert(key.clone(), version, data.clone(), budget);
             }
             fetch.cache.evict_to_budget(budget);
             self.fetch_changed.notify_all();
