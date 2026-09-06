@@ -114,27 +114,10 @@ impl HostingSession {
     }
 
     #[must_use]
-    pub(crate) fn share_name(&self) -> &str {
-        self.server.as_ref().map_or("", Server::share_name)
-    }
-
-    #[must_use]
     pub(crate) fn connect_code(&self) -> &str {
         self.ticket
             .as_ref()
             .map_or("", HostedShareTicket::connect_code)
-    }
-
-    #[must_use]
-    pub(crate) fn reach(&self) -> &str {
-        self.ticket.as_ref().map_or("", HostedShareTicket::reach)
-    }
-
-    #[must_use]
-    pub(crate) fn cloud_status(&self) -> &str {
-        self.ticket
-            .as_ref()
-            .map_or("", HostedShareTicket::cloud_status)
     }
 
     pub(crate) fn take_browser_warning(&mut self) -> Option<String> {
@@ -142,13 +125,13 @@ impl HostingSession {
     }
 
     #[must_use]
-    pub(crate) fn client_count(&self) -> usize {
+    pub(crate) fn client_counts(&self) -> (usize, usize) {
         let native = self.server.as_ref().map_or(0, Server::client_count);
         let browser = self
             .compat_host
             .as_ref()
             .map_or(0, CompatRoomHost::browser_client_count);
-        native.saturating_add(browser)
+        (native, browser)
     }
 
     #[must_use]
@@ -238,8 +221,6 @@ pub(crate) struct ConnectedSession {
     quic_client: Option<NativeQuicClient>,
     mount: Option<Mount>,
     mount_path: PathBuf,
-    folder: String,
-    allow_writes: bool,
 }
 
 // Network connections can cross threads; the platform mount stays on the UI
@@ -331,8 +312,6 @@ impl PendingConnection {
             quic_client: self.quic_client.take(),
             mount: Some(mount),
             mount_path,
-            folder: std::mem::take(&mut self.folder),
-            allow_writes: self.allow_writes,
         })
     }
 }
@@ -361,16 +340,6 @@ impl ConnectedSession {
     #[must_use]
     pub(crate) fn mount_path(&self) -> &Path {
         &self.mount_path
-    }
-
-    #[must_use]
-    pub(crate) fn folder(&self) -> &str {
-        &self.folder
-    }
-
-    #[must_use]
-    pub(crate) const fn allow_writes(&self) -> bool {
-        self.allow_writes
     }
 
     #[must_use]

@@ -59,8 +59,9 @@ struct FolderBuddiesApp {
     stopping_host: bool,
     connect_worker: Option<Background<PendingConnection>>,
     browser_warning: Option<String>,
-    status: String,
-    status_is_error: bool,
+    host_status: String,
+    connect_status: String,
+    error_dialog: Option<String>,
     last_sample: Instant,
     last_host_sent: u64,
     last_host_received: u64,
@@ -86,8 +87,9 @@ impl Default for FolderBuddiesApp {
             stopping_host: false,
             connect_worker: None,
             browser_warning: None,
-            status: "Idle".to_owned(),
-            status_is_error: false,
+            host_status: "Not hosting.".to_owned(),
+            connect_status: "Not connected.".to_owned(),
+            error_dialog: None,
             last_sample: Instant::now(),
             last_host_sent: 0,
             last_host_received: 0,
@@ -118,7 +120,7 @@ impl FolderBuddiesApp {
         self.host_worker = Some(Background::start(move || {
             HostingSession::start(folder, lan_only, allow_writes).map(Some)
         }));
-        self.set_status("Starting…");
+        self.host_status = "Starting…".to_owned();
     }
 
     fn finish_background_work(&mut self) {
@@ -129,10 +131,13 @@ impl FolderBuddiesApp {
                     self.browser_warning = session.take_browser_warning();
                     self.hosting = Some(session);
                     self.reset_rates();
-                    self.set_status("Hosting started.");
+                    self.host_status = "Hosting started.".to_owned();
                 }
-                Ok(None) => self.set_status("Not hosting."),
-                Err(error) => self.set_error(format!("Host failed: {error}")),
+                Ok(None) => self.host_status = "Not hosting.".to_owned(),
+                Err(error) => {
+                    self.host_status = "Not hosting.".to_owned();
+                    self.set_error(error);
+                }
             }
         }
         if let Some(result) = self
@@ -148,11 +153,14 @@ impl FolderBuddiesApp {
                         .strip_suffix('/')
                         .or_else(|| mount.strip_suffix('\\'))
                         .unwrap_or(&mount);
-                    self.set_status(format!("Connected - Mounted in {displayed_mount}"));
+                    self.connect_status = format!("Connected - Mounted in {displayed_mount}");
                     self.connected = Some(session);
                     self.reset_rates();
                 }
-                Err(error) => self.set_error(format!("Connect failed: {error}")),
+                Err(error) => {
+                    self.connect_status = "Not connected.".to_owned();
+                    self.set_error(error);
+                }
             }
         }
     }
@@ -170,7 +178,7 @@ impl FolderBuddiesApp {
         }
         self.browser_warning = None;
         self.reset_rates();
-        self.set_status("Stopping…");
+        self.host_status = "Stopping…".to_owned();
     }
 
     fn connect(&mut self) {
@@ -184,7 +192,7 @@ impl FolderBuddiesApp {
         }
         let code = code.to_owned();
         self.connect_worker = Some(Background::start(move || PendingConnection::start(&code)));
-        self.set_status("Connecting…");
+        self.connect_status = "Connecting…".to_owned();
     }
 
     fn disconnect(&mut self) {
@@ -192,7 +200,7 @@ impl FolderBuddiesApp {
             session.disconnect();
         }
         self.reset_rates();
-        self.set_status("Not connected.");
+        self.connect_status = "Not connected.".to_owned();
     }
 
     fn refresh_runtime_state(&mut self) {
@@ -202,6 +210,7 @@ impl FolderBuddiesApp {
             .is_some_and(|session| !session.running())
         {
             self.hosting.take();
+            self.host_status = "Not hosting.".to_owned();
             self.set_error("Hosting stopped unexpectedly.");
         }
         if self
@@ -216,8 +225,9 @@ impl FolderBuddiesApp {
             self.connected.take();
             self.reset_rates();
             if ejected {
-                self.set_status("Disconnected (ejected).");
+                self.connect_status = "Disconnected (ejected).".to_owned();
             } else {
+                self.connect_status = "Not connected.".to_owned();
                 self.set_error("The remote share disconnected.");
             }
         }
@@ -261,66 +271,73 @@ impl FolderBuddiesApp {
         self.write_rate = 0.0;
     }
 
-    fn set_status(&mut self, message: impl Into<String>) {
-        self.status = message.into();
-        self.status_is_error = false;
-    }
-
     fn set_error(&mut self, message: impl Into<String>) {
-        self.status = message.into();
-        self.status_is_error = true;
+        self.error_dialog = Some(message.into());
     }
 
     fn host_ui(&mut self, ui: &mut egui::Ui) {
         let running = self.hosting.as_ref().is_some_and(HostingSession::running);
         let busy = self.host_worker.is_some();
-        ui.heading("Host a folder");
-        ui.label("Share a folder as a mounted remote disk.");
-        ui.add_space(8.0);
-
-        ui.horizontal(|ui| {
-            ui.label("Folder:");
-            let editor = egui::TextEdit::singleline(&mut self.folder_path)
+        form_label(ui, 62.0, "Folder:");
+        edit_control(
+            ui,
+            [108.0, 62.0, 348.0, 32.0],
+            !running && !busy,
+            true,
+            egui::TextEdit::singleline(&mut self.folder_path)
                 .hint_text("Choose a folder to host")
-                .desired_width(f32::INFINITY)
-                .interactive(false);
-            ui.add(editor);
-            if ui
-                .add_enabled(!running && !busy, egui::Button::new("Browse…"))
-                .clicked()
-            {
-                match choose_folder() {
-                    Ok(Some(path)) => self.folder_path = path.display().to_string(),
-                    Ok(None) => {}
-                    Err(error) => self.set_error(error),
-                }
+                .background_color(egui::Color32::from_gray(240))
+                .interactive(false),
+        );
+        if control(
+            ui,
+            [464.0, 63.0, 78.0, 30.0],
+            true,
+            secondary_button("Browse…"),
+        )
+        .clicked()
+        {
+            match choose_folder() {
+                Ok(Some(path)) => self.folder_path = path.display().to_string(),
+                Ok(None) => {}
+                Err(error) => self.set_error(error),
             }
-        });
-        ui.add_enabled_ui(!running && !busy, |ui| {
-            ui.checkbox(&mut self.lan_only, "Share on this LAN only");
-            ui.checkbox(
+        }
+        left_control(
+            ui,
+            [108.0, 105.0, 434.0, 20.0],
+            !running && !busy,
+            egui::Checkbox::new(&mut self.lan_only, "Share on this LAN only"),
+        );
+        form_label(ui, 136.0, "Access:");
+        left_control(
+            ui,
+            [108.0, 136.0, 434.0, 20.0],
+            !running && !busy,
+            egui::Checkbox::new(
                 &mut self.allow_writes,
                 "Allow clients to upload and delete files",
-            );
-        });
-        ui.add_space(8.0);
-
-        if ui
-            .add_enabled(
-                !busy,
-                egui::Button::new(if busy {
-                    if self.stopping_host {
-                        "Stopping…"
-                    } else {
-                        "Starting…"
-                    }
-                } else if running {
-                    "Stop hosting"
-                } else {
-                    "Host"
-                }),
-            )
-            .clicked()
+            ),
+        );
+        let button = if busy {
+            if self.stopping_host {
+                "Stopping…"
+            } else {
+                "Starting…"
+            }
+        } else if running {
+            "Stop hosting"
+        } else {
+            "Host"
+        };
+        let width = if button == "Host" { 64.0 } else { 110.0 };
+        if control(
+            ui,
+            [108.0, 170.0, width, 30.0],
+            !busy,
+            primary_button(button),
+        )
+        .clicked()
         {
             if running {
                 self.stop_hosting();
@@ -328,33 +345,54 @@ impl FolderBuddiesApp {
                 self.start_hosting();
             }
         }
-
-        if let Some(hosting) = self.hosting.as_ref() {
-            ui.separator();
-            ui.label(format!("Sharing: {}", hosting.share_name()));
-            ui.label(format!("Reach: {}", hosting.reach()));
-            ui.label(format!("Signaling: {}", hosting.cloud_status()));
-            ui.label(format!(
-                "Access: {}",
-                if hosting.allow_writes() {
-                    "read/write"
-                } else {
-                    "read-only"
-                }
-            ));
-            ui.label(format!("Clients: {}", hosting.client_count()));
-            ui.label(format!(
-                "Serve ↑{}  ↓{}",
-                human_rate(self.host_send_rate),
-                human_rate(self.host_receive_rate)
-            ));
-            ui.add_space(6.0);
-            ui.label("Connect code:");
-            ui.monospace(hosting.connect_code());
-            if ui.button("Copy").clicked() {
-                ui.ctx().copy_text(hosting.connect_code().to_owned());
-            }
+        form_label(ui, 212.0, "Connect code:");
+        let mut code = self
+            .hosting
+            .as_ref()
+            .map_or(String::new(), |s| s.connect_code().to_owned());
+        edit_control(
+            ui,
+            [108.0, 212.0, 368.0, 70.0],
+            true,
+            true,
+            egui::TextEdit::multiline(&mut code)
+                .interactive(false)
+                .background_color(egui::Color32::from_gray(240))
+                .font(egui::TextStyle::Monospace),
+        );
+        if control(
+            ui,
+            [484.0, 232.0, 58.0, 30.0],
+            running,
+            secondary_button("Copy"),
+        )
+        .clicked()
+        {
+            ui.ctx().copy_text(code);
         }
+        form_label(ui, 292.0, "Status:");
+        let status = self.hosting.as_ref().map_or_else(
+            || self.host_status.clone(),
+            |host| {
+                let (native, browser) = host.client_counts();
+                let mut text = format!("Hosting — {} client(s)", native.saturating_add(browser));
+                if browser > 0 {
+                    text.push_str(&format!(" ({native} native, {browser} browser)"));
+                }
+                text.push_str(if host.allow_writes() {
+                    " — read/write"
+                } else {
+                    " — read-only"
+                });
+                text
+            },
+        );
+        left_control(
+            ui,
+            [108.0, 292.0, 434.0, 22.0],
+            true,
+            egui::Label::new(status).halign(egui::Align::LEFT),
+        );
     }
 
     fn connect_ui(&mut self, ui: &mut egui::Ui) {
@@ -363,29 +401,28 @@ impl FolderBuddiesApp {
             .connected
             .as_ref()
             .is_some_and(ConnectedSession::connected);
-        ui.heading("Connect to a folder");
-        ui.label("Paste a native room code or offline blob to mount the remote folder.");
-        ui.add_space(8.0);
-        ui.add_enabled(
+        form_label(ui, 62.0, "Connect code:");
+        edit_control(
+            ui,
+            [108.0, 62.0, 434.0, 70.0],
             !connected && !busy,
-            egui::TextEdit::multiline(&mut self.connect_code)
-                .hint_text("Connect code")
-                .desired_rows(3)
-                .desired_width(f32::INFINITY),
+            false,
+            egui::TextEdit::multiline(&mut self.connect_code).font(egui::TextStyle::Monospace),
         );
-        ui.add_space(8.0);
-        if ui
-            .add_enabled(
-                !busy,
-                egui::Button::new(if busy {
-                    "Connecting…"
-                } else if connected {
-                    "Disconnect"
-                } else {
-                    "Connect"
-                }),
-            )
-            .clicked()
+        let button = if busy {
+            "Connecting…"
+        } else if connected {
+            "Disconnect"
+        } else {
+            "Connect"
+        };
+        if control(
+            ui,
+            [108.0, 144.0, 100.0, 30.0],
+            !busy,
+            primary_button(button),
+        )
+        .clicked()
         {
             if connected {
                 self.disconnect();
@@ -393,30 +430,145 @@ impl FolderBuddiesApp {
                 self.connect();
             }
         }
+        if control(
+            ui,
+            [108.0, 186.0, 164.0, 30.0],
+            connected,
+            secondary_button("Open mounted folder"),
+        )
+        .clicked()
+            && let Some(session) = self.connected.as_ref()
+        {
+            let _ = open_path(session.mount_path());
+        }
+        form_label(ui, 228.0, "Status:");
+        left_control(
+            ui,
+            [108.0, 228.0, 434.0, 22.0],
+            true,
+            egui::Label::new(&self.connect_status).halign(egui::Align::LEFT),
+        );
+    }
 
-        if let Some(session) = self.connected.as_ref() {
-            ui.separator();
-            ui.label(format!("Folder: {}", session.folder()));
-            ui.label(format!("Mounted at: {}", session.mount_path().display()));
-            ui.label(format!(
-                "Access: {}",
-                if session.allow_writes() {
-                    "read/write"
-                } else {
-                    "read-only"
-                }
+    fn stats(&self) -> String {
+        let mut parts = Vec::new();
+        if self.hosting.as_ref().is_some_and(HostingSession::running) {
+            parts.push(format!(
+                "Serve ↑{} ↓{}",
+                human_rate(self.host_send_rate),
+                human_rate(self.host_receive_rate)
             ));
-            ui.label(format!(
-                "Mount ↓{}  ↑{}",
+        }
+        if self.connected.is_some() {
+            parts.push(format!(
+                "Mount ↓{} ↑{}",
                 human_rate(self.read_rate),
                 human_rate(self.write_rate)
             ));
-            let mount_path = session.mount_path().to_owned();
-            if ui.button("Open mounted folder").clicked() {
-                let _ = open_path(&mount_path);
-            }
+        }
+        if parts.is_empty() {
+            "Idle".to_owned()
+        } else {
+            parts.join("   |   ")
         }
     }
+}
+
+fn control(
+    ui: &mut egui::Ui,
+    bounds: [f32; 4],
+    enabled: bool,
+    widget: impl egui::Widget,
+) -> egui::Response {
+    let [x, y, width, height] = bounds;
+    let rect = egui::Rect::from_min_size(
+        ui.max_rect().min + egui::vec2(x, y),
+        egui::vec2(width, height),
+    );
+    ui.add_enabled_ui(enabled, |ui| ui.put(rect, widget)).inner
+}
+
+fn form_label(ui: &mut egui::Ui, y: f32, text: &str) {
+    let rect = egui::Rect::from_min_size(
+        ui.max_rect().min + egui::vec2(18.0, y),
+        egui::vec2(78.0, 22.0),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        |ui| {
+            ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(110, 110, 115)));
+        },
+    );
+}
+
+fn left_control(
+    ui: &mut egui::Ui,
+    bounds: [f32; 4],
+    enabled: bool,
+    widget: impl egui::Widget,
+) -> egui::Response {
+    let [x, y, width, height] = bounds;
+    let rect = egui::Rect::from_min_size(
+        ui.max_rect().min + egui::vec2(x, y),
+        egui::vec2(width, height),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| ui.add_enabled(enabled, widget),
+    )
+    .inner
+}
+
+fn primary_button(text: &str) -> egui::Button<'_> {
+    egui::Button::new(egui::RichText::new(text).color(egui::Color32::WHITE))
+        .corner_radius(5)
+        .fill(egui::Color32::from_rgb(10, 100, 214))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(10, 88, 189)))
+}
+
+fn secondary_button(text: &str) -> egui::Button<'_> {
+    egui::Button::new(text)
+        .corner_radius(5)
+        .fill(egui::Color32::from_gray(245))
+        .stroke(egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgb(194, 194, 197),
+        ))
+}
+
+fn edit_control(
+    ui: &mut egui::Ui,
+    bounds: [f32; 4],
+    enabled: bool,
+    read_only: bool,
+    edit: egui::TextEdit<'_>,
+) -> egui::Response {
+    let [x, y, width, height] = bounds;
+    let rect = egui::Rect::from_min_size(
+        ui.max_rect().min + egui::vec2(x, y),
+        egui::vec2(width, height),
+    );
+    ui.painter().rect(
+        rect,
+        5,
+        if read_only {
+            egui::Color32::from_gray(240)
+        } else {
+            egui::Color32::WHITE
+        },
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(194, 194, 197)),
+        egui::StrokeKind::Inside,
+    );
+    control(
+        ui,
+        [x + 8.0, y + 6.0, width - 16.0, height - 12.0],
+        enabled,
+        edit.frame(egui::Frame::NONE),
+    )
 }
 
 impl eframe::App for FolderBuddiesApp {
@@ -426,31 +578,85 @@ impl eframe::App for FolderBuddiesApp {
         self.sample_rates();
         ui.ctx().request_repaint_after(REPAINT_INTERVAL);
 
-        ui.add_space(12.0);
-        ui.vertical_centered(|ui| {
-            ui.heading("Folder Buddies");
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::Host, "Host");
-            ui.selectable_value(&mut self.tab, Tab::Connect, "Connect");
-        });
-        ui.separator();
-        ui.add_space(8.0);
-
+        let origin = ui.max_rect().min;
+        let width = ui.max_rect().width();
+        let height = ui.max_rect().height();
+        let painter = ui.painter();
+        painter.rect_filled(ui.max_rect(), 0.0, egui::Color32::WHITE);
+        painter.rect_filled(
+            egui::Rect::from_min_size(origin, egui::vec2(width, 44.0)),
+            0.0,
+            egui::Color32::from_gray(245),
+        );
+        painter.hline(
+            origin.x..=origin.x + width,
+            origin.y + 44.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(212, 212, 215)),
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_size(
+                origin + egui::vec2(0.0, height - 22.0),
+                egui::vec2(width, 22.0),
+            ),
+            0.0,
+            egui::Color32::from_gray(238),
+        );
+        for (tab, label, x) in [(Tab::Host, "Host", 162.0), (Tab::Connect, "Connect", 280.0)] {
+            let fill = if self.tab == tab {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_gray(231)
+            };
+            if control(
+                ui,
+                [x, 12.0, 118.0, 32.0],
+                true,
+                egui::Button::new(label)
+                    .fill(fill)
+                    .corner_radius(egui::CornerRadius {
+                        nw: 7,
+                        ne: 7,
+                        sw: 0,
+                        se: 0,
+                    })
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgb(212, 212, 215),
+                    )),
+            )
+            .clicked()
+            {
+                self.tab = tab;
+            }
+        }
         match self.tab {
             Tab::Host => self.host_ui(ui),
             Tab::Connect => self.connect_ui(ui),
         }
-
-        ui.add_space(12.0);
-        ui.separator();
-        let color = if self.status_is_error {
-            egui::Color32::from_rgb(180, 40, 40)
-        } else {
-            egui::Color32::from_rgb(70, 90, 70)
-        };
-        ui.colored_label(color, &self.status);
+        let stats_rect = egui::Rect::from_min_size(
+            origin + egui::vec2(6.0, height - 22.0),
+            egui::vec2(width - 12.0, 22.0),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(stats_rect)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                ui.label(
+                    egui::RichText::new(self.stats()).color(egui::Color32::from_rgb(110, 110, 115)),
+                );
+            },
+        );
+        if let Some(message) = self.error_dialog.clone() {
+            let modal = egui::Modal::new(egui::Id::new("operation_error")).show(ui.ctx(), |ui| {
+                ui.heading("Folder Buddies");
+                ui.label(message);
+                ui.button("OK").clicked()
+            });
+            if modal.inner || modal.should_close() {
+                self.error_dialog = None;
+            }
+        }
 
         if let Some(warning) = self.browser_warning.clone() {
             let mut open = true;
@@ -478,7 +684,12 @@ impl eframe::App for FolderBuddiesApp {
 pub(crate) fn run_gui() -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([560.0, 430.0])
+            .with_inner_size([560.0, 354.0])
+            .with_maximize_button(false)
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../../../icon.png"))
+                    .map_err(|error| error.to_string())?,
+            )
             .with_resizable(false),
         centered: true,
         ..Default::default()
@@ -486,7 +697,37 @@ pub(crate) fn run_gui() -> Result<(), String> {
     eframe::run_native(
         "Folder Buddies",
         options,
-        Box::new(|_creation_context| Ok(Box::new(FolderBuddiesApp::default()))),
+        Box::new(|creation_context| {
+            let ctx = &creation_context.egui_ctx;
+            ctx.set_visuals(egui::Visuals::light());
+            let mut style = (*ctx.style_of(egui::Theme::Light)).clone();
+            style.override_font_id = Some(egui::FontId::proportional(12.0));
+            style.spacing.button_padding = egui::vec2(10.0, 6.0);
+            style.spacing.icon_width = 14.0;
+            style.spacing.icon_spacing = 7.0;
+            style.visuals.override_text_color = Some(egui::Color32::from_rgb(29, 29, 31));
+            style.visuals.widgets.inactive.bg_fill = egui::Color32::WHITE;
+            style.visuals.widgets.inactive.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(156, 163, 175));
+            style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(3);
+            ctx.set_style_of(egui::Theme::Light, style);
+            ctx.set_theme(egui::Theme::Light);
+            #[cfg(windows)]
+            if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/segoeui.ttf") {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert(
+                    "system".to_owned(),
+                    egui::FontData::from_owned(bytes).into(),
+                );
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .insert(0, "system".to_owned());
+                ctx.set_fonts(fonts);
+            }
+            Ok(Box::new(FolderBuddiesApp::default()))
+        }),
     )
     .map_err(|error| format!("failed to launch GUI: {error}"))
 }
@@ -521,7 +762,7 @@ fn path_from_stdout(stdout: &[u8]) -> Result<Option<PathBuf>, String> {
 fn choose_folder() -> Result<Option<PathBuf>, String> {
     #[cfg(target_os = "windows")]
     {
-        let script = "$shell = New-Object -ComObject Shell.Application; $folder = $shell.BrowseForFolder(0, 'Choose folder to host', 0, 0); if ($null -ne $folder) { $folder.Self.Path }";
+        let script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $shell = New-Object -ComObject Shell.Application; $folder = $shell.BrowseForFolder(0, 'Choose folder to host', 0, 0); if ($null -ne $folder) { $folder.Self.Path }";
         let output = Command::new("powershell.exe")
             .args(["-NoProfile", "-Command", script])
             .output()
@@ -614,12 +855,44 @@ fn open_path(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Background;
+    use super::{Background, FolderBuddiesApp};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
         mpsc,
     };
+
+    #[test]
+    fn empty_connect_error_does_not_replace_host_status() {
+        let mut app = FolderBuddiesApp {
+            host_status: "Starting…".to_owned(),
+            ..Default::default()
+        };
+        app.connect();
+        assert_eq!(app.host_status, "Starting…");
+        assert_eq!(app.connect_status, "Not connected.");
+        assert_eq!(
+            app.error_dialog.as_deref(),
+            Some("Paste a connect code first.")
+        );
+        assert!(app.connect_worker.is_none());
+    }
+
+    #[test]
+    fn empty_host_error_does_not_replace_connection_status() {
+        let mut app = FolderBuddiesApp {
+            connect_status: "Connecting…".to_owned(),
+            ..Default::default()
+        };
+        app.start_hosting();
+        assert_eq!(app.connect_status, "Connecting…");
+        assert_eq!(app.host_status, "Not hosting.");
+        assert_eq!(
+            app.error_dialog.as_deref(),
+            Some("Choose a folder to host.")
+        );
+        assert!(app.host_worker.is_none());
+    }
 
     #[test]
     fn pending_network_work_does_not_block_ui_polling() {
